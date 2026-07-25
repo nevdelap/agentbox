@@ -1,0 +1,5 @@
+# Only the Dockerfile, entrypoint, and shell config are needed in the build context.
+*
+!Dockerfile
+!agentbox-entrypoint.sh
+!.bashrc

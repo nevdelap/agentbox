@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+#
+# ab — Claude Code / Codex in a long-lived, **Sysbox-confined** agentbox container.
+#
+# agentbox is launched with `docker run --runtime=sysbox-runc`: Sysbox isolates the
+# container so the inner Docker daemon (rootful, in-container) cannot reach the host —
+# nested Docker with no --privileged and no host docker socket.
+#
+#   ab start                 create + start the container for the current project
+#   ab stop                  stop it (kept on disk; /tmp build state preserved)
+#   ab destroy               stop + remove it (destroyed; /tmp build state lost)
+#   ab status                show whether the container is running
+#   ab logs                  tail the container / inner-dockerd logs
+#   ab claude [args...]      docker exec claude as the agentbox user (auto-starts if not started)
+#   ab codex  [args...]      docker exec codex
+#   ab bash                  docker exec bash
+#   ab exec <cmd...>         docker exec an arbitrary command (as agentbox)
+#   ab rebuild               rebuild the image and recreate the running container
+#
+# Each project path gets its own container (and its own inner-docker data root), so
+# per-container state — notably CARGO_TARGET_DIR=/tmp/target — persists across ab
+# invocations until `ab destroy`.
+#
+# Host prerequisite: Sysbox must be installed + registered as a docker runtime
+# (see README.md). `ab start` checks for it and bails with guidance if missing.
+#
+set -euo pipefail
+
+IMAGE_NAME="agentbox"
+
+# Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
+# real location — works whether `ab` is run in place or reached via a symlink on PATH
+# (e.g. ~/.bin/ab -> .../agentbox/bin/ab). Override with $AGENTBOX_CONTEXT if needed.
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+CONTEXT="${AGENTBOX_CONTEXT:-$(cd "$(dirname "$_self")/.." && pwd)}"
+
+PROJECT_DIR="${AGENTBOX_DIR:-$PWD}"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)" || {
+  echo "ab: project dir not found: ${AGENTBOX_DIR:-$PWD}" >&2
+  exit 1
+}
+
+# Names unique to the FULL project path (not just the dir name): the same basename in
+# two parents (~/a/foo, ~/b/foo) must get distinct containers + volumes. We fold the
+# path into a readable slug (so `docker ps` shows which project) and append a long
+# sha256 substring so even truncated/deep paths never collide.
+slug="$(printf '%s' "$PROJECT_DIR" | tr -cs '[:alnum:]' '-' | sed 's/^-\+//')"
+slug="${slug:0:80}"
+hash="$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-16)"
+cname="agentbox-${slug}-${hash}"       # one container per project path
+dvol="agentbox-docker-${slug}-${hash}" # ...and its own inner-docker data root
+uid="$(id -u)"
+
+mounts=(
+  -v "$PROJECT_DIR:/workspace"
+  -v "$HOME/.claude:/home/agentbox/.claude"
+  -v "$HOME/.codex:/home/agentbox/.codex"
+  -v "$dvol:/var/lib/docker"
+)
+# Optional host files/dirs mirrored in only when present (existence-guarded).
+# ~/.claude.json carries the oauthAccount/userID Claude Code checks at startup to
+# consider itself logged in — without it the container has an empty stub and prompts
+# for login, even though ~/.claude/.credentials.json (the token) is mounted above.
+[ -f "$HOME/.claude.json" ] && mounts+=(-v "$HOME/.claude.json:/home/agentbox/.claude.json")
+[ -f "$HOME/.gitconfig" ] && mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
+# Optional + existence-guarded. On hosts that manage ~/.bin via home-manager, its entries
+# are /nix/store copies (resolved inside the container by the /nix/store ro mount above) or
+# writable symlinks into this source tree, so the tree is mounted to keep it present inside
+# the container. The guard skips it entirely on hosts without ~/.config/home-manager.
+[ -d "$HOME/.config/home-manager" ] && mounts+=(-v "$HOME/.config/home-manager:/home/agentbox/.config/home-manager")
+[ -d "$HOME/.bin" ] && mounts+=(-v "$HOME/.bin:/home/agentbox/.bin")
+[ -e /etc/localtime ] && mounts+=(-v "/etc/localtime:/etc/localtime:ro")
+# NixOS only: expose the nix store read-only so /nix/store shebangs & paths in the
+# workspace resolve inside the container.
+[ -d /nix/store ] && mounts+=(-v "/nix/store:/nix/store:ro")
+if [ "${AGENTBOX_SSH:-0}" = "1" ] && [ -d "$HOME/.ssh" ]; then
+  mounts+=(-v "$HOME/.ssh:/home/agentbox/.ssh:ro")
+fi
+
+# Sysbox provides the confinement — the outer container needs NO capabilities, no
+# seccomp relaxation, no devices. The single requirement is the `sysbox-runc` runtime
+# (registered on the host). The inner dockerd runs rootful-in-container, isolated by
+# Sysbox; tooling runs as the unprivileged agentbox user via `docker exec --user`.
+run_args=(
+  --runtime=sysbox-runc
+  --hostname "$(hostname)"   # in-container hostname matches the real host
+  -w /workspace
+)
+
+# Fail fast with guidance if the host hasn't got Sysbox registered.
+require_sysbox() {
+  if ! docker info 2>/dev/null | grep -q 'sysbox-runc'; then
+    cat >&2 <<EOF
+ab: host Docker has no 'sysbox-runc' runtime registered.
+agentbox needs Sysbox installed on the host (a prerequisite, like Docker itself):
+  - Ubuntu:  sudo bash "$CONTEXT/install-sysbox-ubuntu.sh"
+  - NixOS:   copy "$CONTEXT/sysbox.nix" to /etc/nixos, import it, then
+             sudo nixos-rebuild switch
+See "$CONTEXT/README.md" (Host prerequisite).
+Then retry.
+EOF
+    exit 1
+  fi
+}
+
+build_image() {
+  local force="${1:-}" files=() f digest tag log
+  [ -f "$CONTEXT/Dockerfile" ] || {
+    echo "ab: Dockerfile not found at $CONTEXT/Dockerfile" >&2
+    exit 1
+  }
+  for f in Dockerfile agentbox-entrypoint.sh .bashrc .dockerignore; do
+    [ -f "$CONTEXT/$f" ] && files+=("$CONTEXT/$f")
+  done
+  digest="$(cat "${files[@]}" | sha256sum | cut -c1-12)"
+  tag="$IMAGE_NAME:${uid}-${digest}"
+  if [ "$force" = "force" ] || ! docker image inspect "$tag" >/dev/null 2>&1; then
+    echo "ab: building $tag ..." >&2
+    # Capture the full build log and print it ONLY on failure (silent on success).
+    # --progress=plain keeps the captured output linear/readable (no progress-bar
+    # redraws) for when it is shown. Capturing into $log (not raw stdout) also keeps the
+    # image ID out of the tag this function returns — the cause of the earlier
+    # --quiet "invalid reference format" bug.
+    if ! log="$(docker build --progress=plain \
+        --build-arg "HOST_UID=$uid" --build-arg "HOST_GID=$(id -g)" \
+        -t "$tag" -t "$IMAGE_NAME:latest" "$CONTEXT" 2>&1)"; then
+      printf '%s\n' "$log" >&2
+      echo "ab: image build failed (see above)" >&2
+      exit 1
+    fi
+  fi
+  printf '%s' "$tag"
+}
+
+is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null || true)" = "true" ]; }
+exists() { [ -n "$(docker inspect -f '{{.Id}}' "$cname" 2>/dev/null || true)" ]; }
+
+wait_ready() {
+  for _ in $(seq 1 60); do
+    docker exec "$cname" docker info >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  echo "ab: WARNING — inner docker not ready yet; try 'ab logs'" >&2
+}
+
+cmd_start() {
+  require_sysbox
+  # Create the bind-mount sources as the invoking host user BEFORE `docker run`: Docker
+  # creates a missing bind-mount dir owned by root, which the non-root agentbox user then
+  # can't write to (claude/codex auth & sessions would fail). Creating them here prevents it.
+  mkdir -p "$HOME/.claude" "$HOME/.codex"
+  local tag
+  tag="$(build_image)"
+  if is_running; then
+    echo "ab: $cname is already running."
+    echo "ab: to recreate it (new settings/mounts), run: ab destroy && ab start"
+    return 0
+  fi
+  if exists; then
+    echo "ab: starting $cname ..." >&2
+    docker start "$cname" >/dev/null
+  else
+    echo "ab: creating + starting $cname ..." >&2
+    docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
+  fi
+  # Non-blocking: return as soon as the container is up. The entrypoint brings the inner
+  # dockerd up in the background; `ab claude`/`ab exec` work right away (claude needs no
+  # dockerd), and inner-docker callers find it ready shortly after.
+}
+
+cmd_exec() {
+  is_running || cmd_start
+  # No command (or a bare `bash`) → interactive shell. Interactive non-login shells
+  # source ~/.bashrc on startup, so the skip-permissions / bypass-sandbox aliases apply.
+  if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = bash ]; }; then
+    exec docker exec --user agentbox -it "$cname" bash
+  fi
+  # Otherwise run the command through an interactive bash so ~/.bashrc is applied —
+  # that's where the claude/codex aliases (and any PATH/env additions) live. printf '%q'
+  # rebuilds the args as one safely-quoted string so the FIRST word stays a literal
+  # token: alias expansion is parse-time, so it fires on a literal `claude`/`codex` word
+  # (e.g. `ab claude --resume` → `claude --dangerously-skip-permissions --resume`), never
+  # on the result of "$@" expansion.
+  exec docker exec --user agentbox -it "$cname" bash -ic "$(printf '%q ' "$@")"
+}
+
+case "${1:-}" in
+start) cmd_start ;;
+stop) if exists; then docker stop "$cname" >/dev/null && echo "ab: stopped $cname (kept; 'ab destroy' to remove)"; else echo "ab: $cname does not exist"; fi ;;
+destroy)
+  if exists; then
+    docker rm -f "$cname" >/dev/null && echo "ab: removed $cname"
+    docker volume rm "$dvol" >/dev/null 2>&1 && echo "ab: removed inner-docker volume $dvol" || true
+  else echo "ab: $cname does not exist"; fi
+  ;;
+status) is_running && echo "running: $cname" || echo "not running: $cname" ;;
+logs) docker logs --tail 80 "$cname" 2>&1 | tail -80 ;;
+exec)
+  shift
+  cmd_exec "$@"
+  ;;
+rebuild)
+  require_sysbox
+  tag="$(build_image force)"
+  mkdir -p "$HOME/.claude" "$HOME/.codex"
+  echo "ab: recreating $cname with $tag ..." >&2
+  docker rm -f "$cname" >/dev/null 2>&1 || true
+  docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
+  wait_ready
+  ;;
+# Help = this header comment block, with the leading `# ` stripped, printed as-is
+# (stops at the first non-comment line, so code is never shown).
+"" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
+*) cmd_exec "$@" ;;
+esac
