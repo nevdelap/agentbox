@@ -44,11 +44,17 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)" || {
 # two parents (~/a/foo, ~/b/foo) must get distinct containers + volumes. We fold the
 # path into a readable slug (so `docker ps` shows which project) and append a long
 # sha256 substring so even truncated/deep paths never collide.
-slug="$(printf '%s' "$PROJECT_DIR" | tr -cs '[:alnum:]' '-' | sed 's/^-\+//')"
-slug="${slug:0:80}"
-hash="$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-16)"
-cname="agentbox-${slug}-${hash}"       # one container per project path
-dvol="agentbox-docker-${slug}-${hash}" # ...and its own inner-docker data root
+# Extracted into a function so the unit tests (tests/run.sh) can source this file and
+# exercise the derivation directly.
+compute_names() {
+  local dir="$1"
+  slug="$(printf '%s' "$dir" | tr -cs '[:alnum:]' '-' | sed 's/^-\+//')"
+  slug="${slug:0:80}"
+  hash="$(printf '%s' "$dir" | sha256sum | cut -c1-16)"
+  cname="agentbox-${slug}-${hash}"       # one container per project path
+  dvol="agentbox-docker-${slug}-${hash}" # ...and its own inner-docker data root
+}
+compute_names "$PROJECT_DIR"
 uid="$(id -u)"
 
 mounts=(
@@ -78,14 +84,30 @@ if [ "${AGENTBOX_SSH:-0}" = "1" ] && [ -d "$HOME/.ssh" ]; then
 fi
 
 # Sysbox provides the confinement — the outer container needs NO capabilities, no
-# seccomp relaxation, no devices. The single requirement is the `sysbox-runc` runtime
-# (registered on the host). The inner dockerd runs rootful-in-container, isolated by
-# Sysbox; tooling runs as the unprivileged agentbox user via `docker exec --user`.
+# seccomp relaxation, no devices. The run flags are the `sysbox-runc` runtime (registered
+# on the host) and `--init`. `--init` inserts docker's bundled init (tini) as PID 1 so the
+# entrypoint's backgrounded children — the per-port socat forwarders and the setup.sh
+# subshell — get reaped instead of accumulating as zombies under the `tail -f /dev/null`
+# that otherwise holds the foreground. The inner dockerd runs rootful-in-container, isolated
+# by Sysbox; tooling runs as the unprivileged agentbox user via `docker exec --user`.
 run_args=(
   --runtime=sysbox-runc
+  --init                     # tini as PID 1 reaps the entrypoint's backgrounded children
   --hostname "$(hostname)"   # in-container hostname matches the real host
   -w /workspace
 )
+
+# Optional per-host customization dir (~/.config/agentbox). Absent → no-op (other machines are
+# unaffected). Present → mount it ro, let the container reach declared host services over the
+# docker host gateway, and pass an env file. `--add-host=…:host-gateway` is only a /etc/hosts
+# entry — it grants the container NO capability, so the Sysbox confinement is intact (we do
+# NOT use --network host). The entrypoint reads `ports` (socat forwarders) and runs `setup.sh`
+# from the mounted dir. See README "Per-host customization".
+if [ -d "$HOME/.config/agentbox" ]; then
+  mounts+=(-v "$HOME/.config/agentbox:/home/agentbox/.config/agentbox:ro")
+  run_args+=(--add-host=host.docker.internal:host-gateway)
+  [ -f "$HOME/.config/agentbox/env" ] && run_args+=(--env-file "$HOME/.config/agentbox/env")
+fi
 
 # Fail fast with guidance if the host hasn't got Sysbox registered.
 require_sysbox() {
@@ -112,7 +134,12 @@ build_image() {
   for f in Dockerfile agentbox-entrypoint.sh .bashrc .dockerignore; do
     [ -f "$CONTEXT/$f" ] && files+=("$CONTEXT/$f")
   done
-  digest="$(cat "${files[@]}" | sha256sum | cut -c1-12)"
+  # Fold the build args `ab` actually varies into the freshness digest, not just the file
+  # contents — so a change to HOST_UID/HOST_GID invalidates the cached image instead of
+  # silently reusing a tag built for different args. (CLAUDE_CHANNEL/CODEX_RELEASE aren't
+  # passed here today — the Dockerfile defaults apply — so pinning them still requires a
+  # direct `docker build`; that path never consults this digest.)
+  digest="$( { cat "${files[@]}"; printf 'HOST_UID=%s\nHOST_GID=%s\n' "$uid" "$(id -g)"; } | sha256sum | cut -c1-12)"
   tag="$IMAGE_NAME:${uid}-${digest}"
   if [ "$force" = "force" ] || ! docker image inspect "$tag" >/dev/null 2>&1; then
     echo "ab: building $tag ..." >&2
@@ -141,6 +168,77 @@ wait_ready() {
     sleep 0.5
   done
   echo "ab: WARNING — inner docker not ready yet; try 'ab logs'" >&2
+  return 1
+}
+
+# Parse one line of the files list (~/.config/agentbox/files): print "<src>\t<dst>", or nothing
+# for a comment/blank line. One token -> dst = src (same path); two tokens -> explicit "src dst".
+# A leading ~ is left literal here and expanded by copy_files (~ -> $HOME on the source side,
+# /home/agentbox on the destination side), which keeps this environment-independent for tests.
+# Extracted so tests/run.sh can exercise the parse directly (no Docker needed).
+ab_parse_files_line() {
+  local s="${1%%#*}"      # drop a trailing # comment
+  s="$(printf '%s' "$s" | tr -s '[:space:]' ' ')"                 # collapse whitespace
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"  # trim ends
+  [ -n "$s" ] || return 0
+  local src rest
+  read -r src rest <<<"$s" || true
+  [ -n "$src" ] || return 0
+  printf '%s\t%s\n' "$src" "${rest:-$src}"
+}
+
+# Copy host files into the container per ~/.config/agentbox/files (one per line; see
+# ab_parse_files_line). A leading ~ means $HOME on the host side and /home/agentbox in the
+# container, so `~/.ssh/id_ed25519` lands at /home/agentbox/.ssh/id_ed25519. Each file is written
+# through `docker exec` (NOT `docker cp` — under Sysbox the daemon's filesystem view diverges
+# from the container's live mount namespace, so `docker cp` "cannot find" any in-container path;
+# `docker exec` shares the live view and works), keeping its source mode and chown'd to agentbox
+# so the unprivileged user can read it (an SSH key at 600 just works). Regular files only; a
+# directory source is skipped with a hint (use setup.sh for those). Non-fatal: a missing source
+# or a failed copy is warned and skipped; the container stays up. No-op without the file.
+# Runs whenever the container is (re)started; apply edits with `ab stop && ab start`.
+copy_files() {
+  local list="$HOME/.config/agentbox/files"
+  [ -f "$list" ] || return 0
+  # Wait briefly for exec to accept connections right after `docker run -d`.
+  for _ in $(seq 1 20); do docker exec "$cname" true >/dev/null 2>&1 && break; sleep 0.3; done
+  local line parsed src dst mode err n=0 ok=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    parsed="$(ab_parse_files_line "$line")" || true
+    [ -n "$parsed" ] || continue
+    src="${parsed%%$'\t'*}"
+    dst="${parsed#*$'\t'}"
+    src="${src/#\~/$HOME}"            # ~ -> host home
+    dst="${dst/#\~//home/agentbox}"   # ~ -> container home
+    n=$((n+1))
+    if [ ! -e "$src" ]; then
+      echo "ab: files: source not found, skipping: $src" >&2
+      continue
+    fi
+    if [ -d "$src" ]; then
+      echo "ab: files: source is a directory, skipping (list its files, or use setup.sh): $src" >&2
+      continue
+    fi
+    mode="$(stat -c %a "$src" 2>/dev/null || echo 600)"
+    # mkdir the parent, write the bytes, hand to agentbox, restore mode — all in one exec so the
+    # container's live filesystem view is consistent (the one view `docker cp` can't share).
+    if ! err="$(docker exec -i -u 0 "$cname" bash -c '
+        set -e
+        dst="$1"; mode="$2"
+        mkdir -p "$(dirname "$dst")"
+        cat > "$dst"
+        chown "$(id -u agentbox):$(id -g agentbox)" "$dst"
+        chmod "$mode" "$dst"
+      ' _ "$dst" "$mode" < "$src" 2>&1)"; then
+      echo "ab: files: copy failed: $src -> $dst" >&2
+      [ -n "$err" ] && printf '%s\n' "$err" | sed 's/^/ab: files:        /' >&2
+      continue
+    fi
+    ok=$((ok+1))
+  done < "$list"
+  if [ "$n" -gt 0 ]; then
+    echo "ab: copied $ok/$n file(s) into $cname per ~/.config/agentbox/files" >&2
+  fi
 }
 
 cmd_start() {
@@ -163,6 +261,7 @@ cmd_start() {
     echo "ab: creating + starting $cname ..." >&2
     docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
   fi
+  copy_files   # copy host files listed in ~/.config/agentbox/files into the container (no-op without)
   # Non-blocking: return as soon as the container is up. The entrypoint brings the inner
   # dockerd up in the background; `ab claude`/`ab exec` work right away (claude needs no
   # dockerd), and inner-docker callers find it ready shortly after.
@@ -184,32 +283,41 @@ cmd_exec() {
   exec docker exec --user agentbox -it "$cname" bash -ic "$(printf '%q ' "$@")"
 }
 
-case "${1:-}" in
-start) cmd_start ;;
-stop) if exists; then docker stop "$cname" >/dev/null && echo "ab: stopped $cname (kept; 'ab destroy' to remove)"; else echo "ab: $cname does not exist"; fi ;;
-destroy)
-  if exists; then
-    docker rm -f "$cname" >/dev/null && echo "ab: removed $cname"
-    docker volume rm "$dvol" >/dev/null 2>&1 && echo "ab: removed inner-docker volume $dvol" || true
-  else echo "ab: $cname does not exist"; fi
-  ;;
-status) is_running && echo "running: $cname" || echo "not running: $cname" ;;
-logs) docker logs --tail 80 "$cname" 2>&1 | tail -80 ;;
-exec)
-  shift
-  cmd_exec "$@"
-  ;;
-rebuild)
-  require_sysbox
-  tag="$(build_image force)"
-  mkdir -p "$HOME/.claude" "$HOME/.codex"
-  echo "ab: recreating $cname with $tag ..." >&2
-  docker rm -f "$cname" >/dev/null 2>&1 || true
-  docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
-  wait_ready
-  ;;
-# Help = this header comment block, with the leading `# ` stripped, printed as-is
-# (stops at the first non-comment line, so code is never shown).
-"" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
-*) cmd_exec "$@" ;;
-esac
+main() {
+  case "${1:-}" in
+  start) cmd_start ;;
+  stop) if exists; then docker stop "$cname" >/dev/null && echo "ab: stopped $cname (kept; 'ab destroy' to remove)"; else echo "ab: $cname does not exist"; fi ;;
+  destroy)
+    if exists; then
+      docker rm -f "$cname" >/dev/null && echo "ab: removed $cname"
+      docker volume rm "$dvol" >/dev/null 2>&1 && echo "ab: removed inner-docker volume $dvol" || true
+    else echo "ab: $cname does not exist"; fi
+    ;;
+  status) is_running && echo "running: $cname" || echo "not running: $cname" ;;
+  logs) docker logs --tail 80 "$cname" 2>&1 | tail -80 ;;
+  exec)
+    shift
+    cmd_exec "$@"
+    ;;
+  rebuild)
+    require_sysbox
+    tag="$(build_image force)"
+    mkdir -p "$HOME/.claude" "$HOME/.codex"
+    echo "ab: recreating $cname with $tag ..." >&2
+    docker rm -f "$cname" >/dev/null 2>&1 || true
+    docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
+    wait_ready
+    copy_files   # copy host files listed in ~/.config/agentbox/files into the container (no-op without)
+    ;;
+  # Help = this header comment block, with the leading `# ` stripped, printed as-is
+  # (stops at the first non-comment line, so code is never shown).
+  "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
+  *) cmd_exec "$@" ;;
+  esac
+}
+
+# Run only when executed directly, not when sourced — so tests/run.sh can source this file
+# and call compute_names() (and friends) without triggering any docker command.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

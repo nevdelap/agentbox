@@ -1,0 +1,6 @@
+# ~/.config/agentbox/ports — one host port per line to expose on container loopback
+# (127.0.0.1:<port> inside the container -> host.docker.internal:<port> on the host, via an
+# in-container socat). `#` starts a comment. Requires the host service to listen on an
+# interface reachable from the docker bridge (0.0.0.0 / the bridge IP), NOT 127.0.0.1-only.
+# Re-read on every `ab start`, so a stop+start picks up changes (no rebuild needed).
+1234

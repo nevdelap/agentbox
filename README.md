@@ -17,14 +17,17 @@ This container is a security boundary, so nested Docker runs under **Sysbox** ra
 than privileged DinD:
 
 - **No `--privileged`.** The outer container carries **zero** capabilities — Sysbox
-  needs no caps, no seccomp relaxation, no devices. The *only* run flag is
-  `--runtime=sysbox-runc`.
+  needs no caps, no seccomp relaxation, no devices. The run flags are just
+  `--runtime=sysbox-runc` and `--init` (the latter inserts docker's bundled `tini` as
+  PID 1 purely to reap the entrypoint's backgrounded children — it grants **no**
+  capability, so the confinement is unchanged).
 - The inner `dockerd` runs as **root inside the container**, but Sysbox confines it
   (container-root ≠ host-root), so a breakout — or the nested containers themselves —
   never reaches the host.
 - **No host Docker socket** is mounted; nested Docker is fully self-contained.
 - Tooling (claude/codex/bash) runs as the unprivileged **agentbox** user (uid matching
-  your host uid); only the inner dockerd (PID 1) runs as root-in-container.
+  your host uid); only the inner dockerd (and the `tini` init that `--init` runs as
+  PID 1) run as root-in-container.
 
 ## Host prerequisite: install Sysbox
 
@@ -120,14 +123,75 @@ Environment variables:
   `oauthAccount` Claude Code checks to consider itself logged in; mounted only if present)
 - `~/.codex` → `/home/agentbox/.codex` (auth, config)
 - `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity)
-- `~/.config/home-manager` → `/home/agentbox/.config/home-manager` (if present; on hosts
-  that manage `~/.bin` via home-manager, its entries resolve via the `/nix/store` ro mount
-  or symlink into this tree)
-- `~/.bin` → `/home/agentbox/.bin` (if present; on the container `PATH`)
+- `~/.config/home-manager` → `/home/agentbox/.config/home-manager` (**rw**, if present —
+  one of two writable host mounts; on hosts that manage `~/.bin` via home-manager, its
+  entries resolve via the `/nix/store` ro mount or symlink into this tree)
+- `~/.bin` → `/home/agentbox/.bin` (**rw**, if present; on the container `PATH` — the other
+  writable host mount)
+- `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
+  [Per-host customization](#per-host-customization-configagentbox) — env vars, host port
+  forwards, extra tools)
 - `/nix/store` → `/nix/store` (ro; NixOS only — so workspace `/nix/store` paths resolve)
+- `/etc/localtime` → `/etc/localtime` (ro, if present on the host — so in-container time
+  matches the host timezone)
 - `~/.ssh` → `/home/agentbox/.ssh` (ro; only with `AGENTBOX_SSH=1`)
 - named volume `agentbox-docker-<project>` → `/var/lib/docker` (per-project inner
   rootful docker state; `ab destroy` removes it)
+
+## Per-host customization (`~/.config/agentbox/`)
+
+agentbox is portable by default, but a host can opt into per-machine extras by creating
+`~/.config/agentbox/`. **If the directory is absent, agentbox behaves exactly as without it**
+— other machines are unaffected. If present, it's mounted read-only and four optional files
+each drive one mechanism (copy-pasteable samples live in
+[`examples/agentbox-config/`](./examples/agentbox-config)):
+
+| File | Shape | Effect |
+|---|---|---|
+| `env` | `KEY=VALUE` lines | passed to `docker run` via `--env-file`; visible to the entrypoint and every `ab exec` / `ab claude` / `ab codex` session |
+| `files` | one host file per line (`src` or `src dst`; `#` comments) | each host file is copied into the container (regular files only): a single `src` lands at the same path, `src dst` at an explicit destination. A leading `~` is `$HOME` on the host and `/home/agentbox` in the container, so `~/.ssh/id_ed25519` → `/home/agentbox/.ssh/id_ed25519`. Files keep their source mode and are chown'd to `agentbox`, so an SSH key (mode 600) is usable as-is |
+| `ports` | one host port per line | an in-container `socat` exposes each on container loopback `127.0.0.1:<port>` → `host.docker.internal:<port>`, so scripts using `127.0.0.1:<port>` reach the matching host service unchanged |
+| `setup.sh` | bash, run as agentbox | installs extra tools not in the shared image. Runs **once per container** and re-runs automatically when the script changes |
+
+Example — reach a macOS guest whose SSH the host forwards at `127.0.0.1:2222`, install
+`micro`, and copy in the SSH key a script needs to reach it:
+
+```bash
+mkdir -p ~/.config/agentbox
+cp examples/agentbox-config/{env,files,ports,setup.sh} ~/.config/agentbox/
+ab destroy && ab start     # pick up the new mount + flags
+```
+
+**Confinement is preserved.** Port forwarding uses `--add-host=host.docker.internal:host-gateway`
+(a `/etc/hosts` entry that grants the container **no** capability) plus an in-container `socat`
+run as the unprivileged agentbox user — **not** `--network host`. The host's listening surface
+is unchanged; the container reaches only the services you explicitly declared. A host service
+must listen on an interface reachable from the docker bridge (`0.0.0.0` or the bridge IP), not
+`127.0.0.1`-only.
+
+**Host firewall (the common gotcha).** The container reaches declared services over the docker
+bridge gateway, so the host firewall must also permit traffic *from the bridge* to each port.
+If it doesn't, the symptom is a silent connect timeout — the forwarder accepts your connection
+but the upstream never answers (`ab exec cat /var/log/agentbox-forward.log` shows the
+`connect-timeout`). The tell: the host itself can still reach the service on `127.0.0.1:<port>`
+while the container cannot. On NixOS, allow the declared ports from `docker0`:
+
+```nix
+networking.firewall.interfaces.docker0.allowedTCPPorts = [ 2222 ];
+```
+
+(Broader, simpler alternative: `networking.firewall.trustedInterfaces = [ "docker0" ];`.)
+
+**Apply semantics:**
+- `env` is baked at container creation (`--env-file`) → editing it needs `ab destroy && ab start`.
+- `files` is copied when the container is (re)started → apply edits with `ab stop && ab start`.
+- `ports` and `setup.sh` are read from the live mount → a plain `ab stop && ab start` picks up
+  changes (`setup.sh` re-runs only if its content changed).
+- Copying a file (e.g. an SSH key) in is a deliberate trust grant: the file is readable inside
+  the confined container. The Sysbox confinement is unchanged; this only decides what the
+  container may see.
+- Enabling the directory on an already-created container needs `ab destroy && ab start` (the
+  mount and `--add-host` / `--env-file` flags are set at create time).
 
 ## Nested Docker inside the container
 
@@ -166,9 +230,35 @@ docker build --build-arg HOST_UID=$(id -u) --build-arg HOST_GID=$(id -g) \
              -t agentbox .
 ```
 
-Auto-updaters for both CLIs are disabled (`DISABLE_UPDATES=1` /
-`DISABLE_AUTOUPDATER=1`), so a built image stays on its installed versions until you
-rebuild.
+A built image stays on its installed versions until you rebuild:
+- **Claude Code** auto-updates by default; the image sets `DISABLE_AUTOUPDATER=1`, which
+  disables its built-in updater (a real, documented Claude Code env var).
+- **Codex** has no auto-updater — it never self-updates (the installer that pinned
+  `CODEX_RELEASE` is deleted in the build), so nothing needs disabling. (To silence its
+  startup update *check*, set `check_for_update_on_startup = false` in `~/.codex/config.toml`
+  on the host.)
+
+## Tests
+
+Two zero-dependency bash suites (no `bats` / `shellspec` needed):
+
+- **`tests/run.sh`** — unit tests for the host-side pure logic: `bin/ab`'s `compute_names`
+  (project → container/volume name; determinism + collision-distinctness) and the
+  entrypoint's `ab_parse_port_line` (ports-file parsing). It sources the scripts directly —
+  they're written to be source-safe — so **no Docker** is needed:
+
+  ```bash
+  bash tests/run.sh
+  ```
+
+- **`tests/smoke.sh`** — integration test against a *running* project container: verifies
+  the `~/.config/agentbox/` wiring end-to-end (env vars present, `setup.sh` tool installed,
+  the `127.0.0.1:<port>` forward reaches the host service) and that confinement is unchanged
+  (`Privileged=false`, `CapAdd=null`):
+
+  ```bash
+  ab start && bash tests/smoke.sh
+  ```
 
 ## Notes
 
@@ -176,7 +266,8 @@ rebuild.
   owned by you on the host (no `root`-owned files, no git "dubious ownership" errors).
 - The container's hostname matches the real host's (`--hostname "$(hostname)"`), so tools
   inside report the host's name rather than a container-ID hash.
-- Python is absent by design: `uv` provisions Python on demand. Per the global rule,
+- Python is absent by design: `uv` provisions Python on demand. The Dockerfile guards this
+  — the build **fails** if any transitive dependency pulls `python3` in. Per the global rule,
   always run Python via `uv run python`.
 - The Codex binary is a static musl build relocated to `/usr/local/bin/codex` so the
   bind-mounted `~/.codex` (config/auth) doesn't shadow it.

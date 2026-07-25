@@ -4,7 +4,8 @@
 # Sysbox isolates the container, so the inner Docker daemon runs **rootful inside the
 # container** yet cannot reach the host — nested Docker with no `--privileged` and no
 # host docker socket. Tooling (claude/codex/bash) runs as the unprivileged agentbox
-# user; only the inner dockerd (PID 1) runs as root-in-container, which Sysbox confines.
+# user; only the inner dockerd (and the tini init that `ab`'s `--init` runs as PID 1 to
+# reap its children) run as root-in-container, which Sysbox confines.
 # No system python — use `uv run python`.
 #
 # Host prerequisite: Sysbox must be installed + registered as a docker runtime on the
@@ -33,7 +34,7 @@ RUN sed -i 's/Components: main restricted/Components: main restricted universe/'
       /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-          build-essential ca-certificates curl git jq just moreutils openssh-client ripgrep tmux \
+          build-essential ca-certificates curl git jq just moreutils openssh-client ripgrep socat tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Docker (official repo). The inner daemon is rootful; Sysbox isolates it. -
@@ -93,6 +94,14 @@ RUN curl -fsSL https://chatgpt.com/codex/install.sh \
     && install -m 0755 "$(readlink -f /tmp/codex-bin/codex)" /usr/local/bin/codex \
     && rm -rf /tmp/codex-home /tmp/codex-bin
 
+# Guard the "no system python" design goal (README): fail the build LOUD if any transitive apt
+# dependency above sneaks python3 in. The image deliberately ships no python (uv provisions it on
+# demand), so a leak here is a regression to catch at build time, not at runtime.
+RUN if command -v python3 >/dev/null 2>&1; then \
+      echo "agentbox: python3 present in the image — a dependency pulled it in; fix the apt install." >&2; \
+      exit 1; \
+    fi
+
 # Interactive shells (`ab bash`, `docker exec -it … bash`) source ~/.bashrc on startup:
 # the skip-permissions / never-ask aliases that are the point of running the CLIs inside
 # agentbox.
@@ -105,14 +114,21 @@ COPY --chmod=0755 agentbox-entrypoint.sh /usr/local/bin/agentbox-entrypoint
 # Pin CLI versions (no auto-update); locale/term fallbacks; persist Rust build
 # artifacts in /tmp so they survive across `docker exec` sessions and are only
 # cleared when the container is torn down (`ab destroy`).
-ENV DISABLE_UPDATES=1
+#   - Claude Code: DISABLE_AUTOUPDATER=1 disables its built-in auto-updater (a real,
+#     documented Claude Code env var), so a built image stays on the installed version.
+#   - Codex: has no auto-updater at all — it never self-updates (the install.sh that pinned
+#     CODEX_RELEASE is deleted above), so no env var is needed. (DISABLE_UPDATES was once set
+#     here as a no-op; removed. Its startup update *check* can be silenced in ~/.codex/config.toml
+#     on the host via check_for_update_on_startup=false, but that's host-owned, not image-baked.)
 ENV DISABLE_AUTOUPDATER=1
 ENV LANG=C.UTF-8
 ENV TERM=xterm-256color
 ENV CARGO_TARGET_DIR=/tmp/target
 
-# Runs as root: PID 1 starts the (Sysbox-isolated) inner dockerd. Tooling drops to
-# the agentbox user via `docker exec --user agentbox` (see bin/ab).
+# Runs as root: the entrypoint starts the (Sysbox-isolated) inner dockerd. Tooling drops to
+# the agentbox user via `docker exec --user agentbox` (see bin/ab). (At runtime `ab` passes
+# --init, so docker's bundled tini is PID 1 and reaps the entrypoint's backgrounded children;
+# the entrypoint itself runs as its child.)
 USER root
 WORKDIR /workspace
 ENTRYPOINT ["agentbox-entrypoint"]
