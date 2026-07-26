@@ -52,6 +52,18 @@ ab_parse_port_line() {
   if [[ "$port" =~ ^[0-9]+$ ]]; then printf '%s' "$port"; fi
 }
 
+# Is a parsed port bindable by the unprivileged agentbox user? socat runs as agentbox, so it
+# cannot bind a privileged port (<1024), and a valid port is 1024-65535. Surfacing this here
+# (rather than letting socat fail to bind and only logging it) names a typo at start. Extracted
+# (pure) so tests/run.sh can exercise it directly. Returns 0 (bindable) / 1 (not). The 10# forces
+# decimal (a leading-zero port isn't read as octal), and the digit-count bound short-circuits
+# before the arithmetic so an absurdly long number can't wrap a 64-bit int into a false pass.
+ab_port_bindable() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  (( ${#p} <= 5 && 10#$p >= 1024 && 10#$p <= 65535 ))
+}
+
 # Forward each host port declared in $AB_CFG/ports onto container loopback, so scripts that
 # use 127.0.0.1:<port> (e.g. MAC_HOST=127.0.0.1 MAC_PORT=2222) reach the matching host
 # service. Each forwarder is an in-container socat run as the unprivileged agentbox user,
@@ -72,6 +84,10 @@ forward_ports() {
   while IFS= read -r line || [ -n "$line" ]; do
     port="$(ab_parse_port_line "$line")"
     if [ -n "$port" ]; then
+      if ! ab_port_bindable "$port"; then
+        echo "agentbox: ignoring port $port (must be 1024-65535; socat binds as the unprivileged agentbox user)" >&2
+        continue
+      fi
       echo "agentbox: forwarding container 127.0.0.1:$port -> host.docker.internal:$port" >&2
       setsid runuser -u agentbox -- socat \
         TCP-LISTEN:"$port",bind=127.0.0.1,fork,reuseaddr \
@@ -139,15 +155,24 @@ run_setup() {
     return 0
   fi
   echo "agentbox: running setup.sh (background)..." >&2
-  (
+  # setsid detaches the run into its own session, reparenting it to PID 1 (tini, via ab's
+  # --init) so it's reaped on exit — instead of lingering as a zombie child of the
+  # `tail -f /dev/null` the entrypoint execs into next (tail never wait()s). Same trick the
+  # socat forwarders use, so the --init reap claim holds for setup.sh too. Inputs are passed
+  # as positional args (not env) to keep the entrypoint's environment clean; ab_setup_fail is
+  # exported so the detached shell can call it on failure.
+  export -f ab_setup_fail
+  # shellcheck disable=SC2016  # $1/$2/$3 are expanded by the inner bash -c, not this shell — but the `setsid` prefix stops shellcheck recognizing bash -c (so it thinks the $ are literal)
+  setsid bash -c '
+    AB_CFG="$1"; SETUP_LOG="$2"; marker="$3"
     if runuser -u agentbox -- bash "$AB_CFG/setup.sh" >>"$SETUP_LOG" 2>&1; then
-      runuser -u agentbox -- bash -c "umask 077 && touch '$marker'"
+      runuser -u agentbox -- bash -c "umask 077 && touch \"$marker\""
       echo "agentbox: setup.sh completed." >&2
       echo "agentbox: setup.sh completed." >>"$SETUP_LOG" 2>&1
     else
       ab_setup_fail "$?"
     fi
-  ) &
+  ' _ "$AB_CFG" "$SETUP_LOG" "$marker" &
 }
 
 # --- executable body (skipped when sourced for tests) ---------------------------

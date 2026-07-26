@@ -4,6 +4,7 @@
 # `ab destroy && ab start` (--env-file is applied at container creation).
 #
 # Reach a mac to run tests.
-MAC_DIR=/Users/user/repo
+MAC_DIR=/Users/Bill/repo
 MAC_HOST=1.2.3.4
 MAC_PORT=22
+MAC_USERNAME=Bill

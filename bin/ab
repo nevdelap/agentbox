@@ -71,10 +71,12 @@ mounts=(
 [ -f "$HOME/.gitconfig" ] && mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
 # Optional + existence-guarded. On hosts that manage ~/.bin via home-manager, its entries
 # are /nix/store copies (resolved inside the container by the /nix/store ro mount above) or
-# writable symlinks into this source tree, so the tree is mounted to keep it present inside
-# the container. The guard skips it entirely on hosts without ~/.config/home-manager.
-[ -d "$HOME/.config/home-manager" ] && mounts+=(-v "$HOME/.config/home-manager:/home/agentbox/.config/home-manager")
-[ -d "$HOME/.bin" ] && mounts+=(-v "$HOME/.bin:/home/agentbox/.bin")
+# symlinks into this source tree, so the tree is mounted to keep those symlinks resolvable
+# inside the container. Both are read-only: the agent must NOT be able to write back to the
+# host's dotfile source or drop scripts in ~/.bin (confinement). Reading/executing still works;
+# only writes are blocked. The guard skips them entirely on hosts without the dirs.
+[ -d "$HOME/.config/home-manager" ] && mounts+=(-v "$HOME/.config/home-manager:/home/agentbox/.config/home-manager:ro")
+[ -d "$HOME/.bin" ] && mounts+=(-v "$HOME/.bin:/home/agentbox/.bin:ro")
 [ -e /etc/localtime ] && mounts+=(-v "/etc/localtime:/etc/localtime:ro")
 # NixOS only: expose the nix store read-only so /nix/store shebangs & paths in the
 # workspace resolve inside the container.
@@ -155,6 +157,12 @@ build_image() {
       echo "ab: image build failed (see above)" >&2
       exit 1
     fi
+    # Prune stale per-uid tags from prior builds (keep only this one + :latest). Best-effort:
+    # a running container still references an old image's layers, so rmi just untags it then;
+    # errors (image in use) are ignored. Stops agentbox:<uid>-<oldhash> images piling up.
+    docker image ls --format '{{.Repository}}:{{.Tag}}' \
+      | grep -F "${IMAGE_NAME}:${uid}-" | grep -vxF "$tag" \
+      | xargs -r docker image rm >/dev/null 2>&1 || true
   fi
   printf '%s' "$tag"
 }
@@ -269,18 +277,40 @@ cmd_start() {
 
 cmd_exec() {
   is_running || cmd_start
-  # No command (or a bare `bash`) → interactive shell. Interactive non-login shells
-  # source ~/.bashrc on startup, so the skip-permissions / bypass-sandbox aliases apply.
+  # No command (or a bare `bash`) → an interactive shell. Interactive non-login bash
+  # sources ~/.bashrc on startup, which is where claude()/codex() are defined.
   if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = bash ]; }; then
-    exec docker exec --user agentbox -it "$cname" bash
+    # -i keeps stdin open (so a piped command reaches the shell); -t only when stdin IS a
+    # terminal — forcing -t under a pipe makes docker fail "the input device is not a TTY"
+    # (e.g. `echo x | ab exec bash`). Source ~/.bashrc via BASH_ENV too, so claude()/codex()
+    # are defined even without a tty: an interactive shell sources it directly and ignores
+    # BASH_ENV, while a non-interactive one sources BASH_ENV instead (one way or the other,
+    # the wrappers are present). Mirrors the -t gating of the command path below.
+    local shell_args=(docker exec --user agentbox -i -e BASH_ENV=/home/agentbox/.bashrc)
+    [ -t 0 ] && shell_args+=(-t)
+    exec "${shell_args[@]}" "$cname" bash
   fi
-  # Otherwise run the command through an interactive bash so ~/.bashrc is applied —
-  # that's where the claude/codex aliases (and any PATH/env additions) live. printf '%q'
-  # rebuilds the args as one safely-quoted string so the FIRST word stays a literal
-  # token: alias expansion is parse-time, so it fires on a literal `claude`/`codex` word
-  # (e.g. `ab claude --resume` → `claude --dangerously-skip-permissions --resume`), never
-  # on the result of "$@" expansion.
-  exec docker exec --user agentbox -it "$cname" bash -ic "$(printf '%q ' "$@")"
+  # Run the command so ~/.bashrc is ALWAYS applied — that's where claude()/codex() live,
+  # the functions that inject --dangerously-skip-permissions /
+  # --dangerously-bypass-approvals-and-sandbox. Without them `ab exec claude` runs the raw
+  # binary (no bypass → it prompts on every tool use → unusable headless). `bash -ic` can't
+  # do this: an interactive shell with no TTY spews "cannot set terminal process group / no
+  # job control" and makes `docker exec -t` fail with "the input device is not a TTY" under
+  # any pipe/CI. So source ~/.bashrc from a NON-interactive `bash -c` via BASH_ENV instead:
+  # the functions get defined cleanly in every case (TTY or not), with no startup noise.
+  # (.bashrc has no "if not interactive, return" guard, so its defs are reached this way.)
+  #
+  # -i is unconditional (keeps stdin open so pipes reach the command: `echo x | ab exec cat`).
+  # -t is added only when stdin IS a terminal — docker's "the input device is not a TTY"
+  # failure is specifically about stdin (fd 0), so gating on [ -t 0 ] is exactly what avoids
+  # the crash while still giving claude/codex a real TTY for their TUI when run from a
+  # terminal. printf '%q' rebuilds the args as one safely-quoted string so the FIRST word
+  # stays a literal token — function lookup resolves a literal `claude`/`codex` to the wrapper
+  # (e.g. `ab claude --resume` → claude() → --dangerously-skip-permissions --resume), never
+  # the bare binary.
+  local exec_args=(docker exec --user agentbox -i -e BASH_ENV=/home/agentbox/.bashrc)
+  [ -t 0 ] && exec_args+=(-t)
+  exec "${exec_args[@]}" "$cname" bash -c "$(printf '%q ' "$@")"
 }
 
 main() {
@@ -288,10 +318,28 @@ main() {
   start) cmd_start ;;
   stop) if exists; then docker stop "$cname" >/dev/null && echo "ab: stopped $cname (kept; 'ab destroy' to remove)"; else echo "ab: $cname does not exist"; fi ;;
   destroy)
-    if exists; then
-      docker rm -f "$cname" >/dev/null && echo "ab: removed $cname"
-      docker volume rm "$dvol" >/dev/null 2>&1 && echo "ab: removed inner-docker volume $dvol" || true
-    else echo "ab: $cname does not exist"; fi
+    # Attempt BOTH removals independently and report every failure: a failed container rm
+    # must not skip the volume rm (or vice versa). Exit non-zero if either failed so a
+    # partial failure isn't masked (e.g. by `ab destroy && ab start`). Explicit ifs, not
+    # `A && B || true` — that form trips shellcheck SC2015 ("C may run when A is true").
+    if ! exists; then
+      echo "ab: $cname does not exist"
+    else
+      rc=0
+      if docker rm -f "$cname" >/dev/null 2>&1; then
+        echo "ab: removed $cname"
+      else
+        echo "ab: failed to remove container $cname (see: docker rm -f $cname)" >&2
+        rc=1
+      fi
+      if docker volume rm "$dvol" >/dev/null 2>&1; then
+        echo "ab: removed inner-docker volume $dvol"
+      else
+        echo "ab: failed to remove inner-docker volume $dvol (it may still be in use)" >&2
+        rc=1
+      fi
+      exit "$rc"
+    fi
     ;;
   status) is_running && echo "running: $cname" || echo "not running: $cname" ;;
   logs) docker logs --tail 80 "$cname" 2>&1 | tail -80 ;;

@@ -90,6 +90,7 @@ ab codex             # Codex
 ab bash              # interactive shell
 ab exec make test    # any command
 ab claude --resume   # extra args pass through to the CLI
+ab codex resume      # likewise for codex
 ```
 
 Each project directory gets its own container. Lifecycle:
@@ -100,7 +101,7 @@ ab stop              # stop (kept on disk; /tmp build state preserved)
 ab destroy           # stop + remove container + its inner-docker volume (/tmp state lost)
 ab status            # is it running?
 ab logs              # tail container / inner-dockerd logs
-ab rebuild           # rebuild the image and recreate the container (then `ab claude`, etc.)
+ab rebuild           # rebuild the image and recreate the container (then `ab claude`/`ab codex`, etc.)
 ```
 
 `ab start` and `rebuild` verify `sysbox-runc` is registered on the host and
@@ -121,13 +122,14 @@ Environment variables:
 - `~/.claude` → `/home/agentbox/.claude` (OAuth token, sessions, history)
 - `~/.claude.json` → `/home/agentbox/.claude.json` (account/login state — the
   `oauthAccount` Claude Code checks to consider itself logged in; mounted only if present)
-- `~/.codex` → `/home/agentbox/.codex` (auth, config)
+- `~/.codex` → `/home/agentbox/.codex` (auth, config — e.g. `auth.json`, `config.toml`)
 - `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity)
-- `~/.config/home-manager` → `/home/agentbox/.config/home-manager` (**rw**, if present —
-  one of two writable host mounts; on hosts that manage `~/.bin` via home-manager, its
-  entries resolve via the `/nix/store` ro mount or symlink into this tree)
-- `~/.bin` → `/home/agentbox/.bin` (**rw**, if present; on the container `PATH` — the other
-  writable host mount)
+- `~/.config/home-manager` → `/home/agentbox/.config/home-manager` (**ro**, if present; on
+  hosts that manage `~/.bin` via home-manager, its entries resolve via the `/nix/store` ro
+  mount or a symlink into this tree — mounted so the symlinks resolve, read-only so the agent
+  can't write back to your dotfile source)
+- `~/.bin` → `/home/agentbox/.bin` (**ro**, if present; on the container `PATH` —
+  readable/executable but not writable, so the agent can use your scripts but can't drop new ones)
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
   [Per-host customization](#per-host-customization-configagentbox) — env vars, host port
   forwards, extra tools)
@@ -150,7 +152,7 @@ each drive one mechanism (copy-pasteable samples live in
 |---|---|---|
 | `env` | `KEY=VALUE` lines | passed to `docker run` via `--env-file`; visible to the entrypoint and every `ab exec` / `ab claude` / `ab codex` session |
 | `files` | one host file per line (`src` or `src dst`; `#` comments) | each host file is copied into the container (regular files only): a single `src` lands at the same path, `src dst` at an explicit destination. A leading `~` is `$HOME` on the host and `/home/agentbox` in the container, so `~/.ssh/id_ed25519` → `/home/agentbox/.ssh/id_ed25519`. Files keep their source mode and are chown'd to `agentbox`, so an SSH key (mode 600) is usable as-is |
-| `ports` | one host port per line | an in-container `socat` exposes each on container loopback `127.0.0.1:<port>` → `host.docker.internal:<port>`, so scripts using `127.0.0.1:<port>` reach the matching host service unchanged |
+| `ports` | one host port per line (1024-65535) | an in-container `socat` exposes each on container loopback `127.0.0.1:<port>` → `host.docker.internal:<port>`, so scripts using `127.0.0.1:<port>` reach the matching host service unchanged (socat binds as the unprivileged agentbox user, so a port below 1024 is rejected at start) |
 | `setup.sh` | bash, run as agentbox | installs extra tools not in the shared image. Runs **once per container** and re-runs automatically when the script changes |
 
 Example — reach a macOS guest whose SSH the host forwards at `127.0.0.1:2222`, install
@@ -165,7 +167,10 @@ ab destroy && ab start     # pick up the new mount + flags
 **Confinement is preserved.** Port forwarding uses `--add-host=host.docker.internal:host-gateway`
 (a `/etc/hosts` entry that grants the container **no** capability) plus an in-container `socat`
 run as the unprivileged agentbox user — **not** `--network host`. The host's listening surface
-is unchanged; the container reaches only the services you explicitly declared. A host service
+is unchanged: the `socat` forwarders expose *only* the ports you declared on container loopback,
+and `host.docker.internal` (added whenever `~/.config/agentbox/` exists) resolves to the host
+gateway, so the agentbox user *can* also attempt a direct connection to other host ports —
+bounded entirely by your host firewall, not by agentbox. A host service
 must listen on an interface reachable from the docker bridge (`0.0.0.0` or the bridge IP), not
 `127.0.0.1`-only.
 
@@ -266,14 +271,28 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
   owned by you on the host (no `root`-owned files, no git "dubious ownership" errors).
 - The container's hostname matches the real host's (`--hostname "$(hostname)"`), so tools
   inside report the host's name rather than a container-ID hash.
+- `ab exec`, `ab claude`, and `ab codex` run fine **without a TTY** (CI, pipes): `-t` is
+  allocated only when stdin is a terminal, so `echo x | ab exec cat` and `ab exec make test`
+  in CI just work (the old hardcoded `-it` crashed there with "the input device is not a
+  TTY"). In every case the command runs under `~/.bashrc` — sourced via `BASH_ENV`, not an
+  interactive shell — so the `claude()`/`codex()` permission-bypass wrappers apply even
+  headless (`ab exec claude`/`ab codex` in CI still resolves to its permission-bypass
+  wrapper, not the raw binary). `~/.bashrc` has no "if not interactive, return" guard, which
+  is what makes this safe.
 - Python is absent by design: `uv` provisions Python on demand. The Dockerfile guards this
   — the build **fails** if any transitive dependency pulls `python3` in. Per the global rule,
   always run Python via `uv run python`.
-- The Codex binary is a static musl build relocated to `/usr/local/bin/codex` so the
-  bind-mounted `~/.codex` (config/auth) doesn't shadow it.
-- Codex runs **without its own sandbox** (`--dangerously-bypass-approvals-and-sandbox`,
-  wired in `~/.bashrc`): agentbox itself is the sandbox (Sysbox confinement), so Codex
-  doesn't launch `bubblewrap`. That flag is documented as "intended solely for running in
-  environments that are externally sandboxed," which is exactly agentbox — and Sysbox
-  blocks the `/proc` mount `bwrap` would need anyway, so it wouldn't function even if
-  installed (`bubblewrap` is therefore deliberately not installed).
+- Each CLI's binary is kept out of its bind-mounted config dir so the mount can't shadow it:
+  **Claude Code** (a native glibc build) installs under `~/.local/bin`, separate from the
+  mounted `~/.claude`; **Codex** (a static musl build) is relocated to `/usr/local/bin/codex`,
+  separate from the mounted `~/.codex`.
+- Both CLIs run with their safety guards **off** (wired in `~/.bashrc`) because agentbox
+  itself is the sandbox (Sysbox confinement): Claude Code via `--dangerously-skip-permissions`,
+  Codex via `--dangerously-bypass-approvals-and-sandbox`. The Codex flag is documented as
+  "intended solely for running in environments that are externally sandboxed" — exactly
+  agentbox — and it also keeps Codex from launching `bubblewrap`, which Sysbox blocks the
+  `/proc` mount for anyway (so `bubblewrap` is deliberately not installed).
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

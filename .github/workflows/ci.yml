@@ -1,0 +1,58 @@
+# CI for agentbox — all checks are Docker-free and fast:
+#   - unit tests (tests/run.sh sources the scripts and exercises their pure logic)
+#   - shellcheck + bash -n on every shell script
+#   - syntax-parse of the NixOS module (sysbox.nix)
+#
+# The full image build + tests/smoke.sh need a Sysbox-equipped host with nested Docker, so
+# they run out-of-band (ab start && bash tests/smoke.sh), not here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    name: unit tests + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: bash syntax check (bash -n)
+        run: |
+          set -e
+          for f in bin/ab agentbox-entrypoint.sh install-sysbox-ubuntu.sh \
+                   tests/run.sh tests/smoke.sh examples/agentbox-config/setup.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+
+      - name: shellcheck
+        run: |
+          set -e
+          # .bashrc is intentionally a snippet (no shebang); skip it to avoid SC2148.
+          shellcheck -x \
+            bin/ab agentbox-entrypoint.sh install-sysbox-ubuntu.sh \
+            tests/run.sh tests/smoke.sh examples/agentbox-config/setup.sh
+
+      - name: unit tests
+        run: bash tests/run.sh
+
+  nix:
+    name: NixOS module parses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixpkgs-unstable
+      # Syntax-only parse (no evaluation): catches authoring errors in sysbox.nix without
+      # needing a full NixOS eval context. The module is applied on a real host via
+      # `nixos-rebuild`, which is the full check.
+      - name: parse sysbox.nix
+        run: nix-instantiate --parse sysbox.nix >/dev/null

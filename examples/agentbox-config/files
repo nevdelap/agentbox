@@ -10,4 +10,5 @@
 # Example: copy a non-default SSH key into the container under the name ssh discovers by
 # default, so a script can reach a host service exposed via a forwarded port (see `ports`).
 # Substitute your own key name on the left:
-~/.ssh/mac-key ~/.ssh/id_ed25519
+~/.ssh/config
+~/.ssh/id_ed25519
