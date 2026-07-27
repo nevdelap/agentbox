@@ -87,7 +87,8 @@ in
   # kernels (moby/moby#52326). Sysbox's forked runc (v0.7.0) predates it and rejects
   # the resulting `time` namespace in the OCI spec:
   #   "OCI runtime create failed: namespace {"time" ""} does not exist"
-  # (nestybox/sysbox#1011). Disabling the feature reverts to the pre-29.5 spec sysbox
+  # (https://github.com/nestybox/sysbox/issues/1011). Disabling the feature reverts to
+  # the pre-29.5 spec sysbox
   # expects, so importing this module alone makes sysbox usable — no separate
   # daemon.json tweak needed on the host.
   virtualisation.docker.daemon.settings.features."time-namespaces" =

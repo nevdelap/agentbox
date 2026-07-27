@@ -65,11 +65,27 @@ creates the `sysbox` user, and applies Sysbox's recommended sysctls. The `.deb` 
 are pinned for **amd64** (`x86_64`) hosts; an **arm64** NixOS host needs the `arm64` URL
 and its own `hash` in [`sysbox.nix`](./sysbox.nix).
 
+Both the Ubuntu installer and the NixOS module also disable docker's `time-namespaces`
+feature. Docker 29.5+ gives containers a private `time` namespace on supported kernels
+([moby/moby#52326](https://github.com/moby/moby/pull/52326)), which Sysbox v0.7.0's forked
+runc rejects ([nestybox/sysbox#1011](https://github.com/nestybox/sysbox/issues/1011)) —
+every `ab` run would otherwise fail with:
+
+```
+OCI runtime create failed: namespace {"time" ""} does not exist
+```
+
+On Ubuntu that means `features.time-namespaces=false` in `/etc/docker/daemon.json` (the
+installer merges it in with `jq`, backing up any existing file to
+`daemon.json.agentbox-bak`, then restarts docker); on NixOS it's
+`virtualisation.docker.daemon.settings.features."time-namespaces" = false`.
+
 Verify on either host:
 
 ```sh
 systemctl status sysbox
 docker info | grep -i runtime        # -> Runtimes: runc sysbox-runc
+docker run --runtime=sysbox-runc --rm hello-world
 ```
 
 ## Usage

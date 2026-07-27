@@ -10,7 +10,8 @@
 #
 # This downloads the official sysbox-ce .deb and installs it via apt. The package's
 # postinst then registers the `sysbox-runc` docker runtime, enables the Sysbox
-# services, applies the needed sysctls, and reloads docker.
+# services, applies the needed sysctls, and reloads docker. It also disables docker's
+# `time-namespaces` feature, which sysbox v0.7.0 can't handle (see below).
 #
 set -euo pipefail
 
@@ -31,6 +32,27 @@ echo "install-sysbox: installing (apt)..."
 apt-get update
 apt-get install -y jq            # the Sysbox installer uses jq
 apt-get install -y "$DEB"        # apt resolves the .deb's deps (incl. iptables)
+
+# Docker 29.5+ enables a private `time` namespace for containers on supported kernels
+# (moby/moby#52326). Sysbox's forked runc (v0.7.0) predates it and rejects the resulting
+# `time` namespace in the OCI spec:
+#   "OCI runtime create failed: namespace {"time" ""} does not exist"
+# (https://github.com/nestybox/sysbox/issues/1011).
+# Setting features.time-namespaces=false reverts to the pre-29.5
+# spec sysbox expects. This mirrors what sysbox.nix does on NixOS via
+# `virtualisation.docker.daemon.settings.features."time-namespaces" = false`.
+DAEMON_JSON="/etc/docker/daemon.json"
+echo "install-sysbox: disabling docker's time-namespaces feature in ${DAEMON_JSON}..."
+mkdir -p /etc/docker
+if [ -s "$DAEMON_JSON" ]; then
+  cp -a "$DAEMON_JSON" "${DAEMON_JSON}.agentbox-bak"
+  jq '.features."time-namespaces" = false' "${DAEMON_JSON}.agentbox-bak" > "$DAEMON_JSON"
+else
+  echo '{"features":{"time-namespaces":false}}' | jq . > "$DAEMON_JSON"
+fi
+
+echo "install-sysbox: restarting docker to apply..."
+systemctl restart docker
 
 echo
 echo "install-sysbox: done. Verify:"
