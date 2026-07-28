@@ -74,14 +74,33 @@ if ! docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null | grep -q true;
   exit 1
 fi
 
-CFG="$HOME/.config/agentbox"
+# The config files in effect for THIS machine + project. Sourcing bin/ab above resolved all four
+# (cfg_env/cfg_files/cfg_ports/cfg_setup) against the same ${AGENTBOX_DIR:-$PWD} this test keys
+# off, so each section below checks the file that was actually applied — not a hardcoded
+# top-level path that a per-machine or per-project override may have replaced.
+echo "resolved config (machine: $MACHINE)"
+printf '  %-9s %s\n' "env"      "${cfg_env:-(none)}"
+printf '  %-9s %s\n' "files"    "${cfg_files:-(none)}"
+printf '  %-9s %s\n' "ports"    "${cfg_ports:-(none)}"
+printf '  %-9s %s\n' "setup.sh" "${cfg_setup:-(none)}"
+
+# ab passes the resolved ports/setup.sh to the entrypoint as container-side paths at create
+# time; assert the container really got them (this is the whole per-project wiring for the two
+# files the entrypoint — not ab — reads).
+if [ -n "$cfg_ports" ]; then
+  assert_eq "AGENTBOX_PORTS_FILE passed" "$(ab_config_container_path "$cfg_ports")" "$(dex printenv AGENTBOX_PORTS_FILE)"
+fi
+if [ -n "$cfg_setup" ]; then
+  assert_eq "AGENTBOX_SETUP_FILE passed" "$(ab_config_container_path "$cfg_setup")" "$(dex printenv AGENTBOX_SETUP_FILE)"
+fi
 
 # ---- env (--env-file) -------------------------------------------------------
 # Every KEY=VALUE in the host env file must reach the container intact (proves --env-file was
 # applied at container creation). Parsed docker-style by ab_parse_env_line.
-echo "env (ab --env-file ~/.config/agentbox/env)"
-envf="$CFG/env"
-if [ -f "$envf" ]; then
+echo
+echo "env (ab --env-file ${cfg_env:-(none)})"
+envf="$cfg_env"
+if [ -n "$envf" ]; then
   n=0
   while IFS= read -r line || [ -n "$line" ]; do
     parsed="$(ab_parse_env_line "$line")" || true
@@ -93,7 +112,7 @@ if [ -f "$envf" ]; then
   done < "$envf"
   [ "$n" -eq 0 ] && echo "  (no KEY=VALUE lines in $envf)"
 else
-  echo "  -- no ~/.config/agentbox/env; skipping env checks"
+  echo "  -- no env file resolved for this machine/project; skipping env checks"
 fi
 
 # ---- setup.sh ---------------------------------------------------------------
@@ -101,8 +120,8 @@ fi
 # success (see agentbox-entrypoint.sh run_setup); assert the marker exists. Poll, because
 # setup may still be running right after `ab start`.
 echo
-echo "extra tool install (ab ran ~/.config/agentbox/setup.sh)"
-if [ -f "$CFG/setup.sh" ]; then
+echo "extra tool install (ab ran ${cfg_setup:-(none)})"
+if [ -n "$cfg_setup" ]; then
   marker=""
   for _ in $(seq 1 30); do
     marker="$(docker exec --user agentbox "$cname" bash -c 'ls /home/agentbox/.agentbox-setup-done-* 2>/dev/null | head -1' 2>/dev/null || true)"
@@ -111,7 +130,7 @@ if [ -f "$CFG/setup.sh" ]; then
   done
   assert_eq "setup.sh completed (marker present)" "1" "$([ -n "$marker" ] && echo 1 || echo 0)"
 else
-  echo "  -- no ~/.config/agentbox/setup.sh; skipping setup checks"
+  echo "  -- no setup.sh resolved for this machine/project; skipping setup checks"
 fi
 
 # ---- loopback port forward --------------------------------------------------
@@ -121,8 +140,8 @@ fi
 # firewall, which is environment-specific (see README "Host firewall").
 echo
 echo "loopback port forward (container 127.0.0.1:<port> -> host gateway)"
-portsf="$CFG/ports"
-if [ -f "$portsf" ]; then
+portsf="$cfg_ports"
+if [ -n "$portsf" ]; then
   port=""
   while IFS= read -r line || [ -n "$line" ]; do
     p="$(ab_parse_port_line "$line")"
@@ -143,7 +162,7 @@ if [ -f "$portsf" ]; then
     echo "  -- no bare port declared in $portsf; skipping forward checks"
   fi
 else
-  echo "  -- no ~/.config/agentbox/ports; skipping forward checks"
+  echo "  -- no ports file resolved for this machine/project; skipping forward checks"
 fi
 
 # ---- confinement (Sysbox, not --privileged) ---------------------------------

@@ -61,6 +61,75 @@ compute_names "$long"
 assert_eq "slug truncated to 80" "80" "${#slug}"
 
 echo
+echo "ab_config_candidates (bin/ab)"
+# Four tiers, most specific first, with `machines/` and `projects/` reserved at the root so a
+# machine named e.g. `home` can never be read as the first segment of /home/nevd/myproj. Pure —
+# no filesystem involved — so this pins the ORDER and the layout against drift.
+_want="$(printf '%s\n' \
+  /cfg/machines/nevsmachine/projects/home/nevd/myproj/env \
+  /cfg/machines/nevsmachine/env \
+  /cfg/projects/home/nevd/myproj/env \
+  /cfg/env)"
+assert_eq "four candidates, in order" "$_want" "$(ab_config_candidates /cfg nevsmachine /home/nevd/myproj env)"
+assert_eq "exactly four"              "4"      "$(ab_config_candidates /cfg m /p x | wc -l)"
+# The name is per-file: the same search runs separately for each of the four config files.
+assert_eq "name is substituted"       "/cfg/machines/m/projects/p/setup.sh" \
+                                      "$(ab_config_candidates /cfg m /p setup.sh | head -1)"
+# Leading slash dropped exactly once (the project component is a relative path under projects/).
+assert_eq "no double slash"           "0"      "$(ab_config_candidates /cfg m /home/nevd env | grep -c '//')"
+
+echo
+echo "ab_config_file (bin/ab)"
+# First match wins, tier by tier. Built up in a tmpdir from least to most specific: each new
+# file must take over from the one below it.
+_cfg="$(mktemp -d)"
+_mk() { mkdir -p "$(dirname "$1")"; : >"$1"; }
+_r()  { ab_config_file "$_cfg" nevsmachine /home/nevd/myproj "$1"; }
+
+assert_eq "nothing -> empty"       ""                "$(_r env)"
+_mk "$_cfg/env"
+assert_eq "tier 4 (global)"        "$_cfg/env"       "$(_r env)"
+_mk "$_cfg/projects/home/nevd/myproj/env"
+assert_eq "tier 3 beats 4"         "$_cfg/projects/home/nevd/myproj/env" "$(_r env)"
+_mk "$_cfg/machines/nevsmachine/env"
+assert_eq "tier 2 beats 3"         "$_cfg/machines/nevsmachine/env"      "$(_r env)"
+_mk "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/env"
+assert_eq "tier 1 beats 2"         "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/env" "$(_r env)"
+
+# Each of the four names resolves INDEPENDENTLY — a per-project `env` must not drag `ports`
+# along with it (the whole point of the issue: separate resolution per file).
+assert_eq "ports unaffected by env" ""               "$(_r ports)"
+_mk "$_cfg/ports"
+assert_eq "ports resolves alone"   "$_cfg/ports"     "$(_r ports)"
+
+# Another machine's / another project's files are not ours.
+_mk "$_cfg/machines/othermachine/files"
+_mk "$_cfg/projects/home/nevd/other/files"
+assert_eq "other machine ignored"  ""                "$(_r files)"
+
+# A DIRECTORY at a candidate path is not a match — the search must fall through to the next tier
+# (mkdir -p of a deep candidate creates exactly this shape for the shallower ones).
+mkdir -p "$_cfg/machines/nevsmachine/setup.sh"
+_mk "$_cfg/setup.sh"
+assert_eq "directory is not a match" "$_cfg/setup.sh" "$(_r setup.sh)"
+assert_eq "always returns 0"       "0"               "$(_r nosuchname >/dev/null; echo $?)"
+rm -rf "$_cfg"
+
+echo
+echo "ab_config_container_path (bin/ab)"
+# The config root is bind-mounted ro at /home/agentbox/.config/agentbox, so a resolved host path
+# maps into the container by swapping that prefix — this is what ab hands the entrypoint in
+# AGENTBOX_PORTS_FILE / AGENTBOX_SETUP_FILE.
+_saved_root="$AB_CFG_ROOT"
+AB_CFG_ROOT=/home/nevd/.config/agentbox
+assert_eq "nested path mapped" "/home/agentbox/.config/agentbox/machines/m/projects/p/ports" \
+  "$(ab_config_container_path /home/nevd/.config/agentbox/machines/m/projects/p/ports)"
+assert_eq "top-level mapped"   "/home/agentbox/.config/agentbox/env" \
+  "$(ab_config_container_path /home/nevd/.config/agentbox/env)"
+assert_eq "empty in, empty out" "" "$(ab_config_container_path '')"
+AB_CFG_ROOT="$_saved_root"
+
+echo
 echo "ab_parse_port_line (agentbox-entrypoint.sh)"
 assert_eq "plain port"          "2222"  "$(ab_parse_port_line 2222)"
 assert_eq "trailing comment"    "2222"  "$(ab_parse_port_line '2222 # ssh to mac')"
