@@ -10,6 +10,7 @@
 #   ab stop                  stop it (kept on disk; /tmp build state preserved)
 #   ab destroy               stop + remove it (destroyed; /tmp build state lost)
 #   ab status                show whether the container is running
+#   ab config                show which per-machine/per-project config files are in effect
 #   ab logs                  tail the container / inner-dockerd logs
 #   ab claude [args...]      docker exec claude as the agentbox user (auto-starts if not started)
 #   ab codex  [args...]      docker exec codex
@@ -57,6 +58,78 @@ compute_names() {
 compute_names "$PROJECT_DIR"
 uid="$(id -u)"
 
+# --- per-machine / per-project config resolution --------------------------------
+# The four optional config files (env, files, ports, setup.sh) are each resolved separately, so
+# one ~/.config/agentbox tree — checked in and shared across machines — can hold a global
+# default plus per-machine, per-project, and per-machine-per-project overrides.
+AB_CFG_ROOT="$HOME/.config/agentbox"
+AB_CFG_CONTAINER=/home/agentbox/.config/agentbox
+# The machine name keying the search. Defaults to the host's name (the same value ab gives the
+# container via --hostname); AGENTBOX_MACHINE overrides it, so a machine can be renamed — or a
+# rename rehearsed — without moving directories. It deliberately does NOT change --hostname.
+MACHINE="${AGENTBOX_MACHINE:-$(hostname)}"
+
+# The four candidate paths for one config file <name>, most specific first: this project on this
+# machine, this machine (any project), this project (any machine), then the plain top-level file
+# — which is exactly the pre-per-project behaviour, so an existing flat config keeps working
+# untouched. `machines/` and `projects/` are reserved directory names at the config root: without
+# them a machine called `home` would be indistinguishable from the first segment of a project
+# path like /home/nevd/myproj, and the search would silently resolve the ambiguity the wrong way.
+# The project component is its absolute path with the leading slash dropped
+# (/home/nevd/myproj -> home/nevd/myproj). Pure (no filesystem access) and parameterised on the
+# root, so tests/run.sh can exercise the ordering directly.
+ab_config_candidates() {
+  local root="$1" machine="$2" proj="${3#/}" name="$4"
+  printf '%s\n' \
+    "$root/machines/$machine/projects/$proj/$name" \
+    "$root/machines/$machine/$name" \
+    "$root/projects/$proj/$name" \
+    "$root/$name"
+}
+
+# First existing candidate for <name> (same args as ab_config_candidates), or nothing when none
+# of the four exist. Only regular files count — a directory sitting at a candidate path is
+# skipped, not treated as a match. Always returns 0: callers run it in a command substitution
+# under `set -e`, and "no config file" is a normal, silent outcome (all four are optional).
+ab_config_file() {
+  local c
+  while IFS= read -r c; do
+    if [ -f "$c" ]; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done < <(ab_config_candidates "$@")
+  return 0
+}
+
+# Container-side path of a resolved config file. The whole config root is bind-mounted ro at
+# $AB_CFG_CONTAINER, so any resolved path maps by swapping that prefix. Empty in -> empty out
+# (nothing resolved, nothing to pass).
+ab_config_container_path() {
+  local p="$1"
+  [ -n "$p" ] || return 0
+  printf '%s' "$AB_CFG_CONTAINER${p#"$AB_CFG_ROOT"}"
+}
+
+# How `ab config` renders one resolved path: "(none)" when nothing matched, else the path with
+# $HOME abbreviated to ~ (these are long, and the tier that won is the part worth reading).
+ab_config_show() {
+  if [ -z "$1" ]; then printf '(none)'; else printf '%s' "${1/#"$HOME"/\~}"; fi
+}
+
+# Resolve all four once, up front: `ab config` prints them, and cmd_start/copy_files/run_args
+# below consume them. Empty string = "no such config file on this host for this project".
+cfg_env=""
+cfg_files=""
+cfg_ports=""
+cfg_setup=""
+if [ -d "$AB_CFG_ROOT" ]; then
+  cfg_env="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" env)"
+  cfg_files="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" files)"
+  cfg_ports="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" ports)"
+  cfg_setup="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" setup.sh)"
+fi
+
 mounts=(
   -v "$PROJECT_DIR:/workspace"
   -v "$HOME/.claude:/home/agentbox/.claude"
@@ -103,12 +176,18 @@ run_args=(
 # unaffected). Present → mount it ro, let the container reach declared host services over the
 # docker host gateway, and pass an env file. `--add-host=…:host-gateway` is only a /etc/hosts
 # entry — it grants the container NO capability, so the Sysbox confinement is intact (we do
-# NOT use --network host). The entrypoint reads `ports` (socat forwarders) and runs `setup.sh`
-# from the mounted dir. See README "Per-host customization".
-if [ -d "$HOME/.config/agentbox" ]; then
-  mounts+=(-v "$HOME/.config/agentbox:/home/agentbox/.config/agentbox:ro")
+# NOT use --network host). The WHOLE tree is mounted (not just the resolved files), so the
+# entrypoint can read whichever `ports` / `setup.sh` won the search; ab tells it which via the
+# two AGENTBOX_*_FILE env vars, as container-side paths under the mount. Those are set at
+# container CREATE time, so adding a *more specific* ports/setup.sh later needs
+# `ab destroy && ab start` — editing the contents of the one already in effect does not (it is
+# read live from the mount). See README "Per-host and per-project customization".
+if [ -d "$AB_CFG_ROOT" ]; then
+  mounts+=(-v "$AB_CFG_ROOT:$AB_CFG_CONTAINER:ro")
   run_args+=(--add-host=host.docker.internal:host-gateway)
-  [ -f "$HOME/.config/agentbox/env" ] && run_args+=(--env-file "$HOME/.config/agentbox/env")
+  [ -n "$cfg_env" ] && run_args+=(--env-file "$cfg_env")
+  [ -n "$cfg_ports" ] && run_args+=(-e "AGENTBOX_PORTS_FILE=$(ab_config_container_path "$cfg_ports")")
+  [ -n "$cfg_setup" ] && run_args+=(-e "AGENTBOX_SETUP_FILE=$(ab_config_container_path "$cfg_setup")")
 fi
 
 # Fail fast with guidance if the host hasn't got Sysbox registered.
@@ -195,7 +274,7 @@ ab_parse_files_line() {
   printf '%s\t%s\n' "$src" "${rest:-$src}"
 }
 
-# Copy host files into the container per ~/.config/agentbox/files (one per line; see
+# Copy host files into the container per the resolved `files` list (one per line; see
 # ab_parse_files_line). A leading ~ means $HOME on the host side and /home/agentbox in the
 # container, so `~/.ssh/id_ed25519` lands at /home/agentbox/.ssh/id_ed25519. Each file is written
 # through `docker exec` (NOT `docker cp` — under Sysbox the daemon's filesystem view diverges
@@ -206,8 +285,8 @@ ab_parse_files_line() {
 # or a failed copy is warned and skipped; the container stays up. No-op without the file.
 # Runs whenever the container is (re)started; apply edits with `ab stop && ab start`.
 copy_files() {
-  local list="$HOME/.config/agentbox/files"
-  [ -f "$list" ] || return 0
+  local list="$cfg_files"
+  [ -n "$list" ] || return 0
   # Wait briefly for exec to accept connections right after `docker run -d`.
   for _ in $(seq 1 20); do docker exec "$cname" true >/dev/null 2>&1 && break; sleep 0.3; done
   local line parsed src dst mode err n=0 ok=0
@@ -245,7 +324,7 @@ copy_files() {
     ok=$((ok+1))
   done < "$list"
   if [ "$n" -gt 0 ]; then
-    echo "ab: copied $ok/$n file(s) into $cname per ~/.config/agentbox/files" >&2
+    echo "ab: copied $ok/$n file(s) into $cname per ${list/#"$HOME"/\~}" >&2
   fi
 }
 
@@ -269,10 +348,30 @@ cmd_start() {
     echo "ab: creating + starting $cname ..." >&2
     docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
   fi
-  copy_files   # copy host files listed in ~/.config/agentbox/files into the container (no-op without)
+  copy_files   # copy host files listed in the resolved `files` list into the container (no-op without)
   # Non-blocking: return as soon as the container is up. The entrypoint brings the inner
   # dockerd up in the background; `ab claude`/`ab exec` work right away (claude needs no
   # dockerd), and inner-docker callers find it ready shortly after.
+}
+
+# Show which of the four config files are in effect for this machine + project, and the search
+# that produced them. With four tiers per file, "why is THAT setup.sh running?" is otherwise a
+# manual walk of the tree — this answers it in one command, without starting a container.
+cmd_config() {
+  local root_note=""
+  [ -d "$AB_CFG_ROOT" ] || root_note="   (absent — no per-host config on this machine)"
+  echo "machine: $MACHINE"
+  echo "project: $PROJECT_DIR"
+  echo "root:    ${AB_CFG_ROOT/#"$HOME"/\~}$root_note"
+  echo
+  echo "in effect:"
+  printf '  %-9s %s\n' "env"      "$(ab_config_show "$cfg_env")"
+  printf '  %-9s %s\n' "files"    "$(ab_config_show "$cfg_files")"
+  printf '  %-9s %s\n' "ports"    "$(ab_config_show "$cfg_ports")"
+  printf '  %-9s %s\n' "setup.sh" "$(ab_config_show "$cfg_setup")"
+  echo
+  echo "search order (first match wins; each of env, files, ports, setup.sh separately):"
+  ab_config_candidates "${AB_CFG_ROOT/#"$HOME"/\~}" "$MACHINE" "$PROJECT_DIR" '<name>' | sed 's/^/  /'
 }
 
 cmd_exec() {
@@ -342,6 +441,7 @@ main() {
     fi
     ;;
   status) is_running && echo "running: $cname" || echo "not running: $cname" ;;
+  config) cmd_config ;;
   logs) docker logs --tail 80 "$cname" 2>&1 | tail -80 ;;
   exec)
     shift
@@ -355,7 +455,7 @@ main() {
     docker rm -f "$cname" >/dev/null 2>&1 || true
     docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
     wait_ready
-    copy_files   # copy host files listed in ~/.config/agentbox/files into the container (no-op without)
+    copy_files   # copy host files listed in the resolved `files` list into the container (no-op without)
     ;;
   # Help = this header comment block, with the leading `# ` stripped, printed as-is
   # (stops at the first non-comment line, so code is never shown).

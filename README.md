@@ -116,6 +116,7 @@ ab start             # create + start for this project (no-op if already running
 ab stop              # stop (kept on disk; /tmp build state preserved)
 ab destroy           # stop + remove container + its inner-docker volume (/tmp state lost)
 ab status            # is it running?
+ab config            # which per-machine/per-project config files are in effect
 ab logs              # tail container / inner-dockerd logs
 ab rebuild           # rebuild the image and recreate the container (then `ab claude`/`ab codex`, etc.)
 ```
@@ -131,6 +132,7 @@ Environment variables:
 | `AGENTBOX_DIR` | `$PWD` | project dir mounted at `/workspace` |
 | `AGENTBOX_SSH` | `0` | set to `1` to also bind-mount `~/.ssh` (ro) for git push |
 | `AGENTBOX_CONTEXT` | auto (repo root) | build context dir (override only if needed) |
+| `AGENTBOX_MACHINE` | `$(hostname)` | machine name used to look up per-machine config (does not change the container's hostname) |
 
 ## Mounts
 
@@ -147,8 +149,8 @@ Environment variables:
 - `~/.bin` → `/home/agentbox/.bin` (**ro**, if present; on the container `PATH` —
   readable/executable but not writable, so the agent can use your scripts but can't drop new ones)
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
-  [Per-host customization](#per-host-customization-configagentbox) — env vars, host port
-  forwards, extra tools)
+  [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox)
+  — env vars, host port forwards, extra tools)
 - `/nix/store` → `/nix/store` (ro; NixOS only — so workspace `/nix/store` paths resolve)
 - `/etc/localtime` → `/etc/localtime` (ro, if present on the host — so in-container time
   matches the host timezone)
@@ -156,9 +158,9 @@ Environment variables:
 - named volume `agentbox-docker-<project>` → `/var/lib/docker` (per-project inner
   rootful docker state; `ab destroy` removes it)
 
-## Per-host customization (`~/.config/agentbox/`)
+## Per-host and per-project customization (`~/.config/agentbox/`)
 
-agentbox is portable by default, but a host can opt into per-machine extras by creating
+agentbox is portable by default, but a host can opt into extras by creating
 `~/.config/agentbox/`. **If the directory is absent, agentbox behaves exactly as without it**
 — other machines are unaffected. If present, it's mounted read-only and four optional files
 each drive one mechanism (copy-pasteable samples live in
@@ -179,6 +181,53 @@ mkdir -p ~/.config/agentbox
 cp examples/agentbox-config/{env,files,ports,setup.sh} ~/.config/agentbox/
 ab destroy && ab start     # pick up the new mount + flags
 ```
+
+### Scoping config to a machine or a project
+
+The four files above apply everywhere. To vary them, put a copy under `machines/<machine>/`,
+`projects/<project-path>/`, or both — **each of the four is resolved separately**, first match
+wins:
+
+```
+~/.config/agentbox/machines/<machine>/projects/<project-path>/env   # this project, this machine
+~/.config/agentbox/machines/<machine>/env                           # this machine, any project
+~/.config/agentbox/projects/<project-path>/env                      # this project, any machine
+~/.config/agentbox/env                                              # everywhere (the plain file)
+```
+
+`<machine>` is the host's name (`hostname`, or `AGENTBOX_MACHINE` to override the lookup
+without changing the container's hostname). `<project-path>` is the project's absolute path
+with the leading `/` dropped, so `/home/nevd/myproj` becomes `home/nevd/myproj`. `machines/`
+and `projects/` are reserved directory names at the config root — without them a machine
+called `home` would be indistinguishable from the first segment of `/home/nevd/myproj`.
+
+So on `nevsmachine`, working in `~/myproj`, with this tree:
+
+```
+~/.config/agentbox/
+├── env                                              # every project, every machine
+├── setup.sh                                         # every project, every machine
+├── machines/
+│   └── nevsmachine/
+│       ├── ports                                    # only on nevsmachine
+│       └── projects/home/nevd/myproj/
+│           └── setup.sh                             # only myproj, only on nevsmachine
+└── projects/home/nevd/myproj/
+    └── env                                          # myproj, on any machine
+```
+
+`env` comes from `projects/home/nevd/myproj/env`, `ports` from
+`machines/nevsmachine/ports`, `setup.sh` from
+`machines/nevsmachine/projects/home/nevd/myproj/setup.sh`, and `files` is not configured at
+all. `ab config` prints exactly this, without starting a container:
+
+```bash
+ab config
+```
+
+**Nothing to migrate.** The bare top-level files are the last tier, so an existing flat
+`~/.config/agentbox/` keeps working unchanged — the scoped directories are purely additive.
+This makes the directory worth version-controlling and sharing across machines.
 
 **Confinement is preserved.** Port forwarding uses `--add-host=host.docker.internal:host-gateway`
 (a `/etc/hosts` entry that grants the container **no** capability) plus an in-container `socat`
@@ -208,6 +257,10 @@ networking.firewall.interfaces.docker0.allowedTCPPorts = [ 2222 ];
 - `files` is copied when the container is (re)started → apply edits with `ab stop && ab start`.
 - `ports` and `setup.sh` are read from the live mount → a plain `ab stop && ab start` picks up
   changes (`setup.sh` re-runs only if its content changed).
+- Which *tier* wins is decided at container creation (`ab` resolves the search and passes the
+  chosen `ports`/`setup.sh` to the container) → adding a **more specific** file where a less
+  specific one was already in effect needs `ab destroy && ab start`. Editing the contents of
+  the file already in effect does not.
 - Copying a file (e.g. an SSH key) in is a deliberate trust grant: the file is readable inside
   the confined container. The Sysbox confinement is unchanged; this only decides what the
   container may see.
@@ -264,7 +317,9 @@ A built image stays on its installed versions until you rebuild:
 Two zero-dependency bash suites (no `bats` / `shellspec` needed):
 
 - **`tests/run.sh`** — unit tests for the host-side pure logic: `bin/ab`'s `compute_names`
-  (project → container/volume name; determinism + collision-distinctness) and the
+  (project → container/volume name; determinism + collision-distinctness), its
+  `ab_config_candidates` / `ab_config_file` (the four-tier per-machine/per-project search —
+  order, first-match-wins, and that each of the four files resolves independently), and the
   entrypoint's `ab_parse_port_line` (ports-file parsing). It sources the scripts directly —
   they're written to be source-safe — so **no Docker** is needed:
 
@@ -273,8 +328,9 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
   ```
 
 - **`tests/smoke.sh`** — integration test against a *running* project container: verifies
-  the `~/.config/agentbox/` wiring end-to-end (env vars present, `setup.sh` tool installed,
-  the `127.0.0.1:<port>` forward reaches the host service) and that confinement is unchanged
+  the `~/.config/agentbox/` wiring end-to-end for the files actually resolved for this
+  machine + project (env vars present, `setup.sh` tool installed, the `127.0.0.1:<port>`
+  forward reaches the host service) and that confinement is unchanged
   (`Privileged=false`, `CapAdd=null`):
 
   ```bash

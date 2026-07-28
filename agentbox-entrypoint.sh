@@ -19,6 +19,13 @@ DOCKERD_LOG=/var/log/dockerd.log
 AB_CFG=/home/agentbox/.config/agentbox
 FORWARD_LOG=/var/log/agentbox-forward.log
 SETUP_LOG=/var/log/agentbox-setup.log
+# Which `ports` / `setup.sh` to use. ab resolves them per machine + project on the host (see
+# ab_config_file in bin/ab: machines/<machine>/projects/<path>/… and its three fallbacks) and
+# passes the winner here as a container-side path under the ro-mounted config dir. The defaults
+# are the plain top-level files, so a container started WITHOUT ab — the bare `docker run` in
+# the README — behaves exactly as it did before per-project config existed.
+AB_PORTS_FILE="${AGENTBOX_PORTS_FILE:-$AB_CFG/ports}"
+AB_SETUP_FILE="${AGENTBOX_SETUP_FILE:-$AB_CFG/setup.sh}"
 
 ensure_dockerd() {
   if docker info >/dev/null 2>&1; then
@@ -64,7 +71,7 @@ ab_port_bindable() {
   (( ${#p} <= 5 && 10#$p >= 1024 && 10#$p <= 65535 ))
 }
 
-# Forward each host port declared in $AB_CFG/ports onto container loopback, so scripts that
+# Forward each host port declared in $AB_PORTS_FILE onto container loopback, so scripts that
 # use 127.0.0.1:<port> (e.g. MAC_HOST=127.0.0.1 MAC_PORT=2222) reach the matching host
 # service. Each forwarder is an in-container socat run as the unprivileged agentbox user,
 # bridging 127.0.0.1:<port> -> host.docker.internal:<port> (the host gateway; ab adds the
@@ -75,7 +82,7 @@ ab_port_bindable() {
 # is logged to $FORWARD_LOG (ab exec cat $FORWARD_LOG) instead of hanging (which would also
 # leak a socat child per attempt). No-op without a ports file.
 forward_ports() {
-  [ -f "$AB_CFG/ports" ] || return 0
+  [ -f "$AB_PORTS_FILE" ] || return 0
   if ! command -v socat >/dev/null 2>&1; then
     echo "agentbox: ports declared but 'socat' not in the image — rebuild it (ab rebuild)." >&2
     return 0
@@ -101,7 +108,7 @@ forward_ports() {
         echo "agentbox: ignoring malformed ports line: $line (expected a bare port, e.g. 2222)" >&2 ;;
       esac
     fi
-  done < "$AB_CFG/ports"
+  done < "$AB_PORTS_FILE"
 }
 
 # Print a loud, self-contained summary when setup.sh fails, so `ab logs` shows *why* without
@@ -111,10 +118,12 @@ forward_ports() {
 # $SETUP_LOG is root-owned (the redirect is opened by this root subshell; only the setup.sh
 # invocation drops to agentbox via runuser), so tailing it here is fine. Extracted as a function
 # so tests/run.sh can exercise the message format directly.
+# $2 is the setup script that actually ran — with four candidate locations per config file,
+# naming the one that failed matters. Defaults to a bare "setup.sh" when omitted.
 ab_setup_fail() {
-  local rc="$1"
+  local rc="$1" path="${2:-setup.sh}"
   {
-    echo "agentbox: ERROR — ~/.config/agentbox/setup.sh exited $rc (tool install incomplete)."
+    echo "agentbox: ERROR — $path exited $rc (tool install incomplete)."
     echo "agentbox:        the container stays up; claude/codex still work."
     echo "agentbox:        ---- last 40 lines of setup output ----"
     { tail -n 40 "$SETUP_LOG" 2>/dev/null || true; } | sed 's/^/agentbox:        /'
@@ -146,15 +155,17 @@ ab_step_fail() {
 # extra tools. Backgrounded so `ab start` returns immediately; a failure is reported loudly to
 # the container log via ab_setup_fail (visible in `ab logs`), not fatal.
 run_setup() {
-  [ -f "$AB_CFG/setup.sh" ] || return 0
+  [ -f "$AB_SETUP_FILE" ] || return 0
   local hash marker
-  hash="$(sha256sum "$AB_CFG/setup.sh" | cut -c1-16)"
+  # Hash the CONTENT, not the path: switching to a differently-resolved setup.sh (a new
+  # per-project one, say) re-runs it, while moving the same script between tiers does not.
+  hash="$(sha256sum "$AB_SETUP_FILE" | cut -c1-16)"
   marker="/home/agentbox/.agentbox-setup-done-$hash"
   if [ -e "$marker" ]; then
     echo "agentbox: setup.sh unchanged since last run; skipping." >&2
     return 0
   fi
-  echo "agentbox: running setup.sh (background)..." >&2
+  echo "agentbox: running $AB_SETUP_FILE (background)..." >&2
   # setsid detaches the run into its own session, reparenting it to PID 1 (tini, via ab's
   # --init) so it's reaped on exit — instead of lingering as a zombie child of the
   # `tail -f /dev/null` the entrypoint execs into next (tail never wait()s). Same trick the
@@ -164,15 +175,15 @@ run_setup() {
   export -f ab_setup_fail
   # shellcheck disable=SC2016  # $1/$2/$3 are expanded by the inner bash -c, not this shell — but the `setsid` prefix stops shellcheck recognizing bash -c (so it thinks the $ are literal)
   setsid bash -c '
-    AB_CFG="$1"; SETUP_LOG="$2"; marker="$3"
-    if runuser -u agentbox -- bash "$AB_CFG/setup.sh" >>"$SETUP_LOG" 2>&1; then
+    setup="$1"; SETUP_LOG="$2"; marker="$3"
+    if runuser -u agentbox -- bash "$setup" >>"$SETUP_LOG" 2>&1; then
       runuser -u agentbox -- bash -c "umask 077 && touch \"$marker\""
       echo "agentbox: setup.sh completed." >&2
       echo "agentbox: setup.sh completed." >>"$SETUP_LOG" 2>&1
     else
-      ab_setup_fail "$?"
+      ab_setup_fail "$?" "$setup"
     fi
-  ' _ "$AB_CFG" "$SETUP_LOG" "$marker" &
+  ' _ "$AB_SETUP_FILE" "$SETUP_LOG" "$marker" &
 }
 
 # --- executable body (skipped when sourced for tests) ---------------------------
