@@ -119,6 +119,7 @@ ab status            # is it running?
 ab config            # which per-machine/per-project config files are in effect
 ab logs              # tail container / inner-dockerd logs
 ab rebuild           # rebuild the image and recreate the container (then `ab claude`/`ab codex`, etc.)
+ab --version         # print the version
 ```
 
 `ab start` and `rebuild` verify `sysbox-runc` is registered on the host and
@@ -164,7 +165,7 @@ Environment variables:
 
 agentbox is portable by default, but a host can opt into extras by creating
 `~/.config/agentbox/`. **If the directory is absent, agentbox behaves exactly as without it**
-— other machines are unaffected. If present, it's mounted read-only and four optional files
+— other machines are unaffected. If present, it's mounted read-only and six optional files
 each drive one mechanism (copy-pasteable samples live in
 [`examples/agentbox-config/`](./examples/agentbox-config)):
 
@@ -174,6 +175,8 @@ each drive one mechanism (copy-pasteable samples live in
 | `mounts` | one host path per line (`src` or `src dst`, optionally ending `ro`/`rw`; `#` comments) | each host path is bind-mounted into the container — **files and directories both** — read-only unless the line ends `rw`. A single `src` mounts at the same path, `src dst` at an explicit destination. A leading `~` is `$HOME` on the host and `/home/agentbox` in the container, so `~/.ssh/id_ed25519` → `/home/agentbox/.ssh/id_ed25519`. No copy is taken, so host-side changes are visible live. A line whose source is missing, or whose destination agentbox already uses, is reported and skipped |
 | `ports` | one host port per line (1024-65535) | an in-container `socat` exposes each on container loopback `127.0.0.1:<port>` → `host.docker.internal:<port>`, so scripts using `127.0.0.1:<port>` reach the matching host service unchanged (socat binds as the unprivileged agentbox user, so a port below 1024 is rejected at start) |
 | `setup.sh` | bash, run as agentbox | installs extra tools not in the shared image. Runs **once per container** and re-runs automatically when the script changes |
+| `networks` | one docker network name per line | each network is attached to the container with `docker network connect` (an outer-daemon op, so it runs *after* the container is up, not as a `--network` flag) — letting the agent reach other containers on a shared network **by name**, with no host port published. Already-attached is a no-op; an unknown network is reported and skipped |
+| `Dockerfile` | a Dockerfile `FROM agentbox:latest` | a CHILD image is built (root at build — so `apt-get install` works, unlike `setup.sh`) and run instead of the base. Self-contained: no cross-tier chaining, so a winning machine/project Dockerfile must restate anything it wants from a lower tier. Edit it, then `ab rebuild`. An empty file (only comments) is treated as absent — no child is built, the base image runs |
 
 Example — reach a macOS guest whose SSH the host forwards at `127.0.0.1:2222`, install
 `micro`, and copy in the SSH key a script needs to reach it:
@@ -184,11 +187,22 @@ cp examples/agentbox-config/{env,mounts,ports,setup.sh} ~/.config/agentbox/
 ab destroy && ab start     # pick up the new mount + flags
 ```
 
+Example — reach a database running as another container on the `lab` network, and install the
+`psql` client to query it (no host port to publish; `psql` needs root at build, which `setup.sh`
+can't provide — see `Dockerfile`):
+
+```bash
+mkdir -p ~/.config/agentbox
+cp examples/agentbox-config/{networks,Dockerfile} ~/.config/agentbox/
+ab rebuild          # build the child image (psql); networks attach on start
+# then, inside the container (`ab bash`), reach the DB by its container name on the network:
+#   psql -h <db-container-name> -U <user> -d <db>
+```
+
 ### Scoping config to a machine or a project
 
-The four files above apply everywhere. To vary them, put a copy under `machines/<machine>/`,
-`projects/<project-path>/`, or both — **each of the four is resolved separately**, first match
-wins:
+The six files above apply everywhere. To vary them, put a copy under `machines/<machine>/`,
+`projects/<project-path>/`, or both — **each is resolved separately**, first match wins:
 
 ```
 ~/.config/agentbox/machines/<machine>/projects/<project-path>/env   # this project, this machine
@@ -260,6 +274,18 @@ networking.firewall.interfaces.docker0.allowedTCPPorts = [ 2222 ];
   container) → editing it needs `ab destroy && ab start`.
 - `ports` and `setup.sh` are read from the live mount → a plain `ab stop && ab start` picks up
   changes (`setup.sh` re-runs only if its content changed).
+- `networks` is attached after the container is up (`docker network connect`, an outer-daemon
+  op ab can't do from inside) → a plain `ab stop && ab start` picks up changes (no rebuild). It
+  is skipped on the already-running early-return of `ab start`, so adding a network to a
+  running container also needs `ab stop && ab start`.
+- `Dockerfile` builds a child image → editing it needs `ab rebuild`. The child's cache key
+  folds the base image tag + this Dockerfile's text, so a base rebuild OR a Dockerfile edit
+  invalidates the cached child — but editing a `COPY`'d sibling WITHOUT touching the Dockerfile
+  text does not, and also needs `ab rebuild` to re-bake. A plain `ab start` after an edit
+  reuses the old child (`docker start` does not rebuild). An empty `Dockerfile` (only
+  comments/blanks) is treated as absent — no child is built, the base image runs — so an empty
+  `Dockerfile` at a specific tier opts that machine/project out of a less-specific one (absent
+  == empty, the same property the other files already have).
 - Which *tier* wins is decided at container creation (`ab` resolves the search and passes the
   chosen `ports`/`setup.sh` to the container) → adding a **more specific** file where a less
   specific one was already in effect needs `ab destroy && ab start`. Editing the contents of
@@ -329,7 +355,7 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
 - **`tests/run.sh`** — unit tests for the host-side pure logic: `bin/ab`'s `compute_names`
   (project → container/volume name; determinism + collision-distinctness), its
   `ab_config_candidates` / `ab_config_file` (the four-tier per-machine/per-project search —
-  order, first-match-wins, and that each of the four files resolves independently), its
+  order, first-match-wins, and that each file resolves independently), its
   `ab_parse_mounts_line` / `ab_mount_dest_owner` (the `src [dst] [ro|rw]` grammar and
   duplicate-destination detection), and the entrypoint's `ab_parse_port_line` (ports-file
   parsing). It sources the scripts directly —
@@ -352,6 +378,8 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
 
 ## Notes
 
+- `ab --version` prints agentbox's version (also shown in the `ab config` header). Versioning
+  is patch-only for now — the tool is public but not yet released.
 - The container user matches your host uid/gid, so files written to `/workspace` are
   owned by you on the host (no `root`-owned files, no git "dubious ownership" errors).
 - The container's hostname matches the real host's (`--hostname "$(hostname)"`), so tools

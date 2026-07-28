@@ -1,0 +1,25 @@
+# ~/.config/agentbox/networks — docker networks to attach this container to, one name per line.
+#
+# Each line is a single docker network name (e.g. `lab`). `#` starts a comment; a trailing
+# comment is allowed. One name per line — a second token on a line is rejected, and names are
+# [a-zA-Z0-9_.-]+ (a value starting with `-` is rejected so `docker network connect` can't read
+# it as a flag).
+#
+# Why a separate file (not a `--network` flag): joining a docker network is done with
+# `docker network connect`, an OUTER-daemon operation on an EXISTING container. ab can't do it
+# from inside the Sysbox container, so it runs AFTER the container is up (in `ab start` /
+# `ab rebuild`), not as a `docker run` flag at create time.
+#
+# The point: reach other containers on a shared docker network by NAME. A container already on
+# `lab` (e.g. a database the host runs via `docker compose up`) is then reachable from inside
+# agentbox as `lab`-network DNS — `host: <container-name>`. No host port needs to be published,
+# and the `ports` / `host.docker.internal` mechanism isn't involved.
+#
+# Apply: networks attach after start, NOT at creation, so a plain `ab stop && ab start` picks up
+# changes (no rebuild). Already-attached networks are a no-op (idempotent across `ab start`). A
+# network that doesn't exist, or a line that fails to parse, is reported and skipped — it won't
+# stop the container.
+#
+# Note: this is skipped on the already-running early-return path of `ab start`, so adding a
+# network to a RUNNING container needs `ab stop && ab start`.
+lab

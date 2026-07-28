@@ -17,6 +17,7 @@
 #   ab bash                  docker exec bash
 #   ab exec <cmd...>         docker exec an arbitrary command (as agentbox)
 #   ab rebuild               rebuild the image and recreate the running container
+#   ab --version             print the agentbox version
 #
 # Each project path gets its own container (and its own inner-docker data root), so
 # per-container state — notably CARGO_TARGET_DIR=/tmp/target — persists across ab
@@ -28,6 +29,8 @@
 set -euo pipefail
 
 IMAGE_NAME="agentbox"
+# Public but unreleased; bump PATCH only until there's a real release / second user.
+AB_VERSION='0.0.1'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -117,6 +120,17 @@ ab_config_show() {
   if [ -z "$1" ]; then printf '(none)'; else printf '%s' "${1/#"$HOME"/\~}"; fi
 }
 
+# Like ab_config_show, but for the dockerfile slot specifically: an empty (comments/blanks-only)
+# Dockerfile is the README's sanctioned way to opt a tier out of a less-specific one, but a bare
+# path gives no hint of that — flag it so `ab config` doesn't imply a child image will build when
+# it won't.
+ab_config_show_dockerfile() {
+  [ -n "$1" ] || { printf '(none)'; return 0; }
+  local note=""
+  ab_dockerfile_has_content "$1" || note=' (empty — base image runs)'
+  printf '%s%s' "${1/#"$HOME"/\~}" "$note"
+}
+
 # Resolve all four once, up front: `ab config` prints them, and cmd_start/build_user_mounts/
 # run_args below consume them. Empty string = "no such config file on this host for this project".
 # cfg_files_legacy is NOT a config file — `files` was replaced by `mounts`, and this only exists
@@ -125,12 +139,16 @@ cfg_env=""
 cfg_mounts=""
 cfg_ports=""
 cfg_setup=""
+cfg_networks=""
+cfg_dockerfile=""
 cfg_files_legacy=""
 if [ -d "$AB_CFG_ROOT" ]; then
   cfg_env="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" env)"
   cfg_mounts="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" mounts)"
   cfg_ports="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" ports)"
   cfg_setup="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" setup.sh)"
+  cfg_networks="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" networks)"
+  cfg_dockerfile="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" Dockerfile)"
   cfg_files_legacy="$(ab_config_file "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" files)"
 fi
 
@@ -210,8 +228,48 @@ EOF
   fi
 }
 
+# A resolved Dockerfile with no instruction lines (only comments/blanks) is "empty": treat it as
+# absent, so an empty Dockerfile at a specific tier means "no child image here" (use the base) —
+# the same way an empty env/mounts/ports/setup/networks file is a no-op (absent == empty). The
+# empty tier still SHADOWS lower tiers (first existing file wins); this only makes its effect a
+# no-op, so it's how a machine/project opts out of a less-specific Dockerfile. Pure (reads the
+# file), so tests/run.sh can exercise it directly. '#' starts a comment only at a line's start
+# (Dockerfile rule), so an inline '#' in an instruction is preserved and still counts as content.
+ab_dockerfile_has_content() {
+  [ -f "$1" ] || return 1          # absent file -> no content (absent == empty)
+  local line t
+  while IFS= read -r line || [ -n "$line" ]; do
+    t="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
+    t="${t%"${t##*[![:space:]]}"}"          # trim trailing whitespace
+    [ -n "$t" ] || continue                 # blank line
+    case "$t" in '#'*) continue ;; esac     # comment line
+    return 0                                # an instruction line -> has content
+  done < "$1"
+  return 1                                  # only comments/blanks -> empty
+}
+
+# Untag stale <uid> image tags, keeping only $keep. Matches tags containing $match; when $exclude
+# is non-empty, tags containing it are left alone (so the base-tag prune doesn't sweep up child
+# tags, which share the "${IMAGE_NAME}:${uid}-" prefix). Best-effort, same as the pipelines this
+# replaces: a tag still pinned by a running container fails removal silently (the trailing
+# `|| true`) and is retried on the next prune once nothing pins it. Kept as one pipeline (not
+# intermediate command substitutions) so a no-match `grep` — a normal outcome, not an error —
+# doesn't trip `set -e` via pipefail; `|| true` covers the whole pipeline's exit status.
+prune_images() {
+  local match="$1" exclude="${2:-}" keep="$3"
+  if [ -n "$exclude" ]; then
+    docker image ls --format '{{.Repository}}:{{.Tag}}' \
+      | grep -F "$match" | grep -vF "$exclude" | grep -vxF "$keep" \
+      | xargs -r docker image rm >/dev/null 2>&1 || true
+  else
+    docker image ls --format '{{.Repository}}:{{.Tag}}' \
+      | grep -F "$match" | grep -vxF "$keep" \
+      | xargs -r docker image rm >/dev/null 2>&1 || true
+  fi
+}
+
 build_image() {
-  local force="${1:-}" files=() f digest tag log
+  local force="${1:-}" files=() f digest tag log child
   [ -f "$CONTEXT/Dockerfile" ] || {
     echo "ab: Dockerfile not found at $CONTEXT/Dockerfile" >&2
     exit 1
@@ -238,16 +296,59 @@ build_image() {
         -t "$tag" -t "$IMAGE_NAME:latest" "$CONTEXT" 2>&1)"; then
       printf '%s\n' "$log" >&2
       echo "ab: image build failed (see above)" >&2
-      exit 1
+      return 1
     fi
     # Prune stale per-uid tags from prior builds (keep only this one + :latest). Best-effort:
     # a running container still references an old image's layers, so rmi just untags it then;
     # errors (image in use) are ignored. Stops agentbox:<uid>-<oldhash> images piling up.
-    docker image ls --format '{{.Repository}}:{{.Tag}}' \
-      | grep -F "${IMAGE_NAME}:${uid}-" | grep -vxF "$tag" \
-      | xargs -r docker image rm >/dev/null 2>&1 || true
+    prune_images "${IMAGE_NAME}:${uid}-" "${IMAGE_NAME}:${uid}-custom-" "$tag"
   fi
-  printf '%s' "$tag"
+  if [ -n "$cfg_dockerfile" ] && ab_dockerfile_has_content "$cfg_dockerfile"; then
+    child="$(build_user_image "$tag" "$force")" || return 1
+    printf '%s' "$child"
+  else
+    printf '%s' "$tag"
+  fi
+}
+
+# Build the user's child image (FROM agentbox:latest) when a user-side Dockerfile is resolved —
+# the place for tools that need root at build (apt-get install …), keeping the repo base lean.
+# The child is self-contained: no cross-tier chaining, so a winning machine/project Dockerfile
+# must restate anything it wants from a lower tier (e.g. micro). Edit it, then `ab rebuild`.
+#
+# Mirrors build_image's shape: no --pull (FROM agentbox:latest resolves from the LOCAL store
+# build_image just refreshed — never a registry); silent on success, full log on failure; and a
+# per-uid child prune keeping only the current child tag. The digest folds base_tag + the
+# Dockerfile text, so a base rebuild OR a Dockerfile edit invalidates the cached child. NOTE: a
+# COPY'd sibling edited WITHOUT touching the Dockerfile text leaves this digest unchanged — run
+# `ab rebuild` to re-bake (documented in the README).
+build_user_image() {
+  local base_tag="$1" force="${2:-}" ctx digest child_tag log
+  # The Dockerfile (or a dir on its path) may be a symlink whose target falls outside the build
+  # context; BuildKit won't follow such a symlink, so building from the resolved path fails with
+  # "failed to read dockerfile: open Dockerfile: no such file or directory". Resolve to the
+  # PHYSICAL file/dir (readlink -f) so the context is always real files docker reads directly —
+  # works the same whether the path is a symlink or not. (The digest below cats the same path;
+  # cat follows any symlink to the real content, so the key still matches what's built.)
+  ctx="$(dirname "$(readlink -f "$cfg_dockerfile")")"
+  digest="$(printf '%s\n%s\n' "$base_tag" "$(cat "$cfg_dockerfile")" | sha256sum | cut -c1-12)"
+  child_tag="$IMAGE_NAME:${uid}-custom-${digest}"
+  if [ "$force" = "force" ] || ! docker image inspect "$child_tag" >/dev/null 2>&1; then
+    echo "ab: building child image $child_tag (FROM $base_tag) ..." >&2
+    # Context = the Dockerfile's physical dir (resolved above); let docker find ./Dockerfile
+    # there (the resolved file is always <dir>/Dockerfile). Mirrors how build_image builds base.
+    if ! log="$(cd "$ctx" && docker build --progress=plain -t "$child_tag" . 2>&1)"; then
+      printf '%s\n' "$log" >&2
+      echo "ab: child image build failed (see above)" >&2
+      return 1
+    fi
+    # Prune stale per-uid CHILD tags (base tags are pruned in build_image). Best-effort, same
+    # caveats — a running container referencing an old child image is just untagged. NOTE: at
+    # this point in `ab rebuild`, the OLD container (pinning the OLD child tag) is still running —
+    # see the re-prune at the tail of `rebuild` in main(), which catches what this one can't yet.
+    prune_images "${IMAGE_NAME}:${uid}-custom-" "" "$child_tag"
+  fi
+  printf '%s' "$child_tag"
 }
 
 is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null || true)" = "true" ]; }
@@ -260,6 +361,16 @@ wait_ready() {
   done
   echo "ab: WARNING — inner docker not ready yet; try 'ab logs'" >&2
   return 1
+}
+
+# Shared by ab_parse_mounts_line and ab_parse_network_line: drop a trailing `#` comment, collapse
+# internal whitespace, and trim both ends. Both parsers need exactly this before applying their
+# own grammar, so it's factored out rather than duplicated.
+_ab_strip_comment_and_trim() {
+  local s="${1%%#*}"      # drop a trailing # comment
+  s="$(printf '%s' "$s" | tr -s '[:space:]' ' ')"                 # collapse whitespace
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"  # trim ends
+  printf '%s' "$s"
 }
 
 # Parse one line of the mounts list: print "<src>\t<dst>\t<mode>", or nothing for a comment,
@@ -277,9 +388,8 @@ wait_ready() {
 # returns 0 — the caller runs it in a command substitution under `set -e`, and distinguishes
 # "nothing to do" from "malformed" itself (see build_user_mounts).
 ab_parse_mounts_line() {
-  local s="${1%%#*}"      # drop a trailing # comment
-  s="$(printf '%s' "$s" | tr -s '[:space:]' ' ')"                 # collapse whitespace
-  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"  # trim ends
+  local s
+  s="$(_ab_strip_comment_and_trim "$1")"
   [ -n "$s" ] || return 0
   local a b c extra src dst mode
   read -r a b c extra <<<"$s" || true
@@ -297,6 +407,24 @@ ab_parse_mounts_line() {
     src="$a"; dst="$a"; mode=ro
   fi
   printf '%s\t%s\t%s\n' "$src" "$dst" "$mode"
+}
+
+# Parse one line of the networks list: print the docker network name, or nothing for a comment,
+# blank, or malformed line. One network name per line (e.g. `lab`); `#` starts a comment.
+#
+# Docker network names are `[a-zA-Z0-9_.-]+`, so a value outside that set — or starting with `-`,
+# which `docker network connect` would read as a flag — is rejected as malformed here rather than
+# handed to docker. Mirrors ab_parse_mounts_line's contract: environment-independent (no
+# expansion), extracted so tests/run.sh can exercise it directly, and always returns 0 — the
+# caller runs it under `set -e` and tells blank/comment from a typo'd line itself (connect_networks).
+ab_parse_network_line() {
+  local s
+  s="$(_ab_strip_comment_and_trim "$1")"
+  [ -n "$s" ] || return 0
+  case "$s" in
+    *[!A-Za-z0-9_.-]* | -*) return 0 ;;   # not a single valid network-name token
+    *) printf '%s\n' "$s" ;;
+  esac
 }
 
 # Which of ab's own mounts already claims <dst>, if any (printed as the offending spec). A user
@@ -405,6 +533,48 @@ warn_legacy_files() {
   return 0
 }
 
+# Attach the container to each docker network in the resolved `networks` list. Unlike mounts/env
+# (docker-run flags), a network can't be joined at create time from inside a Sysbox container —
+# `docker network connect` is an OUTER-daemon op on the container, run AFTER it exists. Hence it
+# runs in cmd_start/rebuild once the container is up, NOT as a `docker run` flag.
+#
+# Already-attached is success (idempotent across `ab start`); other failures warn and continue
+# (non-fatal — a missing network shouldn't stop the container). Skipped on cmd_start's
+# already-running early return, so adding/changing an entry on a running container needs
+# `ab stop && ab start` (a plain `docker start` reuses the prior network set). No-op without the file.
+connect_networks() {
+  local list="$cfg_networks"
+  [ -n "$list" ] || return 0
+  local line net members lead n=0 ok=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    net="$(ab_parse_network_line "$line")" || true
+    if [ -z "$net" ]; then
+      lead="${line#"${line%%[![:space:]]*}"}"
+      case "$lead" in '' | '#'*) ;; *)
+        echo "ab: networks: ignoring malformed line: $line (expected one network name)" >&2 ;;
+      esac
+      continue
+    fi
+    n=$((n+1))
+    members="$(docker network inspect "$net" -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)" || {
+      echo "ab: networks: no such docker network, skipping: $net" >&2; continue; }
+    if printf '%s' "$members" | tr ' ' '\n' | grep -qxF "$cname"; then
+      ok=$((ok+1))   # already attached — idempotent, stay quiet
+      continue
+    fi
+    if docker network connect "$net" "$cname" 2>/dev/null; then
+      ok=$((ok+1))
+      echo "ab: networks: attached $cname to $net" >&2
+    else
+      echo "ab: networks: failed to attach $cname to $net (see: docker network connect $net $cname)" >&2
+    fi
+  done < "$list"
+  if [ "$n" -gt 0 ]; then
+    echo "ab: networks: $ok/$n network(s) attached for $cname" >&2
+  fi
+  return 0
+}
+
 cmd_start() {
   require_sysbox
   # Create the bind-mount sources as the invoking host user BEFORE `docker run`: Docker
@@ -412,7 +582,7 @@ cmd_start() {
   # can't write to (claude/codex auth & sessions would fail). Creating them here prevents it.
   mkdir -p "$HOME/.claude" "$HOME/.codex"
   local tag
-  tag="$(build_image)"
+  tag="$(build_image)" || exit 1
   warn_legacy_files
   if is_running; then
     echo "ab: $cname is already running."
@@ -429,15 +599,17 @@ cmd_start() {
     build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
     docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
   fi
+  connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
   # Non-blocking: return as soon as the container is up. The entrypoint brings the inner
   # dockerd up in the background; `ab claude`/`ab exec` work right away (claude needs no
   # dockerd), and inner-docker callers find it ready shortly after.
 }
 
-# Show which of the four config files are in effect for this machine + project, and the search
+# Show which config files are in effect for this machine + project, and the search
 # that produced them. With four tiers per file, "why is THAT setup.sh running?" is otherwise a
 # manual walk of the tree — this answers it in one command, without starting a container.
 cmd_config() {
+  echo "agentbox $AB_VERSION"
   local root_note=""
   [ -d "$AB_CFG_ROOT" ] || root_note="   (absent — no per-host config on this machine)"
   echo "machine: $MACHINE"
@@ -445,12 +617,14 @@ cmd_config() {
   echo "root:    ${AB_CFG_ROOT/#"$HOME"/\~}$root_note"
   echo
   echo "in effect:"
-  printf '  %-9s %s\n' "env"      "$(ab_config_show "$cfg_env")"
-  printf '  %-9s %s\n' "mounts"   "$(ab_config_show "$cfg_mounts")"
-  printf '  %-9s %s\n' "ports"    "$(ab_config_show "$cfg_ports")"
-  printf '  %-9s %s\n' "setup.sh" "$(ab_config_show "$cfg_setup")"
+  printf '  %-11s %s\n' "env"        "$(ab_config_show "$cfg_env")"
+  printf '  %-11s %s\n' "mounts"     "$(ab_config_show "$cfg_mounts")"
+  printf '  %-11s %s\n' "ports"      "$(ab_config_show "$cfg_ports")"
+  printf '  %-11s %s\n' "setup.sh"   "$(ab_config_show "$cfg_setup")"
+  printf '  %-11s %s\n' "networks"   "$(ab_config_show "$cfg_networks")"
+  printf '  %-11s %s\n' "dockerfile" "$(ab_config_show_dockerfile "$cfg_dockerfile")"
   echo
-  echo "search order (first match wins; each of env, mounts, ports, setup.sh separately):"
+  echo "search order (first match wins; each of env, mounts, ports, setup.sh, networks, dockerfile separately):"
   ab_config_candidates "${AB_CFG_ROOT/#"$HOME"/\~}" "$MACHINE" "$PROJECT_DIR" '<name>' | sed 's/^/  /'
   # A leftover `files` is not config any more — surface it here too, not just at `ab start`.
   if [ -n "$cfg_files_legacy" ]; then
@@ -534,18 +708,26 @@ main() {
     ;;
   rebuild)
     require_sysbox
-    tag="$(build_image force)"
+    tag="$(build_image force)" || exit 1
     mkdir -p "$HOME/.claude" "$HOME/.codex"
     warn_legacy_files
     echo "ab: recreating $cname with $tag ..." >&2
     docker rm -f "$cname" >/dev/null 2>&1 || true
     build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
     docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
+    connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
     wait_ready
+    # Re-prune child tags now that the old container (which pinned the superseded one) is gone —
+    # build_user_image's own prune above ran BEFORE `docker rm -f` and so couldn't remove it.
+    # Gated on $tag actually being a child tag: this project may have no Dockerfile at all, in
+    # which case $tag is the base tag and sweeping "*-custom-*" here would reach OTHER projects'
+    # child tags (they're not project-scoped) instead of just this one's.
+    [[ "$tag" == *-custom-* ]] && prune_images "${IMAGE_NAME}:${uid}-custom-" "" "$tag"
     ;;
   # Help = this header comment block, with the leading `# ` stripped, printed as-is
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
+  --version) echo "ab $AB_VERSION"; exit 0 ;;
   *) cmd_exec "$@" ;;
   esac
 }

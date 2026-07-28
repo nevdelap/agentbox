@@ -129,7 +129,6 @@ ENV CARGO_TARGET_DIR=/tmp/target
 # the agentbox user via `docker exec --user agentbox` (see bin/ab). (At runtime `ab` passes
 # --init, so docker's bundled tini is PID 1 and reaps the entrypoint's backgrounded children;
 # the entrypoint itself runs as its child.)
-USER root
 WORKDIR /workspace
 ENTRYPOINT ["agentbox-entrypoint"]
 # "daemon" = start the inner dockerd and keep the container up for `docker exec`.

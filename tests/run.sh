@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Unit tests for agentbox host-side logic:
-#   - bin/ab                :: compute_names()  (project dir -> slug/hash/cname/dvol)
-#   - agentbox-entrypoint.sh :: ab_parse_port_line()  (ports-file line -> port or nothing)
+#   - bin/ab                :: compute_names, ab_config_candidates, ab_config_file,
+#                              ab_config_container_path, ab_parse_mounts_line, ab_mount_dest_owner,
+#                              ab_parse_network_line, ab_dockerfile_has_content
+#   - agentbox-entrypoint.sh :: ab_parse_port_line, ab_setup_fail, ab_step_fail
+#   - tests/smoke.sh         :: ab_parse_env_line  (sourced for this one function; see below)
 #
 # Zero dependencies — plain bash. Run: bash tests/run.sh
 #
@@ -113,6 +116,10 @@ mkdir -p "$_cfg/machines/nevsmachine/setup.sh"
 _mk "$_cfg/setup.sh"
 assert_eq "directory is not a match" "$_cfg/setup.sh" "$(_r setup.sh)"
 assert_eq "always returns 0"       "0"               "$(_r nosuchname >/dev/null; echo $?)"
+# A user-side Dockerfile (child image, FROM agentbox:latest) resolves the same four-tier way,
+# independently of the other names — same property the ports case above pins.
+_mk "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/Dockerfile"
+assert_eq "Dockerfile resolves (tier 1)" "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/Dockerfile" "$(_r Dockerfile)"
 rm -rf "$_cfg"
 
 echo
@@ -181,6 +188,41 @@ assert_eq "3rd token not a mode"     ""                                     "$(a
 assert_eq "four tokens rejected"     ""                                     "$(ab_parse_mounts_line '/a /b rw extra')"
 assert_eq "bare mode rejected"       ""                                     "$(ab_parse_mounts_line 'rw')"
 assert_eq "returns 0 always"         "0"                                    "$(ab_parse_mounts_line '/a /b /c /d'; echo $?)"
+
+echo
+echo "ab_parse_network_line (bin/ab)"
+# One docker network name per line; # comments (full-line and trailing) and blanks yield nothing.
+# Names are [a-zA-Z0-9_.-]+, and a leading '-' is rejected (docker network connect would read it as
+# a flag). Same always-returns-0 contract as ab_parse_mounts_line — connect_networks distinguishes
+# blank/comment from a typo'd line.
+assert_eq "plain name"            "lab"     "$(ab_parse_network_line 'lab')"
+assert_eq "surrounding spaces"    "lab"     "$(ab_parse_network_line '  lab  ')"
+assert_eq "name with dots"        "db.jl"   "$(ab_parse_network_line 'db.jl')"
+assert_eq "name with dash"        "my-net"  "$(ab_parse_network_line 'my-net')"
+assert_eq "name with underscore"  "lab_net" "$(ab_parse_network_line 'lab_net')"
+assert_eq "trailing comment"      "lab"     "$(ab_parse_network_line 'lab # the lab network')"
+assert_eq "full-line comment"     ""        "$(ab_parse_network_line '# a comment')"
+assert_eq "blank line"            ""        "$(ab_parse_network_line '')"
+assert_eq "whitespace only"       ""        "$(ab_parse_network_line '   ')"
+assert_eq "two tokens rejected"   ""        "$(ab_parse_network_line 'lab extra')"
+assert_eq "leading dash rejected" ""        "$(ab_parse_network_line '-lab')"
+assert_eq "invalid char rejected" ""        "$(ab_parse_network_line 'lab!net')"
+assert_eq "returns 0 always"      "0"       "$(ab_parse_network_line 'bad net'; echo $?)"
+
+echo
+echo "ab_dockerfile_has_content (bin/ab)"
+# A resolved Dockerfile with no instruction lines (only comments/blanks) is "empty" -> treated
+# as ABSENT (no child image; the base runs), so absent == empty (same property the other files
+# already have). Anything with a real instruction line has content. Real tmpfiles.
+_df="$(mktemp)"
+printf '' >"$_df";                        assert_eq "empty file -> no content"            "1" "$(ab_dockerfile_has_content "$_df"; echo $?)"
+printf '\n\n  \n' >"$_df";                assert_eq "only blanks -> no content"           "1" "$(ab_dockerfile_has_content "$_df"; echo $?)"
+printf '# comment\n#another\n' >"$_df";   assert_eq "only comments -> no content"         "1" "$(ab_dockerfile_has_content "$_df"; echo $?)"
+printf '# c\nFROM agentbox:latest\n' >"$_df"; assert_eq "comment + FROM -> content"       "0" "$(ab_dockerfile_has_content "$_df"; echo $?)"
+printf 'RUN echo hi\n' >"$_df";           assert_eq "instruction -> content"              "0" "$(ab_dockerfile_has_content "$_df"; echo $?)"
+printf '  RUN echo # inline\n' >"$_df";   assert_eq "indented instr, inline # -> content" "0" "$(ab_dockerfile_has_content "$_df"; echo $?)"
+assert_eq "absent file -> no content"     "1" "$(ab_dockerfile_has_content "$_df.missing"; echo $?)"
+rm -f "$_df"
 
 echo
 echo "ab_mount_dest_owner (bin/ab)"

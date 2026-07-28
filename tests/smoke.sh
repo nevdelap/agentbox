@@ -74,13 +74,13 @@ if ! docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null | grep -q true;
   exit 1
 fi
 
-# The config files in effect for THIS machine + project. Sourcing bin/ab above resolved all four
-# (cfg_env/cfg_files/cfg_ports/cfg_setup) against the same ${AGENTBOX_DIR:-$PWD} this test keys
+# The config files in effect for THIS machine + project. Sourcing bin/ab above resolved these
+# (cfg_env/cfg_mounts/cfg_ports/cfg_setup) against the same ${AGENTBOX_DIR:-$PWD} this test keys
 # off, so each section below checks the file that was actually applied — not a hardcoded
 # top-level path that a per-machine or per-project override may have replaced.
 echo "resolved config (machine: $MACHINE)"
 printf '  %-9s %s\n' "env"      "${cfg_env:-(none)}"
-printf '  %-9s %s\n' "files"    "${cfg_files:-(none)}"
+printf '  %-9s %s\n' "mounts"   "${cfg_mounts:-(none)}"
 printf '  %-9s %s\n' "ports"    "${cfg_ports:-(none)}"
 printf '  %-9s %s\n' "setup.sh" "${cfg_setup:-(none)}"
 
