@@ -155,6 +155,8 @@ Environment variables:
 - `/etc/localtime` → `/etc/localtime` (ro, if present on the host — so in-container time
   matches the host timezone)
 - `~/.ssh` → `/home/agentbox/.ssh` (ro; only with `AGENTBOX_SSH=1`)
+- anything listed in `~/.config/agentbox/mounts` (ro unless the line ends `rw`; see
+  [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox))
 - named volume `agentbox-docker-<project>` → `/var/lib/docker` (per-project inner
   rootful docker state; `ab destroy` removes it)
 
@@ -169,7 +171,7 @@ each drive one mechanism (copy-pasteable samples live in
 | File | Shape | Effect |
 |---|---|---|
 | `env` | `KEY=VALUE` lines | passed to `docker run` via `--env-file`; visible to the entrypoint and every `ab exec` / `ab claude` / `ab codex` session |
-| `files` | one host file per line (`src` or `src dst`; `#` comments) | each host file is copied into the container (regular files only): a single `src` lands at the same path, `src dst` at an explicit destination. A leading `~` is `$HOME` on the host and `/home/agentbox` in the container, so `~/.ssh/id_ed25519` → `/home/agentbox/.ssh/id_ed25519`. Files keep their source mode and are chown'd to `agentbox`, so an SSH key (mode 600) is usable as-is |
+| `mounts` | one host path per line (`src` or `src dst`, optionally ending `ro`/`rw`; `#` comments) | each host path is bind-mounted into the container — **files and directories both** — read-only unless the line ends `rw`. A single `src` mounts at the same path, `src dst` at an explicit destination. A leading `~` is `$HOME` on the host and `/home/agentbox` in the container, so `~/.ssh/id_ed25519` → `/home/agentbox/.ssh/id_ed25519`. No copy is taken, so host-side changes are visible live. A line whose source is missing, or whose destination agentbox already uses, is reported and skipped |
 | `ports` | one host port per line (1024-65535) | an in-container `socat` exposes each on container loopback `127.0.0.1:<port>` → `host.docker.internal:<port>`, so scripts using `127.0.0.1:<port>` reach the matching host service unchanged (socat binds as the unprivileged agentbox user, so a port below 1024 is rejected at start) |
 | `setup.sh` | bash, run as agentbox | installs extra tools not in the shared image. Runs **once per container** and re-runs automatically when the script changes |
 
@@ -178,7 +180,7 @@ Example — reach a macOS guest whose SSH the host forwards at `127.0.0.1:2222`,
 
 ```bash
 mkdir -p ~/.config/agentbox
-cp examples/agentbox-config/{env,files,ports,setup.sh} ~/.config/agentbox/
+cp examples/agentbox-config/{env,mounts,ports,setup.sh} ~/.config/agentbox/
 ab destroy && ab start     # pick up the new mount + flags
 ```
 
@@ -218,7 +220,7 @@ So on `nevsmachine`, working in `~/myproj`, with this tree:
 
 `env` comes from `projects/home/nevd/myproj/env`, `ports` from
 `machines/nevsmachine/ports`, `setup.sh` from
-`machines/nevsmachine/projects/home/nevd/myproj/setup.sh`, and `files` is not configured at
+`machines/nevsmachine/projects/home/nevd/myproj/setup.sh`, and `mounts` is not configured at
 all. `ab config` prints exactly this, without starting a container:
 
 ```bash
@@ -254,18 +256,26 @@ networking.firewall.interfaces.docker0.allowedTCPPorts = [ 2222 ];
 
 **Apply semantics:**
 - `env` is baked at container creation (`--env-file`) → editing it needs `ab destroy && ab start`.
-- `files` is copied when the container is (re)started → apply edits with `ab stop && ab start`.
+- `mounts` is established at container creation (bind mounts cannot be added to a running
+  container) → editing it needs `ab destroy && ab start`.
 - `ports` and `setup.sh` are read from the live mount → a plain `ab stop && ab start` picks up
   changes (`setup.sh` re-runs only if its content changed).
 - Which *tier* wins is decided at container creation (`ab` resolves the search and passes the
   chosen `ports`/`setup.sh` to the container) → adding a **more specific** file where a less
   specific one was already in effect needs `ab destroy && ab start`. Editing the contents of
   the file already in effect does not.
-- Copying a file (e.g. an SSH key) in is a deliberate trust grant: the file is readable inside
-  the confined container. The Sysbox confinement is unchanged; this only decides what the
-  container may see.
+- Mounting a path (e.g. an SSH key) in is a deliberate trust grant: it is readable inside the
+  confined container. The Sysbox confinement is unchanged; this only decides what the container
+  may see.
+- **`rw` is a larger grant, because it is bidirectional**: the agent can modify that host path,
+  and whatever it writes there outlives `ab destroy`. This is why `ro` is the default and why
+  agentbox's own config mounts (`~/.config/home-manager`, `~/.bin`) are read-only. Each `rw`
+  line is reported by name at start, so a stray one is visible in `ab start`'s output.
 - Enabling the directory on an already-created container needs `ab destroy && ab start` (the
   mount and `--add-host` / `--env-file` flags are set at create time).
+- `mounts` line limits: paths containing spaces or commas are unsupported (whitespace separates
+  the tokens; `,` separates `--mount` options), and a destination literally named `ro`/`rw`
+  can't be expressed — a trailing `ro`/`rw` is always read as the mode.
 
 ## Nested Docker inside the container
 
@@ -319,8 +329,10 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
 - **`tests/run.sh`** — unit tests for the host-side pure logic: `bin/ab`'s `compute_names`
   (project → container/volume name; determinism + collision-distinctness), its
   `ab_config_candidates` / `ab_config_file` (the four-tier per-machine/per-project search —
-  order, first-match-wins, and that each of the four files resolves independently), and the
-  entrypoint's `ab_parse_port_line` (ports-file parsing). It sources the scripts directly —
+  order, first-match-wins, and that each of the four files resolves independently), its
+  `ab_parse_mounts_line` / `ab_mount_dest_owner` (the `src [dst] [ro|rw]` grammar and
+  duplicate-destination detection), and the entrypoint's `ab_parse_port_line` (ports-file
+  parsing). It sources the scripts directly —
   they're written to be source-safe — so **no Docker** is needed:
 
   ```bash
@@ -330,7 +342,8 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
 - **`tests/smoke.sh`** — integration test against a *running* project container: verifies
   the `~/.config/agentbox/` wiring end-to-end for the files actually resolved for this
   machine + project (env vars present, `setup.sh` tool installed, the `127.0.0.1:<port>`
-  forward reaches the host service) and that confinement is unchanged
+  forward reaches the host service, each declared `mounts` line is bound with the right
+  writability) and that confinement is unchanged
   (`Privileged=false`, `CapAdd=null`):
 
   ```bash

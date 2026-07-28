@@ -1,0 +1,39 @@
+# ~/.config/agentbox/mounts — host paths bind-mounted into the container, one per line.
+#
+# Each line is:
+#   <path>              mount host <path> at the SAME path in the container
+#   <src> <dst>         mount host <src> at container <dst>
+# optionally ending with a mode:
+#   <path> rw           ...writable
+#   <src> <dst> rw      ...writable
+# The default is `ro` (read-only) — writing `ro` explicitly is allowed and means the same thing.
+#
+# A leading ~ is $HOME on the host and /home/agentbox in the container, so the one-token form
+# works for anything under your home dir. `#` starts a comment.
+#
+# Files AND directories both work — mounting a directory is the main reason this exists. The
+# container sees host-side changes live (no copy is taken), and nothing is written back unless
+# the line says `rw`.
+#
+# `rw` is a deliberate trust grant: the agent can modify that host path, and what it writes
+# there survives `ab destroy`. Prefer the default `ro` unless you specifically want the agent's
+# output on the host.
+#
+# Not supported: paths containing spaces or commas, and a destination literally named `ro`/`rw`.
+#
+# A line whose source doesn't exist, or whose destination agentbox already uses (/workspace,
+# ~/.claude, ...), is reported and skipped — it won't stop the container from starting.
+#
+# Bind mounts are established when the container is CREATED, so changes here need
+# `ab destroy && ab start`, not just a restart.
+
+# An SSH key + config, so a script can reach a host service exposed via a forwarded port
+# (see `ports`). Read-only: the agent needs to use the key, not change it.
+~/.ssh/config
+~/.ssh/id_ed25519
+
+# A reference directory the agent should read but not modify.
+#/srv/reference /home/agentbox/reference
+
+# A scratch directory whose contents you want to keep after `ab destroy`.
+#~/agentbox-out rw

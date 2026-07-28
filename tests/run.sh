@@ -103,9 +103,9 @@ _mk "$_cfg/ports"
 assert_eq "ports resolves alone"   "$_cfg/ports"     "$(_r ports)"
 
 # Another machine's / another project's files are not ours.
-_mk "$_cfg/machines/othermachine/files"
-_mk "$_cfg/projects/home/nevd/other/files"
-assert_eq "other machine ignored"  ""                "$(_r files)"
+_mk "$_cfg/machines/othermachine/mounts"
+_mk "$_cfg/projects/home/nevd/other/mounts"
+assert_eq "other machine ignored"  ""                "$(_r mounts)"
 
 # A DIRECTORY at a candidate path is not a match — the search must fall through to the next tier
 # (mkdir -p of a deep candidate creates exactly this shape for the shallower ones).
@@ -158,16 +158,42 @@ assert_eq "reject non-numeric"     "1" "$(b ssh)"
 assert_eq "reject huge number"     "1" "$(b 99999999999999999999)"
 
 echo
-echo "ab_parse_files_line (bin/ab)"
-# ab_parse_files_line leaves a leading ~ literal (copy_files expands it later, differently per
-# side), so the expected strings are built from t='~' rather than a literal ~ in quotes.
+echo "ab_parse_mounts_line (bin/ab)"
+# Grammar: `src [dst] [ro|rw]`, mode defaulting to ro. ab_parse_mounts_line leaves a leading ~
+# literal (build_user_mounts expands it later, differently per side), so the expected strings are
+# built from t='~' rather than a literal ~ in quotes.
 t='~'
-assert_eq "same-path (one token)"   "${t}/.ssh/id_ed25519"$'\t'"${t}/.ssh/id_ed25519" "$(ab_parse_files_line "${t}/.ssh/id_ed25519")"
-assert_eq "src + dst (two tokens)"  $'/home/nevd/k\t/home/agentbox/k'          "$(ab_parse_files_line '/home/nevd/k /home/agentbox/k')"
-assert_eq "comment dropped"         ""                                         "$(ab_parse_files_line '# a comment')"
-assert_eq "blank dropped"           ""                                         "$(ab_parse_files_line '')"
-assert_eq "trailing comment"        "${t}/.ssh/k"$'\t'"${t}/.ssh/k"            "$(ab_parse_files_line "${t}/.ssh/k # my mac key")"
-assert_eq "extra spaces collapsed"  $'a\tb'                                    "$(ab_parse_files_line '  a   b  ')"
+assert_eq "src only -> dst=src, ro"  "${t}/.ssh/id_ed25519"$'\t'"${t}/.ssh/id_ed25519"$'\tro' "$(ab_parse_mounts_line "${t}/.ssh/id_ed25519")"
+assert_eq "src + dst (two tokens)"   $'/home/nevd/k\t/home/agentbox/k\tro'  "$(ab_parse_mounts_line '/home/nevd/k /home/agentbox/k')"
+# The two-token ambiguity: a trailing ro/rw is the MODE, anything else is a destination.
+assert_eq "src + rw (two tokens)"    $'/srv/data\t/srv/data\trw'            "$(ab_parse_mounts_line '/srv/data rw')"
+assert_eq "src + ro (two tokens)"    $'/srv/data\t/srv/data\tro'            "$(ab_parse_mounts_line '/srv/data ro')"
+assert_eq "src + dst + rw"           $'/srv/data\t/home/agentbox/d\trw'     "$(ab_parse_mounts_line '/srv/data /home/agentbox/d rw')"
+assert_eq "src + dst + ro"           $'/srv/data\t/home/agentbox/d\tro'     "$(ab_parse_mounts_line '/srv/data /home/agentbox/d ro')"
+assert_eq "comment dropped"          ""                                     "$(ab_parse_mounts_line '# a comment')"
+assert_eq "blank dropped"            ""                                     "$(ab_parse_mounts_line '')"
+assert_eq "whitespace dropped"       ""                                     "$(ab_parse_mounts_line '   ')"
+assert_eq "trailing comment"         "${t}/.ssh/k"$'\t'"${t}/.ssh/k"$'\tro' "$(ab_parse_mounts_line "${t}/.ssh/k # my mac key")"
+assert_eq "trailing comment + mode"  $'/srv/d\t/srv/d\trw'                  "$(ab_parse_mounts_line '/srv/d rw # writable')"
+assert_eq "extra spaces collapsed"   $'a\tb\tro'                            "$(ab_parse_mounts_line '  a   b  ')"
+# Malformed: a third token that isn't a mode, 4+ tokens, or a bare mode with no path.
+assert_eq "3rd token not a mode"     ""                                     "$(ab_parse_mounts_line '/a /b /c')"
+assert_eq "four tokens rejected"     ""                                     "$(ab_parse_mounts_line '/a /b rw extra')"
+assert_eq "bare mode rejected"       ""                                     "$(ab_parse_mounts_line 'rw')"
+assert_eq "returns 0 always"         "0"                                    "$(ab_parse_mounts_line '/a /b /c /d'; echo $?)"
+
+echo
+echo "ab_mount_dest_owner (bin/ab)"
+# A user mount onto a destination ab already uses would make `docker run` fail with "Duplicate
+# mount point", so build_user_mounts drops that line. Both spec forms in the array are matched.
+_saved_mounts=("${mounts[@]}")
+mounts=(-v "/proj:/workspace" -v "/etc/localtime:/etc/localtime:ro" --mount "type=bind,src=/srv/d,dst=/home/agentbox/d,readonly")
+assert_eq "-v dst matched"          "/proj:/workspace"          "$(ab_mount_dest_owner /workspace)"
+assert_eq "-v dst with :ro matched" "/etc/localtime:/etc/localtime:ro" "$(ab_mount_dest_owner /etc/localtime)"
+assert_eq "--mount dst matched"     "type=bind,src=/srv/d,dst=/home/agentbox/d,readonly" "$(ab_mount_dest_owner /home/agentbox/d)"
+assert_eq "unclaimed dst -> empty"  ""                          "$(ab_mount_dest_owner /home/agentbox/other)"
+assert_eq "source is not a dst"     ""                          "$(ab_mount_dest_owner /proj)"
+mounts=("${_saved_mounts[@]}")
 
 echo
 echo "ab_setup_fail (agentbox-entrypoint.sh)"

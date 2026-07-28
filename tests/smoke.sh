@@ -165,6 +165,61 @@ else
   echo "  -- no ports file resolved for this machine/project; skipping forward checks"
 fi
 
+# ---- bind mounts (the `mounts` list) ----------------------------------------
+# Each declared line must appear as a real bind mount with the right destination and the right
+# writability: `ro` (the default) is the confinement-preserving case and MUST NOT be writable;
+# `rw` is a deliberate trust grant and must be. Writability is probed with `test -w`, which the
+# kernel answers from the mount's ro flag — no file is created, so this never touches host data.
+echo
+echo "bind mounts (${cfg_mounts:-(none)})"
+if [ -n "$cfg_mounts" ]; then
+  # Destination -> RW ("true"/"false") for every bind mount docker actually established.
+  declare -A actual_rw=()
+  while read -r d rw; do
+    [ -n "$d" ] && actual_rw["$d"]="$rw"
+  done < <(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}
+{{end}}' "$cname")
+
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    parsed="$(ab_parse_mounts_line "$line")" || true
+    [ -n "$parsed" ] || continue
+    src="${parsed%%$'\t'*}"
+    rest="${parsed#*$'\t'}"
+    dst="${rest%%$'\t'*}"
+    mode="${rest##*$'\t'}"
+    src="${src/#\~/$HOME}"
+    dst="${dst/#\~//home/agentbox}"
+    # Lines ab itself rejected are absent from the container BY DESIGN, so they must not be
+    # asserted here. Same conditions, same order as build_user_mounts: comma in a path, a
+    # non-absolute src or dst, a missing source, and a destination already claimed by one of
+    # ab's own mounts (ab_mount_dest_owner reads the built-ins from the `mounts` array that
+    # sourcing bin/ab set up — build_user_mounts is not run at source time, so it holds exactly
+    # the built-ins).
+    case "$src$dst" in *,*) continue ;; esac
+    case "$src" in /*) ;; *) continue ;; esac
+    case "$dst" in /*) ;; *) continue ;; esac
+    [ -e "$src" ] || continue
+    [ -z "$(ab_mount_dest_owner "$dst")" ] || continue
+    n=$((n+1))
+    assert_eq "mounted: $dst" "1" "$([ -n "${actual_rw[$dst]:-}" ] && echo 1 || echo 0)"
+    [ -n "${actual_rw[$dst]:-}" ] || continue
+    assert_eq "  $dst is $mode" "$([ "$mode" = rw ] && echo true || echo false)" "${actual_rw[$dst]}"
+    # And the container agrees with docker's flag, from the inside.
+    assert_eq "  $dst writable=$([ "$mode" = rw ] && echo true || echo false) in-container" \
+      "$([ "$mode" = rw ] && echo true || echo false)" \
+      "$(docker exec --user agentbox "$cname" test -w "$dst" 2>/dev/null && echo true || echo false)"
+    # A mounted DIRECTORY must be listable inside — the case the old `files` copy refused.
+    if [ -d "$src" ]; then
+      assert_eq "  $dst is a listable directory" "0" \
+        "$(docker exec --user agentbox "$cname" bash -c "ls -A '$dst' >/dev/null 2>&1"; echo $?)"
+    fi
+  done < "$cfg_mounts"
+  [ "$n" -eq 0 ] && echo "  (no usable lines in $cfg_mounts)"
+else
+  echo "  -- no mounts file resolved for this machine/project; skipping mount checks"
+fi
+
 # ---- confinement (Sysbox, not --privileged) ---------------------------------
 # Fully portable: independent of any per-host config.
 echo
