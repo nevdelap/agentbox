@@ -40,7 +40,7 @@ CONTEXT="${AGENTBOX_CONTEXT:-$(cd "$(dirname "$_self")/.." && pwd)}"
 
 PROJECT_DIR="${AGENTBOX_DIR:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)" || {
-  echo "ab: project dir not found: ${AGENTBOX_DIR:-$PWD}" >&2
+  echo "agentbox: project dir not found: ${AGENTBOX_DIR:-$PWD}" >&2
   exit 1
 }
 
@@ -216,7 +216,7 @@ fi
 require_sysbox() {
   if ! docker info 2>/dev/null | grep -q 'sysbox-runc'; then
     cat >&2 <<EOF
-ab: host Docker has no 'sysbox-runc' runtime registered.
+agentbox: host Docker has no 'sysbox-runc' runtime registered.
 agentbox needs Sysbox installed on the host (a prerequisite, like Docker itself):
   - Ubuntu:  sudo bash "$CONTEXT/install-sysbox-ubuntu.sh"
   - NixOS:   copy "$CONTEXT/sysbox.nix" to /etc/nixos, import it, then
@@ -271,7 +271,7 @@ prune_images() {
 build_image() {
   local force="${1:-}" files=() f digest tag log child
   [ -f "$CONTEXT/Dockerfile" ] || {
-    echo "ab: Dockerfile not found at $CONTEXT/Dockerfile" >&2
+    echo "agentbox: Dockerfile not found at $CONTEXT/Dockerfile" >&2
     exit 1
   }
   for f in Dockerfile agentbox-entrypoint.sh .bashrc .dockerignore; do
@@ -285,7 +285,7 @@ build_image() {
   digest="$( { cat "${files[@]}"; printf 'HOST_UID=%s\nHOST_GID=%s\n' "$uid" "$(id -g)"; } | sha256sum | cut -c1-12)"
   tag="$IMAGE_NAME:${uid}-${digest}"
   if [ "$force" = "force" ] || ! docker image inspect "$tag" >/dev/null 2>&1; then
-    echo "ab: building $tag ..." >&2
+    echo "agentbox: building $tag ..." >&2
     # Capture the full build log and print it ONLY on failure (silent on success).
     # --progress=plain keeps the captured output linear/readable (no progress-bar
     # redraws) for when it is shown. Capturing into $log (not raw stdout) also keeps the
@@ -295,7 +295,7 @@ build_image() {
         --build-arg "HOST_UID=$uid" --build-arg "HOST_GID=$(id -g)" \
         -t "$tag" -t "$IMAGE_NAME:latest" "$CONTEXT" 2>&1)"; then
       printf '%s\n' "$log" >&2
-      echo "ab: image build failed (see above)" >&2
+      echo "agentbox: image build failed (see above)" >&2
       return 1
     fi
     # Prune stale per-uid tags from prior builds (keep only this one + :latest). Best-effort:
@@ -318,7 +318,7 @@ build_image() {
 #
 # Mirrors build_image's shape: no --pull (FROM agentbox:latest resolves from the LOCAL store
 # build_image just refreshed — never a registry); silent on success, full log on failure; and a
-# per-uid child prune keeping only the current child tag. The digest folds base_tag + the
+# per-project child prune keeping only the current child tag. The digest folds base_tag + the
 # Dockerfile text, so a base rebuild OR a Dockerfile edit invalidates the cached child. NOTE: a
 # COPY'd sibling edited WITHOUT touching the Dockerfile text leaves this digest unchanged — run
 # `ab rebuild` to re-bake (documented in the README).
@@ -332,21 +332,27 @@ build_user_image() {
   # cat follows any symlink to the real content, so the key still matches what's built.)
   ctx="$(dirname "$(readlink -f "$cfg_dockerfile")")"
   digest="$(printf '%s\n%s\n' "$base_tag" "$(cat "$cfg_dockerfile")" | sha256sum | cut -c1-12)"
-  child_tag="$IMAGE_NAME:${uid}-custom-${digest}"
+  # $hash (from compute_names, the same per-project id cname/dvol use) scopes the tag to THIS
+  # project: without it, two projects with different Dockerfiles share one flat
+  # "${uid}-custom-*" tag namespace, so pruning one project's stale tag could untag another
+  # project's current one (protected only when Docker still has a container pinning it). Scoping
+  # by project makes the prune below touch only this project's own tags, never another's.
+  child_tag="$IMAGE_NAME:${uid}-custom-${hash}-${digest}"
   if [ "$force" = "force" ] || ! docker image inspect "$child_tag" >/dev/null 2>&1; then
-    echo "ab: building child image $child_tag (FROM $base_tag) ..." >&2
+    echo "agentbox: building child image $child_tag (FROM $base_tag) ..." >&2
     # Context = the Dockerfile's physical dir (resolved above); let docker find ./Dockerfile
     # there (the resolved file is always <dir>/Dockerfile). Mirrors how build_image builds base.
     if ! log="$(cd "$ctx" && docker build --progress=plain -t "$child_tag" . 2>&1)"; then
       printf '%s\n' "$log" >&2
-      echo "ab: child image build failed (see above)" >&2
+      echo "agentbox: child image build failed (see above)" >&2
       return 1
     fi
-    # Prune stale per-uid CHILD tags (base tags are pruned in build_image). Best-effort, same
+    # Prune stale CHILD tags for THIS PROJECT only (base tags are pruned in build_image; other
+    # projects' child tags are a different ${hash} and never matched here). Best-effort, same
     # caveats — a running container referencing an old child image is just untagged. NOTE: at
     # this point in `ab rebuild`, the OLD container (pinning the OLD child tag) is still running —
     # see the re-prune at the tail of `rebuild` in main(), which catches what this one can't yet.
-    prune_images "${IMAGE_NAME}:${uid}-custom-" "" "$child_tag"
+    prune_images "${IMAGE_NAME}:${uid}-custom-${hash}-" "" "$child_tag"
   fi
   printf '%s' "$child_tag"
 }
@@ -359,7 +365,7 @@ wait_ready() {
     docker exec "$cname" docker info >/dev/null 2>&1 && return 0
     sleep 0.5
   done
-  echo "ab: WARNING — inner docker not ready yet; try 'ab logs'" >&2
+  echo "agentbox: WARNING — inner docker not ready yet; try 'ab logs'" >&2
   return 1
 }
 
@@ -472,7 +478,7 @@ build_user_mounts() {
       # gives a malformed ports line).
       lead="${line#"${line%%[![:space:]]*}"}"
       case "$lead" in '' | '#'*) ;; *)
-        echo "ab: mounts: ignoring malformed line: $line (expected 'src [dst] [ro|rw]')" >&2 ;;
+        echo "agentbox: mounts: ignoring malformed line: $line (expected 'src [dst] [ro|rw]')" >&2 ;;
       esac
       continue
     fi
@@ -484,38 +490,38 @@ build_user_mounts() {
     dst="${dst/#\~//home/agentbox}"   # ~ -> container home
     n=$((n+1))
     case "$src$dst" in
-      *,*) echo "ab: mounts: path contains a comma (unsupported by --mount), skipping: $src" >&2
+      *,*) echo "agentbox: mounts: path contains a comma (unsupported by --mount), skipping: $src" >&2
            continue ;;
     esac
     case "$src" in /*) ;; *)
-      echo "ab: mounts: source is not an absolute path, skipping: $src" >&2
+      echo "agentbox: mounts: source is not an absolute path, skipping: $src" >&2
       continue ;;
     esac
     case "$dst" in /*) ;; *)
-      echo "ab: mounts: destination is not an absolute path, skipping: $dst" >&2
+      echo "agentbox: mounts: destination is not an absolute path, skipping: $dst" >&2
       continue ;;
     esac
     if [ ! -e "$src" ]; then
-      echo "ab: mounts: source not found, skipping: $src" >&2
+      echo "agentbox: mounts: source not found, skipping: $src" >&2
       continue
     fi
     owner="$(ab_mount_dest_owner "$dst")"
     if [ -n "$owner" ]; then
-      echo "ab: mounts: $dst is already mounted ($owner), skipping: $src" >&2
+      echo "agentbox: mounts: $dst is already mounted ($owner), skipping: $src" >&2
       continue
     fi
     # readonly is the default; only an explicit `rw` line gets a writable bind. A rw mount lets
     # the agent write to the host path — a deliberate trust grant, so it is reported at start.
     if [ "$mode" = rw ]; then
       mounts+=(--mount "type=bind,src=$src,dst=$dst")
-      echo "ab: mounts: $src -> $dst (rw — the container can write to this host path)" >&2
+      echo "agentbox: mounts: $src -> $dst (rw — the container can write to this host path)" >&2
     else
       mounts+=(--mount "type=bind,src=$src,dst=$dst,readonly")
     fi
     ok=$((ok+1))
   done < "$list"
   if [ "$n" -gt 0 ]; then
-    echo "ab: mounts: $ok/$n mount(s) from ${list/#"$HOME"/\~}" >&2
+    echo "agentbox: mounts: $ok/$n mount(s) from ${list/#"$HOME"/\~}" >&2
   fi
   return 0
 }
@@ -527,9 +533,9 @@ build_user_mounts() {
 warn_legacy_files() {
   [ -n "$cfg_files_legacy" ] || return 0
   local shown="${cfg_files_legacy/#"$HOME"/\~}"
-  echo "ab: $shown is no longer used — \`files\` was replaced by \`mounts\`." >&2
-  echo "ab:        the line format is the same (plus an optional trailing ro|rw), so:" >&2
-  echo "ab:          mv $shown ${shown%/*}/mounts" >&2
+  echo "agentbox: $shown is no longer used — \`files\` was replaced by \`mounts\`." >&2
+  echo "agentbox:        the line format is the same (plus an optional trailing ro|rw), so:" >&2
+  echo "agentbox:          mv $shown ${shown%/*}/mounts" >&2
   return 0
 }
 
@@ -551,26 +557,26 @@ connect_networks() {
     if [ -z "$net" ]; then
       lead="${line#"${line%%[![:space:]]*}"}"
       case "$lead" in '' | '#'*) ;; *)
-        echo "ab: networks: ignoring malformed line: $line (expected one network name)" >&2 ;;
+        echo "agentbox: networks: ignoring malformed line: $line (expected one network name)" >&2 ;;
       esac
       continue
     fi
     n=$((n+1))
     members="$(docker network inspect "$net" -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)" || {
-      echo "ab: networks: no such docker network, skipping: $net" >&2; continue; }
+      echo "agentbox: networks: no such docker network, skipping: $net" >&2; continue; }
     if printf '%s' "$members" | tr ' ' '\n' | grep -qxF "$cname"; then
       ok=$((ok+1))   # already attached — idempotent, stay quiet
       continue
     fi
     if docker network connect "$net" "$cname" 2>/dev/null; then
       ok=$((ok+1))
-      echo "ab: networks: attached $cname to $net" >&2
+      echo "agentbox: networks: attached $cname to $net" >&2
     else
-      echo "ab: networks: failed to attach $cname to $net (see: docker network connect $net $cname)" >&2
+      echo "agentbox: networks: failed to attach $cname to $net (see: docker network connect $net $cname)" >&2
     fi
   done < "$list"
   if [ "$n" -gt 0 ]; then
-    echo "ab: networks: $ok/$n network(s) attached for $cname" >&2
+    echo "agentbox: networks: $ok/$n network(s) attached for $cname" >&2
   fi
   return 0
 }
@@ -585,17 +591,17 @@ cmd_start() {
   tag="$(build_image)" || exit 1
   warn_legacy_files
   if is_running; then
-    echo "ab: $cname is already running."
-    echo "ab: to recreate it (new settings/mounts), run: ab destroy && ab start"
+    echo "agentbox: $cname is already running."
+    echo "agentbox: to recreate it (new settings/mounts), run: ab destroy && ab start"
     return 0
   fi
   if exists; then
     # An existing container keeps the bind mounts it was created with — `mounts` edits only take
     # effect on a fresh `docker run`, hence the `ab destroy && ab start` in the README.
-    echo "ab: starting $cname ..." >&2
+    echo "agentbox: starting $cname ..." >&2
     docker start "$cname" >/dev/null
   else
-    echo "ab: creating + starting $cname ..." >&2
+    echo "agentbox: creating + starting $cname ..." >&2
     build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
     docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
   fi
@@ -674,26 +680,26 @@ cmd_exec() {
 main() {
   case "${1:-}" in
   start) cmd_start ;;
-  stop) if exists; then docker stop "$cname" >/dev/null && echo "ab: stopped $cname (kept; 'ab destroy' to remove)"; else echo "ab: $cname does not exist"; fi ;;
+  stop) if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi ;;
   destroy)
     # Attempt BOTH removals independently and report every failure: a failed container rm
     # must not skip the volume rm (or vice versa). Exit non-zero if either failed so a
     # partial failure isn't masked (e.g. by `ab destroy && ab start`). Explicit ifs, not
     # `A && B || true` — that form trips shellcheck SC2015 ("C may run when A is true").
     if ! exists; then
-      echo "ab: $cname does not exist"
+      echo "agentbox: $cname does not exist"
     else
       rc=0
       if docker rm -f "$cname" >/dev/null 2>&1; then
-        echo "ab: removed $cname"
+        echo "agentbox: removed $cname"
       else
-        echo "ab: failed to remove container $cname (see: docker rm -f $cname)" >&2
+        echo "agentbox: failed to remove container $cname (see: docker rm -f $cname)" >&2
         rc=1
       fi
       if docker volume rm "$dvol" >/dev/null 2>&1; then
-        echo "ab: removed inner-docker volume $dvol"
+        echo "agentbox: removed inner-docker volume $dvol"
       else
-        echo "ab: failed to remove inner-docker volume $dvol (it may still be in use)" >&2
+        echo "agentbox: failed to remove inner-docker volume $dvol (it may still be in use)" >&2
         rc=1
       fi
       exit "$rc"
@@ -711,23 +717,23 @@ main() {
     tag="$(build_image force)" || exit 1
     mkdir -p "$HOME/.claude" "$HOME/.codex"
     warn_legacy_files
-    echo "ab: recreating $cname with $tag ..." >&2
+    echo "agentbox: recreating $cname with $tag ..." >&2
     docker rm -f "$cname" >/dev/null 2>&1 || true
     build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
     docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
     connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
     wait_ready
-    # Re-prune child tags now that the old container (which pinned the superseded one) is gone —
-    # build_user_image's own prune above ran BEFORE `docker rm -f` and so couldn't remove it.
-    # Gated on $tag actually being a child tag: this project may have no Dockerfile at all, in
-    # which case $tag is the base tag and sweeping "*-custom-*" here would reach OTHER projects'
-    # child tags (they're not project-scoped) instead of just this one's.
-    [[ "$tag" == *-custom-* ]] && prune_images "${IMAGE_NAME}:${uid}-custom-" "" "$tag"
+    # Re-prune this project's child tags now that the old container (which pinned the superseded
+    # one) is gone — build_user_image's own prune above ran BEFORE `docker rm -f` and so couldn't
+    # remove it. Gated on $tag actually being a child tag: this project may have no Dockerfile at
+    # all, in which case $tag is the base tag. The ${hash} scoping means this only ever touches
+    # THIS project's own child tags, never another project's.
+    [[ "$tag" == *-custom-* ]] && prune_images "${IMAGE_NAME}:${uid}-custom-${hash}-" "" "$tag"
     ;;
   # Help = this header comment block, with the leading `# ` stripped, printed as-is
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
-  --version) echo "ab $AB_VERSION"; exit 0 ;;
+  --version) echo "agentbox $AB_VERSION"; exit 0 ;;
   *) cmd_exec "$@" ;;
   esac
 }
