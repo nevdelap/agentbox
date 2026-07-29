@@ -30,7 +30,7 @@ set -euo pipefail
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.2'
+AB_VERSION='0.0.3'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
