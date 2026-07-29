@@ -226,18 +226,6 @@ echo
 echo "confinement unchanged (Sysbox, not --privileged)"
 assert_eq "not privileged" "false" "$(docker inspect -f '{{.HostConfig.Privileged}}' "$cname")"
 assert_eq "no caps added"   "null"  "$(docker inspect -f '{{json .HostConfig.CapAdd}}' "$cname")"
-# #2 guard: the host config mounts (~/.config/home-manager, ~/.bin) must be read-only inside
-# the container, so the agent can't write back to the host's dotfile source or drop scripts in
-# ~/.bin. `test -w` is false on a read-only bind mount regardless of the dir's mode bits (the
-# kernel denies writes to ro mounts), and true on a writable one — so it detects the mount's
-# ro flag directly. Only checked when the dir exists in the container (i.e. the host had it);
-# needs a container created AFTER the :ro flags (ab destroy && ab start).
-for cdir in /home/agentbox/.config/home-manager /home/agentbox/.bin; do
-  if docker exec --user agentbox "$cname" test -d "$cdir" 2>/dev/null; then
-    assert_eq "$cdir mounted read-only" "false" \
-      "$(docker exec --user agentbox "$cname" test -w "$cdir" 2>/dev/null && echo true || echo false)"
-  fi
-done
 
 # ---- ab exec without a tty (#3) ----------------------------------------------
 # The classic CI/pipe case: `ab exec <cmd>` (and `ab claude`/`ab codex`, which route here)

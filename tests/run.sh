@@ -41,10 +41,10 @@ hex16() { printf '%s' "$1" | sha256sum | cut -c1-16; }
 echo "compute_names (bin/ab)"
 
 # Exact name for a real project. (This also pins the format against drift.)
-compute_names "/home/nevd/stay"
-assert_eq "stay slug"  "home-nevd-stay"                                "$slug"
-assert_eq "stay cname" "agentbox-home-nevd-stay-$(hex16 /home/nevd/stay)" "$cname"
-assert_eq "stay dvol"  "agentbox-docker-home-nevd-stay-$(hex16 /home/nevd/stay)" "$dvol"
+compute_names "/home/alice/stay"
+assert_eq "stay slug"  "home-alice-stay"                                "$slug"
+assert_eq "stay cname" "agentbox-home-alice-stay-$(hex16 /home/alice/stay)" "$cname"
+assert_eq "stay dvol"  "agentbox-docker-home-alice-stay-$(hex16 /home/alice/stay)" "$dvol"
 
 # Determinism: same dir twice -> identical names.
 compute_names "/workspace"; a="$cname"
@@ -52,9 +52,9 @@ compute_names "/workspace"; b="$cname"
 assert_eq "deterministic" "$a" "$b"
 
 # The hash disambiguates paths that collapse to the SAME slug: '/' and '-' both fold to '-',
-# so /home/nevd/stay and /home-nevd-stay share a slug but MUST get distinct containers.
-compute_names "/home/nevd/stay";  sa="$slug"; ca="$cname"
-compute_names "/home-nevd-stay";  sb="$slug"; cb="$cname"
+# so /home/alice/stay and /home-alice-stay share a slug but MUST get distinct containers.
+compute_names "/home/alice/stay";  sa="$slug"; ca="$cname"
+compute_names "/home-alice-stay";  sb="$slug"; cb="$cname"
 assert_eq "same slug collapses"  "$sa" "$sb"
 assert_eq "but cname differs"    "different" "$([ "$ca" = "$cb" ] && echo same || echo different)"
 
@@ -66,20 +66,20 @@ assert_eq "slug truncated to 80" "80" "${#slug}"
 echo
 echo "ab_config_candidates (bin/ab)"
 # Four tiers, most specific first, with `machines/` and `projects/` reserved at the root so a
-# machine named e.g. `home` can never be read as the first segment of /home/nevd/myproj. Pure —
+# machine named e.g. `home` can never be read as the first segment of /home/alice/myproj. Pure —
 # no filesystem involved — so this pins the ORDER and the layout against drift.
 _want="$(printf '%s\n' \
-  /cfg/machines/nevsmachine/projects/home/nevd/myproj/env \
-  /cfg/machines/nevsmachine/env \
-  /cfg/projects/home/nevd/myproj/env \
+  /cfg/machines/myhost/projects/home/alice/myproj/env \
+  /cfg/machines/myhost/env \
+  /cfg/projects/home/alice/myproj/env \
   /cfg/env)"
-assert_eq "four candidates, in order" "$_want" "$(ab_config_candidates /cfg nevsmachine /home/nevd/myproj env)"
+assert_eq "four candidates, in order" "$_want" "$(ab_config_candidates /cfg myhost /home/alice/myproj env)"
 assert_eq "exactly four"              "4"      "$(ab_config_candidates /cfg m /p x | wc -l)"
 # The name is per-file: the same search runs separately for each of the four config files.
 assert_eq "name is substituted"       "/cfg/machines/m/projects/p/setup.sh" \
                                       "$(ab_config_candidates /cfg m /p setup.sh | head -1)"
 # Leading slash dropped exactly once (the project component is a relative path under projects/).
-assert_eq "no double slash"           "0"      "$(ab_config_candidates /cfg m /home/nevd env | grep -c '//')"
+assert_eq "no double slash"           "0"      "$(ab_config_candidates /cfg m /home/alice env | grep -c '//')"
 
 echo
 echo "ab_config_file (bin/ab)"
@@ -87,17 +87,17 @@ echo "ab_config_file (bin/ab)"
 # file must take over from the one below it.
 _cfg="$(mktemp -d)"
 _mk() { mkdir -p "$(dirname "$1")"; : >"$1"; }
-_r()  { ab_config_file "$_cfg" nevsmachine /home/nevd/myproj "$1"; }
+_r()  { ab_config_file "$_cfg" myhost /home/alice/myproj "$1"; }
 
 assert_eq "nothing -> empty"       ""                "$(_r env)"
 _mk "$_cfg/env"
 assert_eq "tier 4 (global)"        "$_cfg/env"       "$(_r env)"
-_mk "$_cfg/projects/home/nevd/myproj/env"
-assert_eq "tier 3 beats 4"         "$_cfg/projects/home/nevd/myproj/env" "$(_r env)"
-_mk "$_cfg/machines/nevsmachine/env"
-assert_eq "tier 2 beats 3"         "$_cfg/machines/nevsmachine/env"      "$(_r env)"
-_mk "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/env"
-assert_eq "tier 1 beats 2"         "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/env" "$(_r env)"
+_mk "$_cfg/projects/home/alice/myproj/env"
+assert_eq "tier 3 beats 4"         "$_cfg/projects/home/alice/myproj/env" "$(_r env)"
+_mk "$_cfg/machines/myhost/env"
+assert_eq "tier 2 beats 3"         "$_cfg/machines/myhost/env"      "$(_r env)"
+_mk "$_cfg/machines/myhost/projects/home/alice/myproj/env"
+assert_eq "tier 1 beats 2"         "$_cfg/machines/myhost/projects/home/alice/myproj/env" "$(_r env)"
 
 # Each of the four names resolves INDEPENDENTLY — a per-project `env` must not drag `ports`
 # along with it (the whole point of the issue: separate resolution per file).
@@ -107,19 +107,19 @@ assert_eq "ports resolves alone"   "$_cfg/ports"     "$(_r ports)"
 
 # Another machine's / another project's files are not ours.
 _mk "$_cfg/machines/othermachine/mounts"
-_mk "$_cfg/projects/home/nevd/other/mounts"
+_mk "$_cfg/projects/home/alice/other/mounts"
 assert_eq "other machine ignored"  ""                "$(_r mounts)"
 
 # A DIRECTORY at a candidate path is not a match — the search must fall through to the next tier
 # (mkdir -p of a deep candidate creates exactly this shape for the shallower ones).
-mkdir -p "$_cfg/machines/nevsmachine/setup.sh"
+mkdir -p "$_cfg/machines/myhost/setup.sh"
 _mk "$_cfg/setup.sh"
 assert_eq "directory is not a match" "$_cfg/setup.sh" "$(_r setup.sh)"
 assert_eq "always returns 0"       "0"               "$(_r nosuchname >/dev/null; echo $?)"
 # A user-side Dockerfile (child image, FROM agentbox:latest) resolves the same four-tier way,
 # independently of the other names — same property the ports case above pins.
-_mk "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/Dockerfile"
-assert_eq "Dockerfile resolves (tier 1)" "$_cfg/machines/nevsmachine/projects/home/nevd/myproj/Dockerfile" "$(_r Dockerfile)"
+_mk "$_cfg/machines/myhost/projects/home/alice/myproj/Dockerfile"
+assert_eq "Dockerfile resolves (tier 1)" "$_cfg/machines/myhost/projects/home/alice/myproj/Dockerfile" "$(_r Dockerfile)"
 rm -rf "$_cfg"
 
 echo
@@ -128,11 +128,11 @@ echo "ab_config_container_path (bin/ab)"
 # maps into the container by swapping that prefix — this is what ab hands the entrypoint in
 # AGENTBOX_PORTS_FILE / AGENTBOX_SETUP_FILE.
 _saved_root="$AB_CFG_ROOT"
-AB_CFG_ROOT=/home/nevd/.config/agentbox
+AB_CFG_ROOT=/home/alice/.config/agentbox
 assert_eq "nested path mapped" "/home/agentbox/.config/agentbox/machines/m/projects/p/ports" \
-  "$(ab_config_container_path /home/nevd/.config/agentbox/machines/m/projects/p/ports)"
+  "$(ab_config_container_path /home/alice/.config/agentbox/machines/m/projects/p/ports)"
 assert_eq "top-level mapped"   "/home/agentbox/.config/agentbox/env" \
-  "$(ab_config_container_path /home/nevd/.config/agentbox/env)"
+  "$(ab_config_container_path /home/alice/.config/agentbox/env)"
 assert_eq "empty in, empty out" "" "$(ab_config_container_path '')"
 AB_CFG_ROOT="$_saved_root"
 
@@ -171,7 +171,7 @@ echo "ab_parse_mounts_line (bin/ab)"
 # built from t='~' rather than a literal ~ in quotes.
 t='~'
 assert_eq "src only -> dst=src, ro"  "${t}/.ssh/id_ed25519"$'\t'"${t}/.ssh/id_ed25519"$'\tro' "$(ab_parse_mounts_line "${t}/.ssh/id_ed25519")"
-assert_eq "src + dst (two tokens)"   $'/home/nevd/k\t/home/agentbox/k\tro'  "$(ab_parse_mounts_line '/home/nevd/k /home/agentbox/k')"
+assert_eq "src + dst (two tokens)"   $'/home/alice/k\t/home/agentbox/k\tro'  "$(ab_parse_mounts_line '/home/alice/k /home/agentbox/k')"
 # The two-token ambiguity: a trailing ro/rw is the MODE, anything else is a destination.
 assert_eq "src + rw (two tokens)"    $'/srv/data\t/srv/data\trw'            "$(ab_parse_mounts_line '/srv/data rw')"
 assert_eq "src + ro (two tokens)"    $'/srv/data\t/srv/data\tro'            "$(ab_parse_mounts_line '/srv/data ro')"

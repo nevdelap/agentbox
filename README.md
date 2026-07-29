@@ -143,12 +143,6 @@ Environment variables:
   `oauthAccount` Claude Code checks to consider itself logged in; mounted only if present)
 - `~/.codex` → `/home/agentbox/.codex` (auth, config — e.g. `auth.json`, `config.toml`)
 - `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity)
-- `~/.config/home-manager` → `/home/agentbox/.config/home-manager` (**ro**, if present; on
-  hosts that manage `~/.bin` via home-manager, its entries resolve via the `/nix/store` ro
-  mount or a symlink into this tree — mounted so the symlinks resolve, read-only so the agent
-  can't write back to your dotfile source)
-- `~/.bin` → `/home/agentbox/.bin` (**ro**, if present; on the container `PATH` —
-  readable/executable but not writable, so the agent can use your scripts but can't drop new ones)
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox)
   — env vars, host port forwards, extra tools)
@@ -213,28 +207,28 @@ The six files above apply everywhere. To vary them, put a copy under `machines/<
 
 `<machine>` is the host's name (`hostname`, or `AGENTBOX_MACHINE` to override the lookup
 without changing the container's hostname). `<project-path>` is the project's absolute path
-with the leading `/` dropped, so `/home/nevd/myproj` becomes `home/nevd/myproj`. `machines/`
+with the leading `/` dropped, so `/home/alice/myproj` becomes `home/alice/myproj`. `machines/`
 and `projects/` are reserved directory names at the config root — without them a machine
-called `home` would be indistinguishable from the first segment of `/home/nevd/myproj`.
+called `home` would be indistinguishable from the first segment of `/home/alice/myproj`.
 
-So on `nevsmachine`, working in `~/myproj`, with this tree:
+So on `myhost`, working in `~/myproj`, with this tree:
 
 ```
 ~/.config/agentbox/
 ├── env                                              # every project, every machine
 ├── setup.sh                                         # every project, every machine
 ├── machines/
-│   └── nevsmachine/
-│       ├── ports                                    # only on nevsmachine
-│       └── projects/home/nevd/myproj/
-│           └── setup.sh                             # only myproj, only on nevsmachine
-└── projects/home/nevd/myproj/
+│   └── myhost/
+│       ├── ports                                    # only on myhost
+│       └── projects/home/alice/myproj/
+│           └── setup.sh                             # only myproj, only on myhost
+└── projects/home/alice/myproj/
     └── env                                          # myproj, on any machine
 ```
 
-`env` comes from `projects/home/nevd/myproj/env`, `ports` from
-`machines/nevsmachine/ports`, `setup.sh` from
-`machines/nevsmachine/projects/home/nevd/myproj/setup.sh`, and `mounts` is not configured at
+`env` comes from `projects/home/alice/myproj/env`, `ports` from
+`machines/myhost/ports`, `setup.sh` from
+`machines/myhost/projects/home/alice/myproj/setup.sh`, and `mounts` is not configured at
 all. `ab config` prints exactly this, without starting a container:
 
 ```bash
@@ -295,7 +289,7 @@ networking.firewall.interfaces.docker0.allowedTCPPorts = [ 2222 ];
   may see.
 - **`rw` is a larger grant, because it is bidirectional**: the agent can modify that host path,
   and whatever it writes there outlives `ab destroy`. This is why `ro` is the default and why
-  agentbox's own config mounts (`~/.config/home-manager`, `~/.bin`) are read-only. Each `rw`
+  agentbox's own `~/.config/agentbox` mount is read-only. Each `rw`
   line is reported by name at start, so a stray one is visible in `ab start`'s output.
 - Enabling the directory on an already-created container needs `ab destroy && ab start` (the
   mount and `--add-host` / `--env-file` flags are set at create time).

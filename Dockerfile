@@ -69,10 +69,11 @@ RUN existing="$(getent passwd "$HOST_UID" | cut -d: -f1)"; \
 # --- From here, install as the agentbox user -------------------------------
 USER agentbox
 ENV HOME=/home/agentbox
-# ~/.bin is bind-mounted from the host when present (see bin/ab); appended LAST so the
-# image's installed tools (claude, codex, cargo, uv, …) take precedence and the user's
-# scripts only ADD commands rather than shadow them (e.g. ~/.bin/claude wrapper).
-# Harmless (empty PATH entry) if not mounted.
+# /home/agentbox/.bin is on PATH by convention, but nothing mounts it by default — bind your own
+# host script dir there via a `~/.bin` line in ~/.config/agentbox/mounts if you want one. Appended
+# LAST so the image's installed tools (claude, codex, cargo, uv, …) take precedence and any
+# mounted scripts only ADD commands rather than shadow them. Harmless (empty PATH entry) if
+# nothing's mounted there.
 ENV PATH="/home/agentbox/.local/bin:/home/agentbox/.cargo/bin:/usr/local/bin:${PATH}:/home/agentbox/.bin"
 
 # Rust (stable toolchain) + cargo-sweep

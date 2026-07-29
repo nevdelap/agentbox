@@ -30,7 +30,7 @@ set -euo pipefail
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.1'
+AB_VERSION='0.0.2'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -77,9 +77,9 @@ MACHINE="${AGENTBOX_MACHINE:-$(hostname)}"
 # — which is exactly the pre-per-project behaviour, so an existing flat config keeps working
 # untouched. `machines/` and `projects/` are reserved directory names at the config root: without
 # them a machine called `home` would be indistinguishable from the first segment of a project
-# path like /home/nevd/myproj, and the search would silently resolve the ambiguity the wrong way.
+# path like /home/alice/myproj, and the search would silently resolve the ambiguity the wrong way.
 # The project component is its absolute path with the leading slash dropped
-# (/home/nevd/myproj -> home/nevd/myproj). Pure (no filesystem access) and parameterised on the
+# (/home/alice/myproj -> home/alice/myproj). Pure (no filesystem access) and parameterised on the
 # root, so tests/run.sh can exercise the ordering directly.
 ab_config_candidates() {
   local root="$1" machine="$2" proj="${3#/}" name="$4"
@@ -164,14 +164,6 @@ mounts=(
 # for login, even though ~/.claude/.credentials.json (the token) is mounted above.
 [ -f "$HOME/.claude.json" ] && mounts+=(-v "$HOME/.claude.json:/home/agentbox/.claude.json")
 [ -f "$HOME/.gitconfig" ] && mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
-# Optional + existence-guarded. On hosts that manage ~/.bin via home-manager, its entries
-# are /nix/store copies (resolved inside the container by the /nix/store ro mount above) or
-# symlinks into this source tree, so the tree is mounted to keep those symlinks resolvable
-# inside the container. Both are read-only: the agent must NOT be able to write back to the
-# host's dotfile source or drop scripts in ~/.bin (confinement). Reading/executing still works;
-# only writes are blocked. The guard skips them entirely on hosts without the dirs.
-[ -d "$HOME/.config/home-manager" ] && mounts+=(-v "$HOME/.config/home-manager:/home/agentbox/.config/home-manager:ro")
-[ -d "$HOME/.bin" ] && mounts+=(-v "$HOME/.bin:/home/agentbox/.bin:ro")
 [ -e /etc/localtime ] && mounts+=(-v "/etc/localtime:/etc/localtime:ro")
 # NixOS only: expose the nix store read-only so /nix/store shebangs & paths in the
 # workspace resolve inside the container.
