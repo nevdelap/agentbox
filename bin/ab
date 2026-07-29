@@ -11,6 +11,9 @@
 #   ab destroy               stop + remove it (destroyed; /tmp build state lost)
 #   ab status                show whether the container is running
 #   ab config                show which per-machine/per-project config files are in effect
+#   ab config init [--machine] [--project] [file...]
+#                            create a config tier's directory (+ starter templates for the
+#                            named files, e.g. env mounts ports setup.sh networks Dockerfile)
 #   ab logs                  tail the container / inner-dockerd logs
 #   ab claude [args...]      docker exec claude as the agentbox user (auto-starts if not started)
 #   ab codex  [args...]      docker exec codex
@@ -30,7 +33,7 @@ set -euo pipefail
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.3'
+AB_VERSION='0.0.4'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -631,6 +634,66 @@ cmd_config() {
   fi
 }
 
+# Create the directory for one config tier and optionally drop starter templates into it — the
+# two manual steps (`mkdir -p` the exact nested path, `cp` the right example) that make setting
+# up a first per-machine/per-project override tedious. --machine/--project select the tier the
+# same way the four-tier search does (see ab_config_candidates); neither flag means the plain
+# top-level (global) tier. Reuses ab_config_candidates itself (rather than re-deriving the path)
+# so the directory this creates can never drift from what the search actually resolves.
+cmd_config_init() {
+  local want_machine=0 want_project=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --machine) want_machine=1; shift ;;
+      --project) want_project=1; shift ;;
+      --) shift; break ;;
+      -*) echo "agentbox: config init: unknown flag '$1' (expected --machine / --project)" >&2; exit 1 ;;
+      *) break ;;
+    esac
+  done
+  local line   # which of ab_config_candidates' 4 printed lines (most-specific first) is ours
+  if [ "$want_machine" = 1 ] && [ "$want_project" = 1 ]; then line=1
+  elif [ "$want_machine" = 1 ]; then line=2
+  elif [ "$want_project" = 1 ]; then line=3
+  else line=4
+  fi
+  local dir
+  # A dummy name ('.') so the last path component is stripped below — ab_config_candidates
+  # always appends <name>, so this is the one call that asks it for a directory, not a file.
+  dir="$(ab_config_candidates "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR" '.' | sed -n "${line}p")"
+  dir="${dir%/.}"
+  mkdir -p "$dir"
+  echo "agentbox: config dir ready: ${dir/#"$HOME"/\~}"
+
+  local f copied=0
+  for f in "$@"; do
+    case "$f" in
+      env | mounts | ports | setup.sh | networks | Dockerfile) ;;
+      *)
+        echo "agentbox: config init: unknown file '$f' (expected env|mounts|ports|setup.sh|networks|Dockerfile)" >&2
+        continue
+        ;;
+    esac
+    local dst="$dir/$f"
+    if [ -e "$dst" ]; then
+      echo "agentbox: config init: $f already exists, not overwriting: $dst" >&2
+      continue
+    fi
+    cp "$CONTEXT/examples/agentbox-config/$f" "$dst"
+    copied=$((copied + 1))
+    echo "agentbox: config init: wrote $dst (starter template — edit it)"
+  done
+  if [ "$#" -gt 0 ]; then
+    echo "agentbox: config init: $copied/$# template(s) written"
+  else
+    echo "agentbox: config init: pass file names (env mounts ports setup.sh networks Dockerfile)" >&2
+    echo "agentbox:              to also drop starter templates into $dir" >&2
+  fi
+  echo
+  echo "agentbox: run 'ab config' to see what's now in effect for this machine/project."
+  return 0
+}
+
 cmd_exec() {
   is_running || cmd_start
   # No command (or a bare `bash`) → an interactive shell. Interactive non-login bash
@@ -698,7 +761,15 @@ main() {
     fi
     ;;
   status) is_running && echo "running: $cname" || echo "not running: $cname" ;;
-  config) cmd_config ;;
+  config)
+    shift
+    if [ "${1:-}" = init ]; then
+      shift
+      cmd_config_init "$@"
+    else
+      cmd_config
+    fi
+    ;;
   logs) docker logs --tail 80 "$cname" 2>&1 | tail -80 ;;
   exec)
     shift

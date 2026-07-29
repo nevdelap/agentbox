@@ -172,12 +172,17 @@ each drive one mechanism (copy-pasteable samples live in
 | `networks` | one docker network name per line | each network is attached to the container with `docker network connect` (an outer-daemon op, so it runs *after* the container is up, not as a `--network` flag) — letting the agent reach other containers on a shared network **by name**, with no host port published. Already-attached is a no-op; an unknown network is reported and skipped |
 | `Dockerfile` | a Dockerfile `FROM agentbox:latest` | a CHILD image is built (root at build — so `apt-get install` works, unlike `setup.sh`) and run instead of the base. Self-contained: no cross-tier chaining, so a winning machine/project Dockerfile must restate anything it wants from a lower tier. Edit it, then `ab rebuild`. An empty file (only comments) is treated as absent — no child is built, the base image runs |
 
+`ab config init [--machine] [--project] [file...]` does the two manual steps above (`mkdir -p`
+the tier's directory, `cp` in the starter template) in one go — see
+[Scoping config to a machine or a project](#scoping-config-to-a-machine-or-a-project) below for
+the `--machine`/`--project` tier flags.
+
 Example — reach a macOS guest whose SSH the host forwards at `127.0.0.1:2222`, install
 `micro`, and copy in the SSH key a script needs to reach it:
 
 ```bash
-mkdir -p ~/.config/agentbox
-cp examples/agentbox-config/{env,mounts,ports,setup.sh} ~/.config/agentbox/
+ab config init env mounts ports setup.sh
+# edit the four files it just wrote into ~/.config/agentbox/, then:
 ab destroy && ab start     # pick up the new mount + flags
 ```
 
@@ -186,8 +191,8 @@ Example — reach a database running as another container on the `lab` network, 
 can't provide — see `Dockerfile`):
 
 ```bash
-mkdir -p ~/.config/agentbox
-cp examples/agentbox-config/{networks,Dockerfile} ~/.config/agentbox/
+ab config init networks Dockerfile
+# edit the two files it just wrote, then:
 ab rebuild          # build the child image (psql); networks attach on start
 # then, inside the container (`ab bash`), reach the DB by its container name on the network:
 #   psql -h <db-container-name> -U <user> -d <db>
@@ -203,6 +208,19 @@ The six files above apply everywhere. To vary them, put a copy under `machines/<
 ~/.config/agentbox/machines/<machine>/env                           # this machine, any project
 ~/.config/agentbox/projects/<project-path>/env                      # this project, any machine
 ~/.config/agentbox/env                                              # everywhere (the plain file)
+```
+
+Getting one of these paths right by hand — especially the project one, with the leading `/`
+dropped — is fiddly, so `ab config init [--machine] [--project] [file...]` builds it for you:
+pass `--machine` and/or `--project` for however specific you want this override to be (neither
+flag = the plain top-level row, both = the most specific one), and it creates that directory.
+Any file names given after the flags are copied in as starter templates — an already-existing
+file is reported and left alone, never overwritten:
+
+```bash
+ab config init                          # just the directory for row 4 above (~/.config/agentbox)
+ab config init --project env            # row 3 + a starter `env` template
+ab config init --machine --project setup.sh   # row 1 + a starter `setup.sh` template
 ```
 
 `<machine>` is the host's name (`hostname`, or `AGENTBOX_MACHINE` to override the lookup

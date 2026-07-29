@@ -2,8 +2,8 @@
 # Unit tests for agentbox host-side logic:
 #   - bin/ab                :: compute_names, ab_config_candidates, ab_config_file,
 #                              ab_config_container_path, ab_parse_mounts_line, ab_mount_dest_owner,
-#                              ab_parse_network_line, ab_dockerfile_has_content
-#   - agentbox-entrypoint.sh :: ab_parse_port_line, ab_setup_fail, ab_step_fail
+#                              ab_parse_network_line, ab_dockerfile_has_content, cmd_config_init
+#   - agentbox-entrypoint.sh :: ab_parse_port_line, ab_port_bindable, ab_setup_fail, ab_step_fail
 #   - tests/smoke.sh         :: ab_parse_env_line  (sourced for this one function; see below)
 #
 # Zero dependencies — plain bash. Run: bash tests/run.sh
@@ -282,6 +282,74 @@ assert_eq "blank line"             ""                     "$(ab_parse_env_line '
 assert_eq "whitespace only"        ""                     "$(ab_parse_env_line '   ')"
 assert_eq "no = dropped"           ""                     "$(ab_parse_env_line 'NOTHING')"
 assert_eq "returns 0 always"       "0"                    "$(ab_parse_env_line 'bad'; echo $?)"
+
+echo
+echo "cmd_config_init (bin/ab)"
+# Isolate from the real ~/.config/agentbox and from this test run's own machine/project.
+_saved_cfg_root="$AB_CFG_ROOT" _saved_machine="$MACHINE" _saved_project="$PROJECT_DIR"
+# $_icfg itself must NOT already exist (unlike a bare `mktemp -d`) — the global tier's target
+# dir IS $AB_CFG_ROOT, so asserting it exists afterward would otherwise be true regardless of
+# whether cmd_config_init did anything.
+_icfg="$(mktemp -d)/agentbox-cfg"
+AB_CFG_ROOT="$_icfg" MACHINE=myhost PROJECT_DIR=/home/alice/myproj
+
+# No flags -> the plain top-level (global) tier; no file args -> directory only, plus a hint.
+assert_eq "global tier dir absent beforehand" "0" "$([ -d "$_icfg" ] && echo 1 || echo 0)"
+_out="$(cmd_config_init 2>&1)"
+assert_eq "global tier dir created" "1" "$([ -d "$_icfg" ] && echo 1 || echo 0)"
+assert_eq "hint shown when no files given" "1" "$(printf '%s' "$_out" | grep -c 'pass file names')"
+
+# --machine -> machines/<machine>/, and the copied file is the real example template, not empty.
+cmd_config_init --machine ports >/dev/null
+assert_eq "machine tier dir created" "1" "$([ -d "$_icfg/machines/myhost" ] && echo 1 || echo 0)"
+assert_eq "machine tier file copied" "0" \
+  "$(diff -q "$_icfg/machines/myhost/ports" "$REPO/examples/agentbox-config/ports" >/dev/null; echo $?)"
+
+# --project -> projects/<project-path>/ (leading slash dropped, same as ab_config_candidates).
+cmd_config_init --project env >/dev/null
+assert_eq "project tier dir created" "1" \
+  "$([ -d "$_icfg/projects/home/alice/myproj" ] && echo 1 || echo 0)"
+assert_eq "project tier file copied" "1" "$([ -f "$_icfg/projects/home/alice/myproj/env" ] && echo 1 || echo 0)"
+
+# --machine --project -> the most-specific tier (both segments).
+cmd_config_init --machine --project setup.sh >/dev/null
+assert_eq "machine+project tier dir created" "1" \
+  "$([ -d "$_icfg/machines/myhost/projects/home/alice/myproj" ] && echo 1 || echo 0)"
+assert_eq "machine+project tier file copied" "1" \
+  "$([ -f "$_icfg/machines/myhost/projects/home/alice/myproj/setup.sh" ] && echo 1 || echo 0)"
+
+# Re-running with a file that already exists must not clobber a user's edits.
+printf 'MY_CUSTOM_VALUE=1\n' >"$_icfg/projects/home/alice/myproj/env"
+_out="$(cmd_config_init --project env 2>&1)"
+assert_eq "existing file not overwritten" "MY_CUSTOM_VALUE=1" \
+  "$(cat "$_icfg/projects/home/alice/myproj/env")"
+assert_eq "existing file reported, not silently skipped" "1" \
+  "$(printf '%s' "$_out" | grep -c 'already exists')"
+
+# The "$copied/$#" summary line must count only genuine copies, not every name requested — a
+# mixed batch of one fresh file, one that already exists (from the "existing file" case just
+# above), and one unknown name should still report exactly 1 copy out of 3 requested.
+_out="$(cmd_config_init --project mounts env notreal 2>&1)"
+assert_eq "mixed batch: fresh file copied" "1" \
+  "$([ -f "$_icfg/projects/home/alice/myproj/mounts" ] && echo 1 || echo 0)"
+assert_eq "mixed batch: existing file still untouched" "MY_CUSTOM_VALUE=1" \
+  "$(cat "$_icfg/projects/home/alice/myproj/env")"
+assert_eq "mixed batch: summary counts only real copies" "1" \
+  "$(printf '%s' "$_out" | grep -c '1/3 template(s) written')"
+
+# Unknown flag / unknown file name are rejected, not silently accepted. A bad flag is fatal
+# (exit 1, not return) so it must be run in its own subshell — $? is read from OUTSIDE that
+# subshell, since `exit` would otherwise abort this test script before "echo $?" ever ran.
+( cmd_config_init --bogus >/dev/null 2>&1 )
+_init_bad_flag_rc=$?
+assert_eq "unknown flag exits non-zero" "1" "$_init_bad_flag_rc"
+_out="$(cmd_config_init --project bogusfile 2>&1)"
+assert_eq "unknown file name reported"  "1" "$(printf '%s' "$_out" | grep -c 'unknown file')"
+assert_eq "unknown file name not created" "0" \
+  "$([ -e "$_icfg/projects/home/alice/myproj/bogusfile" ] && echo 1 || echo 0)"
+
+rm -rf "$(dirname "$_icfg")"
+AB_CFG_ROOT="$_saved_cfg_root" MACHINE="$_saved_machine" PROJECT_DIR="$_saved_project"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
