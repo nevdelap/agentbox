@@ -717,10 +717,13 @@ main() {
     wait_ready
     # Re-prune this project's child tags now that the old container (which pinned the superseded
     # one) is gone — build_user_image's own prune above ran BEFORE `docker rm -f` and so couldn't
-    # remove it. Gated on $tag actually being a child tag: this project may have no Dockerfile at
-    # all, in which case $tag is the base tag. The ${hash} scoping means this only ever touches
-    # THIS project's own child tags, never another project's.
-    [[ "$tag" == *-custom-* ]] && prune_images "${IMAGE_NAME}:${uid}-custom-${hash}-" "" "$tag"
+    # remove it. Unconditional (not gated on $tag being a child tag): the ${hash} scoping means
+    # this only ever matches THIS project's own "${uid}-custom-${hash}-*" tags, so it's always
+    # safe to run, and it MUST run even when $tag is the base tag — that's exactly the case where
+    # a Dockerfile was just removed/emptied, and the child tag it built is now permanently orphaned
+    # unless this sweep catches it (nothing else ever will: build_user_image's own prune only runs
+    # when a Dockerfile is resolved, and `ab destroy` doesn't touch images at all).
+    prune_images "${IMAGE_NAME}:${uid}-custom-${hash}-" "" "$tag"
     ;;
   # Help = this header comment block, with the leading `# ` stripped, printed as-is
   # (stops at the first non-comment line, so code is never shown).
