@@ -19,7 +19,10 @@
 #   ab codex  [args...]      docker exec codex
 #   ab bash                  docker exec bash
 #   ab exec <cmd...>         docker exec an arbitrary command (as agentbox)
-#   ab rebuild               rebuild the image and recreate the running container
+#   ab rebuild [--no-cache]  rebuild the image and recreate the running container (--no-cache
+#                            busts Docker's build cache too — needed to actually pick up a newer
+#                            claude/codex release, since CLAUDE_CHANNEL=stable/CODEX_RELEASE=latest
+#                            otherwise just re-hit the cached install layer from the last build)
 #   ab --version             print the agentbox version
 #
 # Each project path gets its own container (and its own inner-docker data root), so
@@ -33,7 +36,7 @@ set -euo pipefail
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.4'
+AB_VERSION='0.0.5'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -264,7 +267,7 @@ prune_images() {
 }
 
 build_image() {
-  local force="${1:-}" files=() f digest tag log child
+  local force="${1:-}" nocache="${2:-}" files=() f digest tag log child build_flags
   [ -f "$CONTEXT/Dockerfile" ] || {
     echo "agentbox: Dockerfile not found at $CONTEXT/Dockerfile" >&2
     exit 1
@@ -286,7 +289,14 @@ build_image() {
     # redraws) for when it is shown. Capturing into $log (not raw stdout) also keeps the
     # image ID out of the tag this function returns — the cause of the earlier
     # --quiet "invalid reference format" bug.
-    if ! log="$(docker build --progress=plain \
+    build_flags=(--progress=plain)
+    # This digest only tracks OUR OWN file contents + build args — it has no way to know that
+    # `curl .. | bash -s stable` (or --release latest) resolves to a NEWER claude/codex release
+    # than last time. Without --no-cache, Docker's own layer cache reuses that RUN step verbatim
+    # forever (same instruction text = cache hit), so CLAUDE_CHANNEL=stable/CODEX_RELEASE=latest
+    # silently freeze at whatever they resolved to on the very first build on this machine.
+    [ "$nocache" = --no-cache ] && build_flags+=(--no-cache)
+    if ! log="$(docker build "${build_flags[@]}" \
         --build-arg "HOST_UID=$uid" --build-arg "HOST_GID=$(id -g)" \
         -t "$tag" -t "$IMAGE_NAME:latest" "$CONTEXT" 2>&1)"; then
       printf '%s\n' "$log" >&2
@@ -299,7 +309,7 @@ build_image() {
     prune_images "${IMAGE_NAME}:${uid}-" "${IMAGE_NAME}:${uid}-custom-" "$tag"
   fi
   if [ -n "$cfg_dockerfile" ] && ab_dockerfile_has_content "$cfg_dockerfile"; then
-    child="$(build_user_image "$tag" "$force")" || return 1
+    child="$(build_user_image "$tag" "$force" "$nocache")" || return 1
     printf '%s' "$child"
   else
     printf '%s' "$tag"
@@ -318,7 +328,7 @@ build_image() {
 # COPY'd sibling edited WITHOUT touching the Dockerfile text leaves this digest unchanged — run
 # `ab rebuild` to re-bake (documented in the README).
 build_user_image() {
-  local base_tag="$1" force="${2:-}" ctx digest child_tag log
+  local base_tag="$1" force="${2:-}" nocache="${3:-}" ctx digest child_tag log build_flags
   # The Dockerfile (or a dir on its path) may be a symlink whose target falls outside the build
   # context; BuildKit won't follow such a symlink, so building from the resolved path fails with
   # "failed to read dockerfile: open Dockerfile: no such file or directory". Resolve to the
@@ -337,7 +347,9 @@ build_user_image() {
     echo "agentbox: building child image $child_tag (FROM $base_tag) ..." >&2
     # Context = the Dockerfile's physical dir (resolved above); let docker find ./Dockerfile
     # there (the resolved file is always <dir>/Dockerfile). Mirrors how build_image builds base.
-    if ! log="$(cd "$ctx" && docker build --progress=plain -t "$child_tag" . 2>&1)"; then
+    build_flags=(--progress=plain)
+    [ "$nocache" = --no-cache ] && build_flags+=(--no-cache)
+    if ! log="$(cd "$ctx" && docker build "${build_flags[@]}" -t "$child_tag" . 2>&1)"; then
       printf '%s\n' "$log" >&2
       echo "agentbox: child image build failed (see above)" >&2
       return 1
@@ -776,8 +788,14 @@ main() {
     cmd_exec "$@"
     ;;
   rebuild)
+    shift
+    nocache=""
+    if [ "${1:-}" = --no-cache ]; then
+      nocache=--no-cache
+      shift
+    fi
     require_sysbox
-    tag="$(build_image force)" || exit 1
+    tag="$(build_image force "$nocache")" || exit 1
     mkdir -p "$HOME/.claude" "$HOME/.codex"
     warn_legacy_files
     echo "agentbox: recreating $cname with $tag ..." >&2

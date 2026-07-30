@@ -192,10 +192,11 @@ can't provide — see `Dockerfile`):
 
 ```bash
 ab config init networks Dockerfile
-# edit the two files it just wrote, then:
-ab rebuild          # build the child image (psql); networks attach on start
-# then, inside the container (`ab bash`), reach the DB by its container name on the network:
-#   psql -h <db-container-name> -U <user> -d <db>
+# edit the two files it just wrote, then build the child image (psql); networks attach on start
+ab rebuild
+# then, inside the container, reach the DB by its container name on the network:
+ab bash
+$ psql -h <db-container-name> -U <user> -d <db>
 ```
 
 ### Scoping config to a machine or a project
@@ -359,6 +360,19 @@ A built image stays on its installed versions until you rebuild:
   `CODEX_RELEASE` is deleted in the build), so nothing needs disabling. (To silence its
   startup update *check*, set `check_for_update_on_startup = false` in `~/.codex/config.toml`
   on the host.)
+
+**`stable`/`latest` don't mean "always current."** Docker's build cache doesn't know that the
+content behind `curl .. | bash -s stable` (or `--release latest`) changes over time — the
+instruction text is unchanged from your last build, so it's a cache hit, and the RUN step never
+re-executes. `ab rebuild` alone forces a `docker build` but not a cache-busting one, so it still
+hits that same cached layer: both CLIs silently stay pinned to whatever `stable`/`latest`
+resolved to on your *first* build, not whatever is actually current. `ab rebuild --no-cache`
+busts the whole build cache (a full, slower rebuild) and is the one path — through `ab` or a
+raw `docker build --no-cache` — that actually re-resolves them:
+
+```bash
+ab rebuild --no-cache
+```
 
 ## Tests
 
