@@ -1,7 +1,10 @@
-# ~/.config/agentbox/env — KEY=VALUE lines, passed to the container via docker --env-file.
-# Visible to the entrypoint and every `ab exec`/`ab claude`/`ab codex` session. Lines must be
-# plain KEY=VALUE (no `export`); `#` starts a comment. Changing this needs
-# `ab destroy && ab start` (--env-file is applied at container creation).
+# ~/.config/agentbox/env — environment entries passed to the container via docker --env-file.
+# Visible to the entrypoint and every `ab exec`/`ab claude`/`ab codex` session.
+#
+# Use KEY=VALUE for a literal value, or bare KEY to import the value from the host
+# environment. For the latter, export KEY on the host before `ab start`; the secret is
+# not written to this file. Lines must not use `export`; `#` starts a comment.
+# Changing this needs `ab destroy && ab start` (--env-file is applied at container creation).
 #
 # Reach a mac to run tests.
 MAC_DIR=/Users/Bill/repo
