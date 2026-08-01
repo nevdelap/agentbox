@@ -6,7 +6,8 @@
 # container so the inner Docker daemon (rootful, in-container) cannot reach the host —
 # nested Docker with no --privileged and no host docker socket.
 #
-#   ab start                 create + start the container for the current project
+#   ab start [--grant-gh] [--grant-all-of-dot-ssh]
+#                            create + start the container for the current project
 #   ab stop                  stop it (kept on disk; /tmp build state preserved)
 #   ab destroy               stop + remove it (destroyed; /tmp build state lost)
 #   ab status                show whether the container is running
@@ -19,7 +20,8 @@
 #   ab codex  [args...]      docker exec codex
 #   ab bash                  docker exec bash
 #   ab exec <cmd...>         docker exec an arbitrary command (as agentbox)
-#   ab rebuild [--no-cache]  rebuild the image and recreate the running container (--no-cache
+#   ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]
+#                            rebuild the image and recreate the running container (--no-cache
 #                            busts Docker's build cache too — needed to actually pick up a newer
 #                            claude/codex release, since CLAUDE_CHANNEL=stable/CODEX_RELEASE=latest
 #                            otherwise just re-hit the cached install layer from the last build)
@@ -34,9 +36,14 @@
 #
 set -euo pipefail
 
+# Host credential mounts are per-invocation grants, deliberately disabled by default.
+grant_gh=0
+grant_all_of_dot_ssh=0
+grant_labels=()
+
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.5'
+AB_VERSION='0.0.6'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -164,11 +171,6 @@ mounts=(
   -v "$HOME/.codex:/home/agentbox/.codex"
   -v "$dvol:/var/lib/docker"
 )
-# gh stores its auth and host configuration under ~/.config/gh. This is a tool-owned
-# state directory like ~/.claude and ~/.codex, so prepare_host_state creates it before
-# docker run; the existence guard keeps this mount safe if the array is inspected or reused
-# before preparation.
-[ -d "$HOME/.config/gh" ] && mounts+=(-v "$HOME/.config/gh:/home/agentbox/.config/gh")
 # Optional host files/dirs mirrored in only when present (existence-guarded).
 # ~/.claude.json carries the oauthAccount/userID Claude Code checks at startup to
 # consider itself logged in — without it the container has an empty stub and prompts
@@ -179,10 +181,6 @@ mounts=(
 # NixOS only: expose the nix store read-only so /nix/store shebangs & paths in the
 # workspace resolve inside the container.
 [ -d /nix/store ] && mounts+=(-v "/nix/store:/nix/store:ro")
-if [ "${AGENTBOX_SSH:-0}" = "1" ] && [ -d "$HOME/.ssh" ]; then
-  mounts+=(-v "$HOME/.ssh:/home/agentbox/.ssh:ro")
-fi
-
 # Sysbox provides the confinement — the outer container needs NO capabilities, no
 # seccomp relaxation, no devices. The run flags are the `sysbox-runc` runtime (registered
 # on the host) and `--init`. `--init` inserts docker's bundled init (tini) as PID 1 so the
@@ -597,17 +595,92 @@ prepare_host_state() {
   # Docker creates missing -v sources as root-owned directories. Create the state dirs as the
   # invoking user so installed tools can write auth, config, sessions, and history to the host
   # instead of leaving them in the disposable container filesystem.
-  mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh"
-  # The default mount array is built before this function runs. Add gh's mount after creating
-  # the directory when it did not exist at startup; avoid a duplicate when it already did.
-  if [ -z "$(ab_mount_dest_owner /home/agentbox/.config/gh)" ]; then
+  mkdir -p "$HOME/.claude" "$HOME/.codex"
+  grant_labels=(
+    --label "agentbox.grant-gh=$grant_gh"
+    --label "agentbox.grant-all-of-dot-ssh=$grant_all_of_dot_ssh"
+  )
+  if [ "$grant_gh" = 1 ]; then
+    mkdir -p "$HOME/.config/gh"
     mounts+=(-v "$HOME/.config/gh:/home/agentbox/.config/gh")
   fi
+  if [ "$grant_all_of_dot_ssh" = 1 ] && [ -d "$HOME/.ssh" ]; then
+    mounts+=(-v "$HOME/.ssh:/home/agentbox/.ssh:ro")
+    # Keep SSH's learned-host state persistent and writable while the rest of the credential
+    # directory remains read-only. Missing host files are deliberately not created or mounted.
+    if [ -f "$HOME/.ssh/known_hosts" ]; then
+      mounts+=(-v "$HOME/.ssh/known_hosts:/home/agentbox/.ssh/known_hosts")
+    fi
+  fi
+}
+
+adopt_existing_grants() {
+  exists || return 0
+  local value
+  value="$(docker inspect -f '{{index .Config.Labels "agentbox.grant-gh"}}' "$cname" 2>/dev/null || true)"
+  if [ "$value" = 1 ]; then
+    grant_gh=1
+  elif [ "$value" != 0 ] && container_has_mount_destination /home/agentbox/.config/gh; then
+    # Containers created before grant labels existed are inferred from their mounts.
+    grant_gh=1
+  fi
+  value="$(docker inspect -f '{{index .Config.Labels "agentbox.grant-all-of-dot-ssh"}}' "$cname" 2>/dev/null || true)"
+  if [ "$value" = 1 ]; then
+    grant_all_of_dot_ssh=1
+  elif [ "$value" != 0 ] && container_has_mount_destination /home/agentbox/.ssh; then
+    grant_all_of_dot_ssh=1
+  fi
+}
+
+container_has_mount_destination() {
+  docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$cname" 2>/dev/null \
+    | grep -qxF "$1"
+}
+
+check_existing_grants() {
+  local spec want path flag
+  for spec in "${grant_gh}|/home/agentbox/.config/gh|--grant-gh" \
+              "${grant_all_of_dot_ssh}|/home/agentbox/.ssh|--grant-all-of-dot-ssh"; do
+    IFS='|' read -r want path flag <<<"$spec"
+    if [ "$want" = 1 ] && ! container_has_mount_destination "$path"; then
+      echo "agentbox: $cname already exists without $path; run 'ab rebuild $flag' to add it." >&2
+      return 1
+    elif [ "$want" = 0 ] && container_has_mount_destination "$path"; then
+      echo "agentbox: $cname already has $path mounted; run 'ab rebuild' to revoke it." >&2
+      return 1
+    fi
+  done
+}
+
+parse_runtime_options() {
+  local mode="$1" arg
+  shift
+  nocache=""
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --grant-gh) grant_gh=1 ;;
+      --grant-all-of-dot-ssh) grant_all_of_dot_ssh=1 ;;
+      --no-cache)
+        if [ "$mode" != rebuild ]; then
+          echo "agentbox: $mode: --no-cache is only valid with rebuild" >&2
+          return 1
+        fi
+        nocache=--no-cache
+        ;;
+      *) echo "agentbox: $mode: unknown option '$arg'" >&2; return 1 ;;
+    esac
+    shift
+  done
 }
 
 cmd_start() {
   require_sysbox
+  adopt_existing_grants
   prepare_host_state
+  if exists; then
+    check_existing_grants
+  fi
   local tag
   tag="$(build_image)" || exit 1
   warn_legacy_files
@@ -624,7 +697,7 @@ cmd_start() {
   else
     echo "agentbox: creating + starting $cname ..." >&2
     build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
-    docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
+    docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
   fi
   connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
   # Non-blocking: return as soon as the container is up. The entrypoint brings the inner
@@ -760,7 +833,7 @@ cmd_exec() {
 
 main() {
   case "${1:-}" in
-  start) cmd_start ;;
+  start) shift; parse_runtime_options start "$@"; cmd_start ;;
   stop) if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi ;;
   destroy)
     # Attempt BOTH removals independently and report every failure: a failed container rm
@@ -803,11 +876,7 @@ main() {
     ;;
   rebuild)
     shift
-    nocache=""
-    if [ "${1:-}" = --no-cache ]; then
-      nocache=--no-cache
-      shift
-    fi
+    parse_runtime_options rebuild "$@"
     require_sysbox
     tag="$(build_image force "$nocache")" || exit 1
     prepare_host_state
@@ -815,7 +884,7 @@ main() {
     echo "agentbox: recreating $cname with $tag ..." >&2
     docker rm -f "$cname" >/dev/null 2>&1 || true
     build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
-    docker run -d --name "$cname" "${run_args[@]}" "${mounts[@]}" "$tag" >/dev/null
+    docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
     connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
     wait_ready
     # Re-prune this project's child tags now that the old container (which pinned the superseded

@@ -1,7 +1,7 @@
 # agentbox
 
-A **confined** Ubuntu container for running the **Claude Code** and **Codex** CLIs,
-with the tooling an agent needs: `git`, `ssh`, `uv`, `just`, `ripgrep`, `jq`, `tmux`,
+A **confined** Ubuntu container for running **Claude Code**, **Codex**, and **GitHub CLI**
+(`gh`), with the tooling an agent needs: `git`, `ssh`, `uv`, `just`, `ripgrep`, `jq`, `tmux`,
 `rustup` (stable toolchain) + `cargo-sweep`, and **nested Docker** for running CI
 tooling. There is deliberately **no system python** — use `uv run python`.
 
@@ -112,28 +112,37 @@ ab codex resume      # likewise for codex
 Each project directory gets its own container. Lifecycle:
 
 ```bash
-ab start             # create + start for this project (no-op if already running)
-ab stop              # stop (kept on disk; /tmp build state preserved)
-ab destroy           # stop + remove container + its inner-docker volume (/tmp state lost)
-ab status            # is it running?
-ab config            # which per-machine/per-project config files are in effect
-ab logs              # tail container / inner-dockerd logs
-ab rebuild           # rebuild the image and recreate the container (then `ab claude`/`ab codex`, etc.)
-ab --version         # print the version
+ab start [--grant-gh] [--grant-all-of-dot-ssh]                # create + start for this project
+ab stop                                                       # stop (kept on disk; /tmp build state preserved)
+ab destroy                                                    # stop + remove container + its inner-docker volume (/tmp state lost)
+ab status                                                     # is it running?
+ab config                                                     # which per-machine/per-project config files are in effect
+ab logs                                                       # tail container / inner-dockerd logs
+ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # rebuild and recreate
+ab --version                                                  # print the version
 ```
 
 `ab start` and `rebuild` verify `sysbox-runc` is registered on the host and
 exit with install guidance if it isn't. The image rebuilds automatically when the build
 context changes.
 
+### Updating bundled tools
+
+`ab rebuild` may reuse cached install layers for the bundled Claude Code and Codex releases.
+Run `ab rebuild --no-cache` when fresh CLI versions are required; the full rebuild is slower.
+
 Environment variables:
 
 | Var | Default | Purpose |
 |---|---|---|
 | `AGENTBOX_DIR` | `$PWD` | project dir mounted at `/workspace` |
-| `AGENTBOX_SSH` | `0` | set to `1` to also bind-mount `~/.ssh` (ro) for git push |
 | `AGENTBOX_CONTEXT` | auto (repo root) | build context dir (override only if needed) |
 | `AGENTBOX_MACHINE` | `$(hostname)` | machine name used to look up per-machine config (does not change the container's hostname) |
+
+Migration note: `AGENTBOX_SSH=1` is no longer supported and is silently ignored. Use
+`ab start --grant-all-of-dot-ssh` (or `ab rebuild --grant-all-of-dot-ssh`) to grant the
+container read-only access to the full `.ssh` directory, or use individual entries in
+`~/.config/agentbox/mounts` for finer-grained access.
 
 ## Mounts
 
@@ -142,7 +151,7 @@ Environment variables:
 - `~/.claude.json` → `/home/agentbox/.claude.json` (account/login state — the
   `oauthAccount` Claude Code checks to consider itself logged in; mounted only if present)
 - `~/.codex` → `/home/agentbox/.codex` (auth, config — e.g. `auth.json`, `config.toml`)
-- `~/.config/gh` → `/home/agentbox/.config/gh` (GitHub CLI auth and config)
+- `~/.config/gh` → `/home/agentbox/.config/gh` (GitHub CLI auth and config; only with `--grant-gh`)
 - `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity)
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox)
@@ -150,11 +159,28 @@ Environment variables:
 - `/nix/store` → `/nix/store` (ro; NixOS only — so workspace `/nix/store` paths resolve)
 - `/etc/localtime` → `/etc/localtime` (ro, if present on the host — so in-container time
   matches the host timezone)
-- `~/.ssh` → `/home/agentbox/.ssh` (ro; only with `AGENTBOX_SSH=1`)
+- `~/.ssh` → `/home/agentbox/.ssh` (ro; only with `--grant-all-of-dot-ssh`)
 - anything listed in `~/.config/agentbox/mounts` (ro unless the line ends `rw`; see
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox))
 - named volume `agentbox-docker-<project>` → `/var/lib/docker` (per-project inner
   rootful docker state; `ab destroy` removes it)
+
+The credential mounts are explicit grants. Use `ab start --grant-gh` or
+`ab rebuild --grant-gh` to use and persist GitHub CLI credentials, and
+`ab start --grant-all-of-dot-ssh` or `ab rebuild --grant-all-of-dot-ssh` to expose the
+host `.ssh` directory read-only, with `known_hosts` mounted read-write when it exists so
+SSH can persist newly learned hosts. For finer-grained SSH access, omit the SSH grant and
+list individual files in `~/.config/agentbox/mounts`, for example:
+
+```text
+~/.ssh/config
+~/.ssh/known_hosts rw
+~/.ssh/id_ed25519
+```
+
+That keeps the selected files read-only except for `known_hosts`, which is writable.
+Grant choices are stored on the container, so convenience commands reuse them after
+`ab stop`; use `ab rebuild` without the grant flags to revoke them.
 
 ## Per-host and per-project customization (`~/.config/agentbox/`)
 
@@ -354,50 +380,6 @@ works without `sudo` from `ab bash`/`ab exec` sessions.
 - **Sysbox** installed + registered on the host (above).
 - Docker on the host, and membership in the `docker` group.
 
-## Build (without `ab`)
-
-```bash
-mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh"
-docker build --build-arg HOST_UID=$(id -u) --build-arg HOST_GID=$(id -g) -t agentbox .
-docker run -d --runtime=sysbox-runc \
-  -v "$PWD":/workspace -v "$HOME/.claude":/home/agentbox/.claude \
-  -v "$HOME/.codex":/home/agentbox/.codex \
-  -v "$HOME/.config/gh":/home/agentbox/.config/gh agentbox
-```
-
-## Version pinning
-
-`CLAUDE_CHANNEL` (default `stable`) and `CODEX_RELEASE` (default `latest`) are
-Dockerfile `ARG`s. Pin exact versions by building directly:
-
-```bash
-docker build --build-arg HOST_UID=$(id -u) --build-arg HOST_GID=$(id -g) \
-             --build-arg CLAUDE_CHANNEL=2.1.89 \
-             --build-arg CODEX_RELEASE=0.55.0 \
-             -t agentbox .
-```
-
-A built image stays on its installed versions until you rebuild:
-- **Claude Code** auto-updates by default; the image sets `DISABLE_AUTOUPDATER=1`, which
-  disables its built-in updater (a real, documented Claude Code env var).
-- **Codex** has no auto-updater — it never self-updates (the installer that pinned
-  `CODEX_RELEASE` is deleted in the build), so nothing needs disabling. (To silence its
-  startup update *check*, set `check_for_update_on_startup = false` in `~/.codex/config.toml`
-  on the host.)
-
-**`stable`/`latest` don't mean "always current."** Docker's build cache doesn't know that the
-content behind `curl .. | bash -s stable` (or `--release latest`) changes over time — the
-instruction text is unchanged from your last build, so it's a cache hit, and the RUN step never
-re-executes. `ab rebuild` alone forces a `docker build` but not a cache-busting one, so it still
-hits that same cached layer: both CLIs silently stay pinned to whatever `stable`/`latest`
-resolved to on your *first* build, not whatever is actually current. `ab rebuild --no-cache`
-busts the whole build cache (a full, slower rebuild) and is the one path — through `ab` or a
-raw `docker build --no-cache` — that actually re-resolves them:
-
-```bash
-ab rebuild --no-cache
-```
-
 ## Tests
 
 Two zero-dependency bash suites (no `bats` / `shellspec` needed):
@@ -407,8 +389,10 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
   `ab_config_candidates` / `ab_config_file` (the four-tier per-machine/per-project search —
   order, first-match-wins, and that each file resolves independently), its
   `ab_parse_mounts_line` / `ab_mount_dest_owner` (the `src [dst] [ro|rw]` grammar and
-  duplicate-destination detection), and the entrypoint's `ab_parse_port_line` (ports-file
-  parsing). It sources the scripts directly —
+  duplicate-destination detection), grant option parsing and host-state preparation for the
+  explicit GitHub/SSH credential grants (including persisted grant adoption for convenience
+  auto-starts), and the entrypoint's `ab_parse_port_line` (ports-file parsing). It sources the
+  scripts directly —
   they're written to be source-safe — so **no Docker** is needed:
 
   ```bash

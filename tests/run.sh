@@ -246,15 +246,66 @@ _saved_home="$HOME"
 _saved_mounts=("${mounts[@]}")
 HOME="$_state_home"
 mounts=()
+grant_gh=0
+grant_all_of_dot_ssh=0
 prepare_host_state
 assert_eq "creates Claude state dir" "1" "$([ -d "$HOME/.claude" ] && echo 1 || echo 0)"
 assert_eq "creates Codex state dir"  "1" "$([ -d "$HOME/.codex" ] && echo 1 || echo 0)"
-assert_eq "creates gh state dir"     "1" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
-assert_eq "mounts gh state dir" "$HOME/.config/gh:/home/agentbox/.config/gh" \
+assert_eq "does not create gh state dir by default" "0" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
+grant_gh=1
+prepare_host_state
+assert_eq "creates gh state dir with grant" "1" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
+assert_eq "mounts gh state dir with grant" "$HOME/.config/gh:/home/agentbox/.config/gh" \
   "$(ab_mount_dest_owner /home/agentbox/.config/gh)"
+mkdir -p "$HOME/.ssh"
+: >"$HOME/.ssh/known_hosts"
+grant_all_of_dot_ssh=1
+prepare_host_state
+assert_eq "mounts all of ssh read-only with grant" "$HOME/.ssh:/home/agentbox/.ssh:ro" \
+  "$(ab_mount_dest_owner /home/agentbox/.ssh)"
+assert_eq "mounts known_hosts read-write with grant" "$HOME/.ssh/known_hosts:/home/agentbox/.ssh/known_hosts" \
+  "$(ab_mount_dest_owner /home/agentbox/.ssh/known_hosts)"
+assert_eq "gh grant label enabled" "--label agentbox.grant-gh=1" "${grant_labels[*]:0:2}"
 HOME="$_saved_home"
 mounts=("${_saved_mounts[@]}")
 rm -rf "$_state_home"
+
+echo
+echo "runtime grant options (bin/ab)"
+grant_gh=0; grant_all_of_dot_ssh=0
+parse_runtime_options start --grant-gh --grant-all-of-dot-ssh
+assert_eq "--grant-gh parsed" "1" "$grant_gh"
+assert_eq "--grant-all-of-dot-ssh parsed" "1" "$grant_all_of_dot_ssh"
+parse_runtime_options rebuild --no-cache --grant-gh
+assert_eq "--no-cache parsed" "--no-cache" "$nocache"
+assert_eq "unknown option rejected" "1" "$(parse_runtime_options start --no-such-option >/dev/null 2>&1; echo $?)"
+
+echo
+echo "adopt_existing_grants (bin/ab)"
+# Convenience commands auto-start a stopped container. Persisted labels restore the grants
+# before cmd_start rebuilds its mount list; legacy containers fall back to their mount layout.
+_saved_exists_fn="$(declare -f exists 2>/dev/null || true)"
+_saved_mount_owner_fn="$(declare -f container_has_mount_destination 2>/dev/null || true)"
+_mock_bin="$(mktemp -d)"
+printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in' \
+  "  *agentbox.grant-gh*) printf '1\\n' ;;" \
+  "  *agentbox.grant-all-of-dot-ssh*) printf '0\\n' ;;" \
+  "  *) printf '<no value>\\n' ;;" \
+  'esac' >"$_mock_bin/docker"
+chmod 0755 "$_mock_bin/docker"
+_saved_path="$PATH"
+PATH="$_mock_bin:$PATH"
+exists() { return 0; }
+container_has_mount_destination() { [ "$1" = /home/agentbox/.config/gh ]; }
+grant_gh=0; grant_all_of_dot_ssh=0
+adopt_existing_grants
+assert_eq "adopts persisted gh grant" "1" "$grant_gh"
+assert_eq "does not invent ssh grant" "0" "$grant_all_of_dot_ssh"
+PATH="$_saved_path"
+rm -rf "$_mock_bin"
+unset -f exists container_has_mount_destination
+eval "$_saved_exists_fn"
+eval "$_saved_mount_owner_fn"
 
 echo
 echo "ab_setup_fail (agentbox-entrypoint.sh)"
