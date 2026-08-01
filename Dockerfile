@@ -34,7 +34,7 @@ RUN sed -i 's/Components: main restricted/Components: main restricted universe/'
       /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-          build-essential ca-certificates curl git jq just moreutils openssh-client ripgrep socat tmux \
+          build-essential ca-certificates curl gh git jq just moreutils openssh-client ripgrep socat tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Docker (official repo). The inner daemon is rootful; Sysbox isolates it. -

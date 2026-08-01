@@ -164,6 +164,11 @@ mounts=(
   -v "$HOME/.codex:/home/agentbox/.codex"
   -v "$dvol:/var/lib/docker"
 )
+# gh stores its auth and host configuration under ~/.config/gh. This is a tool-owned
+# state directory like ~/.claude and ~/.codex, so prepare_host_state creates it before
+# docker run; the existence guard keeps this mount safe if the array is inspected or reused
+# before preparation.
+[ -d "$HOME/.config/gh" ] && mounts+=(-v "$HOME/.config/gh:/home/agentbox/.config/gh")
 # Optional host files/dirs mirrored in only when present (existence-guarded).
 # ~/.claude.json carries the oauthAccount/userID Claude Code checks at startup to
 # consider itself logged in — without it the container has an empty stub and prompts
@@ -588,12 +593,21 @@ connect_networks() {
   return 0
 }
 
+prepare_host_state() {
+  # Docker creates missing -v sources as root-owned directories. Create the state dirs as the
+  # invoking user so installed tools can write auth, config, sessions, and history to the host
+  # instead of leaving them in the disposable container filesystem.
+  mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh"
+  # The default mount array is built before this function runs. Add gh's mount after creating
+  # the directory when it did not exist at startup; avoid a duplicate when it already did.
+  if [ -z "$(ab_mount_dest_owner /home/agentbox/.config/gh)" ]; then
+    mounts+=(-v "$HOME/.config/gh:/home/agentbox/.config/gh")
+  fi
+}
+
 cmd_start() {
   require_sysbox
-  # Create the bind-mount sources as the invoking host user BEFORE `docker run`: Docker
-  # creates a missing bind-mount dir owned by root, which the non-root agentbox user then
-  # can't write to (claude/codex auth & sessions would fail). Creating them here prevents it.
-  mkdir -p "$HOME/.claude" "$HOME/.codex"
+  prepare_host_state
   local tag
   tag="$(build_image)" || exit 1
   warn_legacy_files
@@ -796,7 +810,7 @@ main() {
     fi
     require_sysbox
     tag="$(build_image force "$nocache")" || exit 1
-    mkdir -p "$HOME/.claude" "$HOME/.codex"
+    prepare_host_state
     warn_legacy_files
     echo "agentbox: recreating $cname with $tag ..." >&2
     docker rm -f "$cname" >/dev/null 2>&1 || true

@@ -238,6 +238,25 @@ assert_eq "source is not a dst"     ""                          "$(ab_mount_dest
 mounts=("${_saved_mounts[@]}")
 
 echo
+echo "prepare_host_state (bin/ab)"
+# A clean host has no tool state directories. Preparation must create them as the invoking
+# user, and the newly-created gh directory must be added to the default mount set.
+_state_home="$(mktemp -d)"
+_saved_home="$HOME"
+_saved_mounts=("${mounts[@]}")
+HOME="$_state_home"
+mounts=()
+prepare_host_state
+assert_eq "creates Claude state dir" "1" "$([ -d "$HOME/.claude" ] && echo 1 || echo 0)"
+assert_eq "creates Codex state dir"  "1" "$([ -d "$HOME/.codex" ] && echo 1 || echo 0)"
+assert_eq "creates gh state dir"     "1" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
+assert_eq "mounts gh state dir" "$HOME/.config/gh:/home/agentbox/.config/gh" \
+  "$(ab_mount_dest_owner /home/agentbox/.config/gh)"
+HOME="$_saved_home"
+mounts=("${_saved_mounts[@]}")
+rm -rf "$_state_home"
+
+echo
 echo "ab_setup_fail (agentbox-entrypoint.sh)"
 # A setup.sh failure must surface — to stderr, so `ab logs` shows it — the exit code, the tail
 # of the setup log (the actual cause), where to read the full log, and that it auto-retries.

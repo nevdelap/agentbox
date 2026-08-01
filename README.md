@@ -142,6 +142,7 @@ Environment variables:
 - `~/.claude.json` → `/home/agentbox/.claude.json` (account/login state — the
   `oauthAccount` Claude Code checks to consider itself logged in; mounted only if present)
 - `~/.codex` → `/home/agentbox/.codex` (auth, config — e.g. `auth.json`, `config.toml`)
+- `~/.config/gh` → `/home/agentbox/.config/gh` (GitHub CLI auth and config)
 - `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity)
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox)
@@ -356,10 +357,12 @@ works without `sudo` from `ab bash`/`ab exec` sessions.
 ## Build (without `ab`)
 
 ```bash
+mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh"
 docker build --build-arg HOST_UID=$(id -u) --build-arg HOST_GID=$(id -g) -t agentbox .
 docker run -d --runtime=sysbox-runc \
   -v "$PWD":/workspace -v "$HOME/.claude":/home/agentbox/.claude \
-  -v "$HOME/.codex":/home/agentbox/.codex agentbox
+  -v "$HOME/.codex":/home/agentbox/.codex \
+  -v "$HOME/.config/gh":/home/agentbox/.config/gh agentbox
 ```
 
 ## Version pinning
