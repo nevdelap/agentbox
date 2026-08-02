@@ -137,6 +137,33 @@ assert_eq "empty in, empty out" "" "$(ab_config_container_path '')"
 AB_CFG_ROOT="$_saved_root"
 
 echo
+echo "ab_append_current_env (bin/ab)"
+# Per-exec forwarding is restricted to names declared by the resolved env file. Values come from
+# the invoking shell, not from literal KEY=VALUE text in that file, so session-specific variables
+# such as STAY_SESSION_NAME follow the shell that launched ab.
+_env_file="$(mktemp)"
+cat >"$_env_file" <<'EOF'
+# comments and blank lines are ignored
+MAC_DIR=/file-value-is-not-forwarded
+STAY_SESSION_NAME
+NOT_A_SHELL_VARIABLE=ignored
+BAD-NAME=ignored
+EOF
+_saved_cfg_env="$cfg_env"
+cfg_env="$_env_file"
+MAC_DIR=/current-value
+STAY_SESSION_NAME=session-b
+export MAC_DIR STAY_SESSION_NAME
+unset NOT_A_SHELL_VARIABLE
+_env_args=()
+ab_append_current_env _env_args
+assert_eq "forwards only declared current values" \
+  $'--env\nMAC_DIR=/current-value\n--env\nSTAY_SESSION_NAME=session-b' \
+  "$(printf '%s\n' "${_env_args[@]}")"
+cfg_env="$_saved_cfg_env"
+rm -f "$_env_file"
+
+echo
 echo "ab_parse_port_line (agentbox-entrypoint.sh)"
 assert_eq "plain port"          "2222"  "$(ab_parse_port_line 2222)"
 assert_eq "trailing comment"    "2222"  "$(ab_parse_port_line '2222 # ssh to mac')"

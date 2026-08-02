@@ -192,7 +192,7 @@ each drive one mechanism (copy-pasteable samples live in
 
 | File | Shape | Effect |
 |---|---|---|
-| `env` | `KEY=VALUE` or bare `KEY` lines | passed to `docker run` via `--env-file`; visible to the entrypoint and every `ab exec` / `ab claude` / `ab codex` session. `KEY=VALUE` stores a literal value in the file; bare `KEY` imports the value from the host environment |
+| `env` | `KEY=VALUE` or bare `KEY` lines | passed to `docker run` via `--env-file`, and the names are forwarded again on every `ab bash` / `ab exec` / `ab claude` / `ab codex` invocation using the launching shell's current values. `KEY=VALUE` supplies the initial literal value; bare `KEY` imports the value from the host environment |
 | `mounts` | one host path per line (`src` or `src dst`, optionally ending `ro`/`rw`; `#` comments) | each host path is bind-mounted into the container — **files and directories both** — read-only unless the line ends `rw`. A single `src` mounts at the same path, `src dst` at an explicit destination. A leading `~` is `$HOME` on the host and `/home/agentbox` in the container, so `~/.ssh/id_ed25519` → `/home/agentbox/.ssh/id_ed25519`. No copy is taken, so host-side changes are visible live. A line whose source is missing, or whose destination agentbox already uses, is reported and skipped |
 | `ports` | one host port per line (1024-65535) | an in-container `socat` exposes each on container loopback `127.0.0.1:<port>` → `host.docker.internal:<port>`, so scripts using `127.0.0.1:<port>` reach the matching host service unchanged (socat binds as the unprivileged agentbox user, so a port below 1024 is rejected at start) |
 | `setup.sh` | bash, run as agentbox | installs extra tools not in the shared image. Runs **once per container** and re-runs automatically when the script changes |
@@ -230,7 +230,11 @@ export GITHUB_TOKEN=...
 ab destroy && ab start
 ```
 
-Environment variables are available to the agent and processes inside the container.
+Environment variables are available to the agent and processes inside the container. On each
+command-executing `ab` invocation, only names declared in the resolved `env` file are overlaid from the
+launching shell; this matters for dynamic values such as `STAY_SESSION_NAME`, which can differ
+between stay sessions sharing one project container. Variables not currently set in the launching
+shell retain the container's existing value.
 They are not a secret boundary; use this syntax to keep values out of Agentbox config,
 not to hide them from the agent or Docker.
 
@@ -330,7 +334,10 @@ networking.firewall.interfaces.docker0.allowedTCPPorts = [ 2222 ];
 (Broader, simpler alternative: `networking.firewall.trustedInterfaces = [ "docker0" ];`.)
 
 **Apply semantics:**
-- `env` is baked at container creation (`--env-file`) → editing it needs `ab destroy && ab start`.
+- `env` supplies the initial container environment at creation (`--env-file`), while its declared
+  names are overlaid with current launching-shell values for each `ab` command. Editing the file
+  still needs `ab destroy && ab start` to change the initial environment and the resolved file;
+  per-session values such as `STAY_SESSION_NAME` do not require container recreation.
 - `mounts` is established at container creation (bind mounts cannot be added to a running
   container) → editing it needs `ab destroy && ab start`.
 - `ports` and `setup.sh` are read from the live mount → a plain `ab stop && ab start` picks up
