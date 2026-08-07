@@ -20,7 +20,7 @@
 #     -v "$PWD":/workspace -v "$HOME/.claude":/home/agentbox/.claude \
 #     -v "$HOME/.codex":/home/agentbox/.codex agentbox
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ARG HOST_UID=1000
 ARG HOST_GID=100
@@ -57,7 +57,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh \
       | env UV_INSTALL_DIR=/usr/local/bin sh
 
 # --- agentbox user matching host uid/gid ------------------------------------
-# The ubuntu:24.04 base ships a built-in `ubuntu` user at uid 1000; remove any
+# The ubuntu:26.04 base ships a built-in `ubuntu` user at uid 1000; remove any
 # pre-existing user at HOST_UID first. Tooling (claude/codex/bash) runs as this
 # user; the inner dockerd runs as root and is confined by Sysbox.
 RUN existing="$(getent passwd "$HOST_UID" | cut -d: -f1)"; \
@@ -85,14 +85,15 @@ RUN cargo install cargo-sweep
 # ~/.claude (config/auth) cannot shadow them. Updates disabled at runtime.
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CHANNEL"
 
-# Codex (native musl-static; runs on glibc). Install into throwaway /tmp, then
-# relocate the single static binary to /usr/local/bin so a bind-mounted ~/.codex
-# (config/auth) cannot shadow the binary store.
+# Codex (native musl-static; runs on glibc). Install into throwaway /tmp, then relocate
+# the whole release bin/ (codex plus sibling binaries it execs at runtime, e.g.
+# codex-code-mode-host) to /usr/local/bin so a bind-mounted ~/.codex (config/auth)
+# cannot shadow the binary store.
 USER root
 RUN curl -fsSL https://chatgpt.com/codex/install.sh \
       | env CODEX_HOME=/tmp/codex-home CODEX_INSTALL_DIR=/tmp/codex-bin \
             CODEX_NON_INTERACTIVE=1 sh -s -- --release "$CODEX_RELEASE" \
-    && install -m 0755 "$(readlink -f /tmp/codex-bin/codex)" /usr/local/bin/codex \
+    && install -m 0755 "$(dirname "$(readlink -f /tmp/codex-bin/codex)")"/* /usr/local/bin/ \
     && rm -rf /tmp/codex-home /tmp/codex-bin
 
 # Guard the "no system python" design goal (README): fail the build LOUD if any transitive apt

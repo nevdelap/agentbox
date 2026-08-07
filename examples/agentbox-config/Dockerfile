@@ -26,10 +26,11 @@
 # child image: `docker start` does not rebuild, so the change wouldn't take until `ab rebuild`.)
 FROM agentbox:latest
 
-# Example: the psql client (v17, from the PostgreSQL upstream PGDG repo — the distro's
-# postgresql-client on this base, Ubuntu 24.04, is only v16), so the agent can reach a database
-# on a shared docker network (see `networks`). Installed as root at BUILD time — setup.sh can't,
-# it has no root. Supply your own connection when you connect; no credentials live here.
+# Example: the psql client (v17, from the PostgreSQL upstream PGDG repo — pinned here
+# regardless of whichever version the distro's postgresql-client happens to track on this
+# base, Ubuntu 26.04), so the agent can reach a database on a shared docker network (see
+# `networks`). Installed as root at BUILD time — setup.sh can't, it has no root. Supply
+# your own connection when you connect; no credentials live here.
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \

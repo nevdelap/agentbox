@@ -118,7 +118,8 @@ ab destroy                                                    # stop + remove co
 ab status                                                     # is it running?
 ab config                                                     # which per-machine/per-project config files are in effect
 ab logs                                                       # tail container / inner-dockerd logs
-ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # rebuild and recreate
+ab build   [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # rebuild and recreate
+ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # synonym for build
 ab --version                                                  # print the version
 ```
 

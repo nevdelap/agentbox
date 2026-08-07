@@ -20,8 +20,9 @@
 #   ab codex  [args...]      docker exec codex
 #   ab bash                  docker exec bash
 #   ab exec <cmd...>         docker exec an arbitrary command (as agentbox)
-#   ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]
-#                            rebuild the image and recreate the running container (--no-cache
+#   ab build   [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]
+#   ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]  (synonym for build)
+#                            build or rebuild the image and recreate the running container (--no-cache
 #                            busts Docker's build cache too — needed to actually pick up a newer
 #                            claude/codex release, since CLAUDE_CHANNEL=stable/CODEX_RELEASE=latest
 #                            otherwise just re-hit the cached install layer from the last build)
@@ -43,7 +44,7 @@ grant_labels=()
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.6'
+AB_VERSION='0.0.7'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -899,7 +900,7 @@ main() {
     shift
     cmd_exec "$@"
     ;;
-  rebuild)
+  build | rebuild)
     shift
     parse_runtime_options rebuild "$@"
     require_sysbox
