@@ -160,6 +160,21 @@ ab_append_current_env _env_args
 assert_eq "forwards only declared current values" \
   $'--env\nMAC_DIR=/current-value\n--env\nSTAY_SESSION_NAME=session-b' \
   "$(printf '%s\n' "${_env_args[@]}")"
+
+cat >"$_env_file" <<'EOF'
+CURRENT_VALUE
+UNSET_FINAL_VALUE
+EOF
+CURRENT_VALUE=forwarded
+export CURRENT_VALUE
+unset UNSET_FINAL_VALUE
+_env_args=()
+_env_rc=0
+ab_append_current_env _env_args || _env_rc=$?
+assert_eq "unset final declaration is skipped successfully" "0" "$_env_rc"
+assert_eq "unset final declaration is not forwarded" \
+  $'--env\nCURRENT_VALUE=forwarded' \
+  "$(printf '%s\n' "${_env_args[@]}")"
 cfg_env="$_saved_cfg_env"
 rm -f "$_env_file"
 

@@ -44,7 +44,7 @@ grant_labels=()
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.7'
+AB_VERSION='0.0.8'
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -813,8 +813,14 @@ ab_append_current_env() {
     name="${line%%=*}"
     name="${name%"${name##*[![:space:]]}"}"
     [[ "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || continue
-    [[ -v "$name" ]] && target_args+=(--env "$name=${!name}")
+    # A bare declaration imports the launching shell's value when present. An unset
+    # variable is a normal skip, not a failure — especially when this is the last
+    # declaration in the file, since the helper runs under set -e in cmd_exec.
+    if [[ -v "$name" ]]; then
+      target_args+=(--env "$name=${!name}")
+    fi
   done < "$cfg_env"
+  return 0
 }
 
 cmd_exec() {
