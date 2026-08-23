@@ -26,6 +26,7 @@ ARG HOST_UID=1000
 ARG HOST_GID=100
 ARG CLAUDE_CHANNEL=stable
 ARG CODEX_RELEASE=latest
+ARG AGENTBOX_VERSION=unknown
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -90,6 +91,17 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CHANNEL"
 # codex-code-mode-host) to /usr/local/bin so a bind-mounted ~/.codex (config/auth)
 # cannot shadow the binary store.
 USER root
+
+# Stable, image-baked identity for software running inside agentbox. This is
+# deliberately a file rather than a host-configurable environment variable.
+LABEL org.nevdelap.agentbox=true \
+      org.nevdelap.agentbox.version=${AGENTBOX_VERSION}
+RUN install -d -o root -g root -m 0555 /etc/agentbox \
+ && printf 'agentbox=1\nversion=%s\n' "$AGENTBOX_VERSION" \
+      > /etc/agentbox/identity \
+ && chown root:root /etc/agentbox/identity \
+ && chmod 0444 /etc/agentbox/identity
+
 RUN curl -fsSL https://chatgpt.com/codex/install.sh \
       | env CODEX_HOME=/tmp/codex-home CODEX_INSTALL_DIR=/tmp/codex-bin \
             CODEX_NON_INTERACTIVE=1 sh -s -- --release "$CODEX_RELEASE" \

@@ -5,6 +5,10 @@ A **confined** Ubuntu container for running **Claude Code**, **Codex**, and **Gi
 `rustup` (stable toolchain) + `cargo-sweep`, and **nested Docker** for running CI
 tooling. There is deliberately **no system python** — use `uv run python`.
 
+This README is mounted read-only at `~/README.md` inside containers started by `ab`.
+Software running in the outer container can identify it by checking the root-owned
+`/etc/agentbox/identity` file, whose contents include `agentbox=1` and the image version.
+
 Nested Docker is provided by **[Sysbox]**: the container is launched with
 `docker run --runtime=sysbox-runc`, and the inner Docker daemon runs **rootful inside
 the container** while Sysbox isolates it from the host.

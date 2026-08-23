@@ -270,6 +270,8 @@ echo
 echo "ab_mount_dest_owner (bin/ab)"
 # A user mount onto a destination ab already uses would make `docker run` fail with "Duplicate
 # mount point", so build_user_mounts drops that line. Both spec forms in the array are matched.
+assert_eq "agentbox README is mounted ro" "$CONTEXT/README.md:/home/agentbox/README.md:ro" \
+  "$(ab_mount_dest_owner /home/agentbox/README.md)"
 _saved_mounts=("${mounts[@]}")
 mounts=(-v "/proj:/workspace" -v "/etc/localtime:/etc/localtime:ro" --mount "type=bind,src=/srv/d,dst=/home/agentbox/d,readonly")
 assert_eq "-v dst matched"          "/proj:/workspace"          "$(ab_mount_dest_owner /workspace)"

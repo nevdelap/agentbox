@@ -172,6 +172,12 @@ mounts=(
   -v "$HOME/.codex:/home/agentbox/.codex"
   -v "$dvol:/var/lib/docker"
 )
+# Keep the agentbox README available in the agent's home directory. It is mounted
+# read-only from the launcher checkout so agents can discover the confinement model
+# and operating conventions without depending on the project being worked on.
+if [ -f "$CONTEXT/README.md" ]; then
+  mounts+=(-v "$CONTEXT/README.md:/home/agentbox/README.md:ro")
+fi
 # Optional host files/dirs mirrored in only when present (existence-guarded).
 # ~/.claude.json carries the oauthAccount/userID Claude Code checks at startup to
 # consider itself logged in — without it the container has an empty stub and prompts
@@ -280,11 +286,11 @@ build_image() {
     [ -f "$CONTEXT/$f" ] && files+=("$CONTEXT/$f")
   done
   # Fold the build args `ab` actually varies into the freshness digest, not just the file
-  # contents — so a change to HOST_UID/HOST_GID invalidates the cached image instead of
+  # contents — so a change to HOST_UID/HOST_GID/AB_VERSION invalidates the cached image instead of
   # silently reusing a tag built for different args. (CLAUDE_CHANNEL/CODEX_RELEASE aren't
   # passed here today — the Dockerfile defaults apply — so pinning them still requires a
   # direct `docker build`; that path never consults this digest.)
-  digest="$( { cat "${files[@]}"; printf 'HOST_UID=%s\nHOST_GID=%s\n' "$uid" "$(id -g)"; } | sha256sum | cut -c1-12)"
+  digest="$( { cat "${files[@]}"; printf 'HOST_UID=%s\nHOST_GID=%s\nAGENTBOX_VERSION=%s\n' "$uid" "$(id -g)" "$AB_VERSION"; } | sha256sum | cut -c1-12)"
   tag="$IMAGE_NAME:${uid}-${digest}"
   if [ "$force" = "force" ] || ! docker image inspect "$tag" >/dev/null 2>&1; then
     echo "agentbox: building $tag ..." >&2
@@ -302,6 +308,7 @@ build_image() {
     [ "$nocache" = --no-cache ] && build_flags+=(--no-cache)
     if ! log="$(docker build "${build_flags[@]}" \
         --build-arg "HOST_UID=$uid" --build-arg "HOST_GID=$(id -g)" \
+        --build-arg "AGENTBOX_VERSION=$AB_VERSION" \
         -t "$tag" -t "$IMAGE_NAME:latest" "$CONTEXT" 2>&1)"; then
       printf '%s\n' "$log" >&2
       echo "agentbox: image build failed (see above)" >&2
