@@ -14,6 +14,9 @@ set -euo pipefail
 
 DOCKER_SOCK=/var/run/docker.sock
 DOCKERD_LOG=/var/log/dockerd.log
+# Per-project named volume mounted here by bin/ab. It contains jj's writable repo/workspace
+# state, separate from the read-only host user config files supplied through JJ_CONFIG.
+JJ_STATE_DIR=/home/agentbox/.config/jj
 # Optional per-host customization dir (~/.config/agentbox on the host), mounted ro by ab.
 # Absent → every helper below is a no-op, so other machines are unaffected.
 AB_CFG=/home/agentbox/.config/agentbox
@@ -151,6 +154,15 @@ ab_step_fail() {
   } >&2
 }
 
+# A fresh Docker named volume is mounted root:root, even though the image's destination
+# directory belongs to agentbox. Repair both fresh and previously-created volumes before any
+# command (including jj) can use the state path. This volume is container-local, so recursively
+# adopting its contents is safe and also repairs a volume first created by an older image.
+ensure_jj_state() {
+  install -d -o agentbox -g "$(id -g agentbox)" -m 0700 "$JJ_STATE_DIR"
+  chown -R agentbox: "$JJ_STATE_DIR"
+}
+
 # Run the user's setup.sh once per container (re-runs when its content hash changes) to install
 # extra tools. Backgrounded so `ab start` returns immediately; a failure is reported loudly to
 # the container log via ab_setup_fail (visible in `ab logs`), not fatal.
@@ -188,6 +200,7 @@ run_setup() {
 
 # --- executable body (skipped when sourced for tests) ---------------------------
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  ensure_jj_state
   mkdir -p "${CARGO_TARGET_DIR:-/tmp/target}"
   chown agentbox: "${CARGO_TARGET_DIR:-/tmp/target}"
 

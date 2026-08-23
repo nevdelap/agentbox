@@ -40,11 +40,18 @@ hex16() { printf '%s' "$1" | sha256sum | cut -c1-16; }
 
 echo "compute_names (bin/ab)"
 
+# The sourced mount array is for the actual checkout, so capture its jj state volume before the
+# name-focused cases below deliberately recompute names for other project paths.
+_initial_jvol="$jvol"
+assert_eq "jj state volume mount" "$_initial_jvol:/home/agentbox/.config/jj" \
+  "$(ab_mount_dest_owner /home/agentbox/.config/jj)"
+
 # Exact name for a real project. (This also pins the format against drift.)
 compute_names "/home/alice/stay"
 assert_eq "stay slug"  "home-alice-stay"                                "$slug"
 assert_eq "stay cname" "agentbox-home-alice-stay-$(hex16 /home/alice/stay)" "$cname"
 assert_eq "stay dvol"  "agentbox-docker-home-alice-stay-$(hex16 /home/alice/stay)" "$dvol"
+assert_eq "stay jvol"  "agentbox-jj-home-alice-stay-$(hex16 /home/alice/stay)"     "$jvol"
 
 # Determinism: same dir twice -> identical names.
 compute_names "/workspace"; a="$cname"
@@ -283,6 +290,41 @@ mounts=("${_saved_mounts[@]}")
 
 echo
 echo "prepare_host_state (bin/ab)"
+# Host config files are mirrored read-only, while jj's secure repo/workspace state is kept in the
+# separate writable jvol mounted at jj's standard container path. JJ_CONFIG points only at the
+# read-only user config files, even when the host uses a custom XDG_CONFIG_HOME.
+_cfg_home="$(mktemp -d)"
+_saved_home="$HOME"
+_saved_xdg="${XDG_CONFIG_HOME-}"
+_saved_mounts=("${mounts[@]}")
+HOME="$_cfg_home"
+XDG_CONFIG_HOME="$_cfg_home/custom-config"
+mkdir -p "$HOME/.config/jj" "$XDG_CONFIG_HOME/jj/conf.d"
+: >"$HOME/.gitconfig"
+: >"$HOME/.jjconfig.toml"
+: >"$XDG_CONFIG_HOME/jj/config.toml"
+: >"$XDG_CONFIG_HOME/jj/conf.d/10-work.toml"
+mounts=()
+jj_config_paths=()
+add_host_config_mounts
+assert_eq "mounts git config" "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro" \
+  "$(ab_mount_dest_owner /home/agentbox/.gitconfig)"
+assert_eq "mounts jj legacy config" "$HOME/.jjconfig.toml:/home/agentbox/.jjconfig.toml:ro" \
+  "$(ab_mount_dest_owner /home/agentbox/.jjconfig.toml)"
+assert_eq "mounts jj XDG config" "$XDG_CONFIG_HOME/jj/config.toml:/home/agentbox/.config/jj-host-config.toml:ro" \
+  "$(ab_mount_dest_owner /home/agentbox/.config/jj-host-config.toml)"
+assert_eq "mounts jj conf.d" "$XDG_CONFIG_HOME/jj/conf.d:/home/agentbox/.config/jj-host-conf.d:ro" \
+  "$(ab_mount_dest_owner /home/agentbox/.config/jj-host-conf.d)"
+assert_eq "JJ_CONFIG paths" \
+  "JJ_CONFIG=/home/agentbox/.jjconfig.toml:/home/agentbox/.config/jj-host-config.toml:/home/agentbox/.config/jj-host-conf.d" \
+  "$(jj_config_env_arg)"
+assert_eq "jj state mount is not host config" "" \
+  "$(ab_mount_dest_owner /home/agentbox/.config/jj)"
+HOME="$_saved_home"
+if [ -n "$_saved_xdg" ]; then XDG_CONFIG_HOME="$_saved_xdg"; else unset XDG_CONFIG_HOME; fi
+mounts=("${_saved_mounts[@]}")
+rm -rf "$_cfg_home"
+
 # A clean host has no tool state directories. Preparation must create them as the invoking
 # user, and the newly-created gh directory must be added to the default mount set.
 _state_home="$(mktemp -d)"
@@ -347,6 +389,23 @@ assert_eq "adopts persisted gh grant" "1" "$grant_gh"
 assert_eq "does not invent ssh grant" "0" "$grant_all_of_dot_ssh"
 PATH="$_saved_path"
 rm -rf "$_mock_bin"
+unset -f exists container_has_mount_destination
+eval "$_saved_exists_fn"
+eval "$_saved_mount_owner_fn"
+
+echo
+echo "require_jj_state_mount (bin/ab)"
+# Existing containers from before jj support have no jj state-volume mount. They must fail fast
+# with the migration command instead of entering the readiness timeout; current containers pass.
+_saved_exists_fn="$(declare -f exists 2>/dev/null || true)"
+_saved_mount_owner_fn="$(declare -f container_has_mount_destination 2>/dev/null || true)"
+exists() { return 0; }
+container_has_mount_destination() { [ "$1" = "$JJ_STATE_CONTAINER" ]; }
+assert_eq "current container accepted" "0" "$(require_jj_state_mount >/dev/null 2>&1; echo $?)"
+container_has_mount_destination() { return 1; }
+_legacy_jj_msg="$(require_jj_state_mount 2>&1)"
+assert_eq "legacy container rejected" "1" "$(require_jj_state_mount >/dev/null 2>&1; echo $?)"
+assert_eq "legacy migration hint" "1" "$(printf '%s\n' "$_legacy_jj_msg" | grep -c "ab rebuild")"
 unset -f exists container_has_mount_destination
 eval "$_saved_exists_fn"
 eval "$_saved_mount_owner_fn"

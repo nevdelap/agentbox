@@ -44,7 +44,7 @@ grant_labels=()
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.10'
+AB_VERSION='0.0.11'
 AB_GITHUB_REPO="nevdelap/agentbox"
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
@@ -72,6 +72,7 @@ compute_names() {
   hash="$(printf '%s' "$dir" | sha256sum | cut -c1-16)"
   cname="agentbox-${slug}-${hash}"       # one container per project path
   dvol="agentbox-docker-${slug}-${hash}" # ...and its own inner-docker data root
+  jvol="agentbox-jj-${slug}-${hash}"     # ...and its own jj secure repo/workspace state
 }
 compute_names "$PROJECT_DIR"
 uid="$(id -u)"
@@ -82,6 +83,7 @@ uid="$(id -u)"
 # default plus per-machine, per-project, and per-machine-per-project overrides.
 AB_CFG_ROOT="$HOME/.config/agentbox"
 AB_CFG_CONTAINER=/home/agentbox/.config/agentbox
+JJ_STATE_CONTAINER=/home/agentbox/.config/jj
 # The machine name keying the search. Defaults to the host's name (the same value ab gives the
 # container via --hostname); AGENTBOX_MACHINE overrides it, so a machine can be renamed — or a
 # rename rehearsed — without moving directories. It deliberately does NOT change --hostname.
@@ -172,6 +174,7 @@ mounts=(
   -v "$HOME/.claude:/home/agentbox/.claude"
   -v "$HOME/.codex:/home/agentbox/.codex"
   -v "$dvol:/var/lib/docker"
+  -v "$jvol:/home/agentbox/.config/jj"
 )
 # Keep the agentbox README available in the agent's home directory. It is mounted
 # read-only from the launcher checkout so agents can discover the confinement model
@@ -183,17 +186,53 @@ fi
 # ~/.claude.json carries the oauthAccount/userID Claude Code checks at startup to
 # consider itself logged in — without it the container has an empty stub and prompts
 # for login, even though ~/.claude/.credentials.json (the token) is mounted above.
-[ -f "$HOME/.claude.json" ] && mounts+=(-v "$HOME/.claude.json:/home/agentbox/.claude.json")
-if [ -f "$HOME/.gitconfig" ]; then
-  mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
-elif [ -f "$HOME/.config/git/config" ]; then
-  # XDG-style git config (e.g. home-manager's programs.git), used instead of ~/.gitconfig.
-  mounts+=(-v "$HOME/.config/git/config:/home/agentbox/.config/git/config:ro")
-fi
-[ -e /etc/localtime ] && mounts+=(-v "/etc/localtime:/etc/localtime:ro")
-# NixOS only: expose the nix store read-only so /nix/store shebangs & paths in the
-# workspace resolve inside the container.
-[ -d /nix/store ] && mounts+=(-v "/nix/store:/nix/store:ro")
+add_host_config_mounts() {
+  jj_config_paths=()
+  [ -f "$HOME/.claude.json" ] && mounts+=(-v "$HOME/.claude.json:/home/agentbox/.claude.json")
+  if [ -f "$HOME/.gitconfig" ]; then
+    mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
+  elif [ -f "$HOME/.config/git/config" ]; then
+    # XDG-style git config (e.g. home-manager's programs.git), used instead of ~/.gitconfig.
+    mounts+=(-v "$HOME/.config/git/config:/home/agentbox/.config/git/config:ro")
+  fi
+  # jj loads the legacy user file and the platform config files from JJ_CONFIG. Keep these
+  # read-only host mounts separate from /home/agentbox/.config/jj, where jj creates secure
+  # repo/workspace config whose paths are specific to this container's /workspace mapping.
+  if [ -f "$HOME/.jjconfig.toml" ]; then
+    mounts+=(-v "$HOME/.jjconfig.toml:/home/agentbox/.jjconfig.toml:ro")
+    jj_config_paths+=(/home/agentbox/.jjconfig.toml)
+  fi
+  local jj_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/jj"
+  if [ -d "$jj_config_dir" ]; then
+    if [ -f "$jj_config_dir/config.toml" ]; then
+      mounts+=(-v "$jj_config_dir/config.toml:/home/agentbox/.config/jj-host-config.toml:ro")
+      jj_config_paths+=(/home/agentbox/.config/jj-host-config.toml)
+    fi
+    if [ -d "$jj_config_dir/conf.d" ]; then
+      mounts+=(-v "$jj_config_dir/conf.d:/home/agentbox/.config/jj-host-conf.d:ro")
+      jj_config_paths+=(/home/agentbox/.config/jj-host-conf.d)
+    fi
+  fi
+  [ -e /etc/localtime ] && mounts+=(-v "/etc/localtime:/etc/localtime:ro")
+  # NixOS only: expose the nix store read-only so /nix/store shebangs & paths in the
+  # workspace resolve inside the container.
+  if [ -d /nix/store ]; then
+    mounts+=(-v "/nix/store:/nix/store:ro")
+  fi
+}
+add_host_config_mounts
+
+# JJ_CONFIG overrides jj's default user-config search paths. That lets the host's user config
+# remain read-only while the default /home/agentbox/.config/jj path is backed by the writable,
+# per-project jvol above for jj's secure repo/workspace state. An empty array leaves jj's normal
+# container-local defaults intact.
+jj_config_env_arg() {
+  [ "${#jj_config_paths[@]}" -gt 0 ] || return 0
+  local joined
+  joined="$(IFS=:; printf '%s' "${jj_config_paths[*]}")"
+  printf 'JJ_CONFIG=%s' "$joined"
+}
+
 # Sysbox provides the confinement — the outer container needs NO capabilities, no
 # seccomp relaxation, no devices. The run flags are the `sysbox-runc` runtime (registered
 # on the host) and `--init`. `--init` inserts docker's bundled init (tini) as PID 1 so the
@@ -225,6 +264,10 @@ if [ -d "$AB_CFG_ROOT" ]; then
   [ -n "$cfg_ports" ] && run_args+=(-e "AGENTBOX_PORTS_FILE=$(ab_config_container_path "$cfg_ports")")
   [ -n "$cfg_setup" ] && run_args+=(-e "AGENTBOX_SETUP_FILE=$(ab_config_container_path "$cfg_setup")")
 fi
+# Keep this after the optional env-file so a host config cannot override the safe separation of
+# read-only host jj settings from writable container-local secure repo/workspace state.
+jj_config_arg="$(jj_config_env_arg)"
+[ -n "$jj_config_arg" ] && run_args+=(--env "$jj_config_arg")
 
 # Fail fast with guidance if the host hasn't got Sysbox registered.
 require_sysbox() {
@@ -419,6 +462,33 @@ wait_ready() {
   done
   echo "agentbox: WARNING — inner docker not ready yet; try 'ab logs'" >&2
   return 1
+}
+
+# The entrypoint repairs the ownership of the jj state volume as root, but `docker run -d`
+# reports the container running before that startup step completes. Wait until the actual
+# runtime user can write the mounted directory so an immediate `ab jj ...`/`ab exec ...` cannot
+# race the repair. This is deliberately separate from wait_ready: jj state is required for every
+# command, while the inner Docker daemon is allowed to finish coming up asynchronously.
+wait_jj_state() {
+  for _ in $(seq 1 60); do
+    if docker exec --user agentbox "$cname" test -w "$JJ_STATE_CONTAINER" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "agentbox: jj state directory is not writable yet; try 'ab logs'" >&2
+  return 1
+}
+
+# Containers created before jj support do not have the state-volume mount at all. Do not send
+# those through the readiness loop: tell the user how to recreate them with the current image.
+# This check is also used by cmd_exec because a legacy container may already be running.
+require_jj_state_mount() {
+  exists || return 0
+  if ! container_has_mount_destination "$JJ_STATE_CONTAINER"; then
+    echo "agentbox: $cname was created before jj state support; run 'ab rebuild' to recreate it." >&2
+    return 1
+  fi
 }
 
 # Shared by ab_parse_mounts_line and ab_parse_network_line: drop a trailing `#` comment, collapse
@@ -723,13 +793,15 @@ cmd_start() {
   if exists; then
     check_existing_grants
   fi
+  require_jj_state_mount
   local tag
   tag="$(build_image)" || exit 1
   warn_legacy_files
   if is_running; then
     echo "agentbox: $cname is already running."
     echo "agentbox: to recreate it (new settings/mounts), run: ab destroy && ab start"
-    return 0
+    wait_jj_state
+    return $?
   fi
   if exists; then
     # An existing container keeps the bind mounts it was created with — `mounts` edits only take
@@ -742,9 +814,10 @@ cmd_start() {
     docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
   fi
   connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
-  # Non-blocking: return as soon as the container is up. The entrypoint brings the inner
-  # dockerd up in the background; `ab claude`/`ab exec` work right away (claude needs no
-  # dockerd), and inner-docker callers find it ready shortly after.
+  # Wait only for the jj state ownership repair. The entrypoint brings inner dockerd up in the
+  # background; `ab claude`/`ab exec` do not need to wait for it, and inner-docker callers find
+  # it ready shortly after.
+  wait_jj_state
 }
 
 # Show which config files are in effect for this machine + project, and the search
@@ -865,7 +938,11 @@ ab_append_current_env() {
 }
 
 cmd_exec() {
+  require_jj_state_mount
   is_running || cmd_start
+  # Covers a concurrent `ab start`, or a container started directly with `docker start`, where
+  # cmd_start was not the process that waited for the entrypoint's jj ownership repair.
+  wait_jj_state
   # No command (or a bare `bash`) → an interactive shell. Interactive non-login bash
   # sources ~/.bashrc on startup, which is where claude()/codex() are defined.
   if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = bash ]; }; then
@@ -930,6 +1007,16 @@ main() {
       else
         echo "agentbox: failed to remove inner-docker volume $dvol (it may still be in use)" >&2
         rc=1
+      fi
+      # jvol was added after the inner-docker volume. It is optional for older containers, so
+      # an absent volume is a successful no-op rather than a failed destroy.
+      if docker volume inspect "$jvol" >/dev/null 2>&1; then
+        if docker volume rm "$jvol" >/dev/null 2>&1; then
+          echo "agentbox: removed jj state volume $jvol"
+        else
+          echo "agentbox: failed to remove jj state volume $jvol (it may still be in use)" >&2
+          rc=1
+        fi
       fi
       exit "$rc"
     fi

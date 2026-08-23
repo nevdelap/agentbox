@@ -1,7 +1,7 @@
 # agentbox
 
 A **confined** Ubuntu container for running **Claude Code**, **Codex**, and **GitHub CLI**
-(`gh`), with the tooling an agent needs: `git`, `ssh`, `uv`, `just`, `ripgrep`, `jq`, `tmux`,
+(`gh`), with the tooling an agent needs: `git`, `jj`, `ssh`, `uv`, `just`, `ripgrep`, `jq`, `tmux`,
 `rustup` (stable toolchain) + `cargo-sweep`, and **nested Docker** for running CI
 tooling. There is deliberately **no system python** — use `uv run python`.
 
@@ -118,7 +118,7 @@ Each project directory gets its own container. Lifecycle:
 ```bash
 ab start [--grant-gh] [--grant-all-of-dot-ssh]                # create + start for this project
 ab stop                                                       # stop (kept on disk; /tmp build state preserved)
-ab destroy                                                    # stop + remove container + its inner-docker volume (/tmp state lost)
+ab destroy                                                    # stop + remove container + its inner-docker/jj volumes (/tmp state lost)
 ab status                                                     # is it running?
 ab config                                                     # which per-machine/per-project config files are in effect
 ab logs                                                       # tail container / inner-dockerd logs
@@ -133,7 +133,8 @@ context changes.
 
 ### Updating bundled tools
 
-`ab rebuild` may reuse cached install layers for the bundled Claude Code and Codex releases.
+`ab rebuild` may reuse cached install layers for the bundled Claude Code, Codex, and Jujutsu
+releases.
 Run `ab rebuild --no-cache` when fresh CLI versions are required; the full rebuild is slower.
 
 Environment variables:
@@ -160,6 +161,10 @@ container read-only access to the full `.ssh` directory, or use individual entri
 - `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity — falls back to
   `~/.config/git/config` → `/home/agentbox/.config/git/config` if `~/.gitconfig` is absent,
   e.g. XDG-style setups such as home-manager's `programs.git`)
+- `~/.jjconfig.toml` and `$XDG_CONFIG_HOME/jj/config.toml` + `conf.d` (normally
+  `~/.config/jj`) → read-only user config files loaded through `JJ_CONFIG`; jj's secure
+  repo/workspace state is kept separately in the writable per-project `agentbox-jj-<project>`
+  volume at `/home/agentbox/.config/jj`
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox)
   — env vars, host port forwards, extra tools)
@@ -171,6 +176,8 @@ container read-only access to the full `.ssh` directory, or use individual entri
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox))
 - named volume `agentbox-docker-<project>` → `/var/lib/docker` (per-project inner
   rootful docker state; `ab destroy` removes it)
+- named volume `agentbox-jj-<project>` → `/home/agentbox/.config/jj` (per-project jj
+  secure repo/workspace state; `ab destroy` removes it)
 
 The credential mounts are explicit grants. Use `ab start --grant-gh` or
 `ab rebuild --grant-gh` to use and persist GitHub CLI credentials, and
@@ -188,6 +195,13 @@ list individual files in `~/.config/agentbox/mounts`, for example:
 That keeps the selected files read-only except for `known_hosts`, which is writable.
 Grant choices are stored on the container, so convenience commands reuse them after
 `ab stop`; use `ab rebuild` without the grant flags to revoke them.
+
+Jujutsu's user configuration is loaded from the host read-only through `JJ_CONFIG`. Its secure
+repo/workspace configuration is deliberately container-local: jj records absolute repository
+paths there, and the host project is remapped to `/workspace` inside agentbox. Settings changed
+with `jj config set --repo` or `jj config set --workspace` therefore apply to this project's
+container and survive `ab stop`, but are removed by `ab destroy`; put portable user settings in
+the host's `config.toml` or `conf.d` when they should be shared.
 
 ## Per-host and per-project customization (`~/.config/agentbox/`)
 

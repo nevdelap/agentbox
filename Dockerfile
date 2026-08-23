@@ -26,6 +26,7 @@ ARG HOST_UID=1000
 ARG HOST_GID=100
 ARG CLAUDE_CHANNEL=stable
 ARG CODEX_RELEASE=latest
+ARG JJ_VERSION=latest
 ARG AGENTBOX_VERSION=unknown
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,6 +38,27 @@ RUN sed -i 's/Components: main restricted/Components: main restricted universe/'
     && apt-get install -y --no-install-recommends \
           build-essential ca-certificates curl gh git jq just moreutils openssh-client ripgrep socat tmux \
     && rm -rf /var/lib/apt/lists/*
+
+# Jujutsu (Ubuntu's resolute repositories do not provide a binary package). Use the upstream
+# musl release binary rather than compiling the large jj-cli crate. GitHub's latest-release API
+# supplies the tag because the asset filename includes its version.
+ARG TARGETARCH
+RUN jj_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$jj_tmp"' EXIT; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) jj_arch=x86_64 ;; \
+      arm64) jj_arch=aarch64 ;; \
+      *) echo "unsupported target architecture for jj: ${TARGETARCH:-unknown}" >&2; exit 1 ;; \
+    esac; \
+    jj_version="$JJ_VERSION"; \
+    if [ "$jj_version" = latest ]; then \
+      jj_version="$(curl -fsSL https://api.github.com/repos/jj-vcs/jj/releases/latest | jq -er .tag_name)"; \
+    fi; \
+    curl -fsSL "https://github.com/jj-vcs/jj/releases/download/$jj_version/jj-$jj_version-$jj_arch-unknown-linux-musl.tar.gz" \
+      | tar -xzf - -C "$jj_tmp"; \
+    jj_bin="$(find "$jj_tmp" -type f -name jj -print -quit)"; \
+    [ -n "$jj_bin" ] || { echo "jj binary missing from release archive" >&2; exit 1; }; \
+    install -m 0755 "$jj_bin" /usr/local/bin/jj
 
 # --- Docker (official repo). The inner daemon is rootful; Sysbox isolates it. -
 # A Sysbox container runs a normal rootful dockerd (no rootless extras, fuse-overlayfs,
@@ -67,7 +89,32 @@ RUN existing="$(getent passwd "$HOST_UID" | cut -d: -f1)"; \
     useradd -m -u "$HOST_UID" -g "$HOST_GID" -s /bin/bash agentbox; \
     usermod -aG docker agentbox
 
-# --- From here, install as the agentbox user -------------------------------
+# Rust (stable toolchain) + cargo-sweep. Keep the toolchain shared and root-owned; cargo still
+# defaults to the runtime user's writable $HOME/.cargo for registry/build state.
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | env CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup \
+          sh -s -- -y --default-toolchain stable --profile default \
+    && env CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup \
+         /usr/local/cargo/bin/cargo install --root /usr/local cargo-sweep
+
+# Claude Code (native glibc), installed through its signed apt repository so the binary and
+# package metadata are root-owned rather than being created in the runtime user's home.
+RUN case "$CLAUDE_CHANNEL" in \
+      stable|latest) claude_channel="$CLAUDE_CHANNEL" ;; \
+      *) echo "CLAUDE_CHANNEL must be stable or latest for the apt installation: $CLAUDE_CHANNEL" >&2; exit 1 ;; \
+    esac; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
+      -o /etc/apt/keyrings/claude-code.asc; \
+    echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/$claude_channel $claude_channel main" \
+      > /etc/apt/sources.list.d/claude-code.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends claude-code; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- Runtime user -----------------------------------------------------------
 USER agentbox
 ENV HOME=/home/agentbox
 # /home/agentbox/.bin is on PATH by convention, but nothing mounts it by default — bind your own
@@ -76,15 +123,6 @@ ENV HOME=/home/agentbox
 # mounted scripts only ADD commands rather than shadow them. Harmless (empty PATH entry) if
 # nothing's mounted there.
 ENV PATH="/home/agentbox/.local/bin:/home/agentbox/.cargo/bin:/usr/local/bin:${PATH}:/home/agentbox/.bin"
-
-# Rust (stable toolchain) + cargo-sweep
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --profile default
-RUN cargo install cargo-sweep
-
-# Claude Code (native glibc). Binaries live under ~/.local — a bind-mounted
-# ~/.claude (config/auth) cannot shadow them. Updates disabled at runtime.
-RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CHANNEL"
 
 # Codex (native musl-static; runs on glibc). Install into throwaway /tmp, then relocate
 # the whole release bin/ (codex plus sibling binaries it execs at runtime, e.g.
@@ -119,10 +157,14 @@ RUN if command -v python3 >/dev/null 2>&1; then \
 # Interactive shells (`ab bash`, `docker exec -it … bash`) source ~/.bashrc on startup:
 # the skip-permissions / never-ask aliases that are the point of running the CLIs inside
 # agentbox.
-COPY --chown=agentbox:agentbox .bashrc /home/agentbox/.bashrc
+COPY --chown=agentbox:$HOST_GID .bashrc /home/agentbox/.bashrc
 
 # Inner rootful dockerd data root (named volume `agentbox-docker` mounts here).
 RUN mkdir -p /var/lib/docker
+# Writable jj repo/workspace state (the launcher mounts a per-project named volume here).
+# The entrypoint repeats this ownership setup after the volume is mounted, including for
+# volumes created before this directory was added to the image.
+RUN install -d -o agentbox -g "$HOST_GID" -m 0700 /home/agentbox/.config/jj
 COPY --chmod=0755 agentbox-entrypoint.sh /usr/local/bin/agentbox-entrypoint
 
 # Pin CLI versions (no auto-update); locale/term fallbacks; persist Rust build
