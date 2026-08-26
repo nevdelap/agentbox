@@ -183,7 +183,12 @@ fi
 # consider itself logged in — without it the container has an empty stub and prompts
 # for login, even though ~/.claude/.credentials.json (the token) is mounted above.
 [ -f "$HOME/.claude.json" ] && mounts+=(-v "$HOME/.claude.json:/home/agentbox/.claude.json")
-[ -f "$HOME/.gitconfig" ] && mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
+if [ -f "$HOME/.gitconfig" ]; then
+  mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
+elif [ -f "$HOME/.config/git/config" ]; then
+  # XDG-style git config (e.g. home-manager's programs.git), used instead of ~/.gitconfig.
+  mounts+=(-v "$HOME/.config/git/config:/home/agentbox/.config/git/config:ro")
+fi
 [ -e /etc/localtime ] && mounts+=(-v "/etc/localtime:/etc/localtime:ro")
 # NixOS only: expose the nix store read-only so /nix/store shebangs & paths in the
 # workspace resolve inside the container.

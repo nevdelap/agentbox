@@ -157,7 +157,9 @@ container read-only access to the full `.ssh` directory, or use individual entri
   `oauthAccount` Claude Code checks to consider itself logged in; mounted only if present)
 - `~/.codex` → `/home/agentbox/.codex` (auth, config — e.g. `auth.json`, `config.toml`)
 - `~/.config/gh` → `/home/agentbox/.config/gh` (GitHub CLI auth and config; only with `--grant-gh`)
-- `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity)
+- `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity — falls back to
+  `~/.config/git/config` → `/home/agentbox/.config/git/config` if `~/.gitconfig` is absent,
+  e.g. XDG-style setups such as home-manager's `programs.git`)
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox)
   — env vars, host port forwards, extra tools)
