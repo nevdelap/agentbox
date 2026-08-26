@@ -44,7 +44,8 @@ grant_labels=()
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
-AB_VERSION='0.0.8'
+AB_VERSION='0.0.10'
+AB_GITHUB_REPO="nevdelap/agentbox"
 
 # Resolve the agentbox repo root (the dir holding the Dockerfile) from this script's
 # real location — works whether `ab` is run in place or reached via a symlink on PATH
@@ -238,6 +239,34 @@ See "$CONTEXT/README.md" (Host prerequisite).
 Then retry.
 EOF
     exit 1
+  fi
+}
+
+# Best-effort "you're behind" notice against GitHub's latest tagged release. Throttled to
+# once an hour via a cache file's mtime, so `ab` doesn't hit the network on every
+# invocation — a stale cache is read straight from disk, no curl involved. Silent on any
+# failure (no curl, offline, GitHub unreachable/rate-limited, no releases yet): this is a
+# courtesy, never a reason to slow down or break `ab`.
+AB_UPDATE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/agentbox/update-check"
+check_for_update() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local latest
+  if [ -f "$AB_UPDATE_CACHE" ] && [ -z "$(find "$AB_UPDATE_CACHE" -mmin +60 2>/dev/null)" ]; then
+    # Cache file's mtime is under an hour old — reuse it, no network call this run.
+    latest="$(cat "$AB_UPDATE_CACHE" 2>/dev/null)"
+  else
+    # Missing or stale (over an hour old, or this is the first run) — refetch and restamp.
+    # An empty result (curl failed, offline, no releases yet) is cached too, so a persistent
+    # failure still only retries once an hour rather than on every invocation.
+    latest="$(curl -fsS --max-time 2 "https://api.github.com/repos/$AB_GITHUB_REPO/releases/latest" 2>/dev/null \
+      | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\(.*\)",\{0,1\}$/\1/p')"
+    mkdir -p "$(dirname "$AB_UPDATE_CACHE")" && printf '%s' "$latest" >"$AB_UPDATE_CACHE"
+  fi
+  [ -n "$latest" ] || return 0
+  local latest_num="${latest#v}"
+  if [ "$latest_num" != "$AB_VERSION" ] &&
+     [ "$(printf '%s\n%s\n' "$AB_VERSION" "$latest_num" | sort -V | tail -1)" = "$latest_num" ]; then
+    echo "agentbox: a newer release is available: $latest (you have $AB_VERSION) — https://github.com/$AB_GITHUB_REPO/releases" >&2
   fi
 }
 
@@ -876,6 +905,8 @@ cmd_exec() {
 }
 
 main() {
+  # Skip for --help/-h/bare and --version: those want fast, static, uncluttered output.
+  case "${1:-}" in "" | -h | --help | --version) : ;; *) check_for_update ;; esac
   case "${1:-}" in
   start) shift; parse_runtime_options start "$@"; cmd_start ;;
   stop) if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi ;;
