@@ -201,8 +201,24 @@ run_setup() {
 # --- executable body (skipped when sourced for tests) ---------------------------
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   ensure_jj_state
-  mkdir -p "${CARGO_TARGET_DIR:-/tmp/target}"
-  chown agentbox: "${CARGO_TARGET_DIR:-/tmp/target}"
+  cargo_target_dir="${CARGO_TARGET_DIR:-/tmp/target}"
+  mkdir -p "$cargo_target_dir"
+  # A target directory left by an older container may already be owned by agentbox. Under
+  # Sysbox, root cannot necessarily chown that existing directory again, even though the
+  # runtime user can write it. Only repair ownership when a write check says it is needed;
+  # otherwise an idempotent restart can die with EPERM before docker exec gets a chance to run.
+  agentbox_can_write_dir() {
+    local probe
+    probe="$(runuser -u agentbox -- mktemp "$1/.agentbox-write-test.XXXXXX" 2>/dev/null)" || return 1
+    runuser -u agentbox -- rm -f "$probe" >/dev/null 2>&1 || true
+  }
+  if ! agentbox_can_write_dir "$cargo_target_dir"; then
+    chown agentbox: "$cargo_target_dir" 2>/dev/null || true
+  fi
+  if ! agentbox_can_write_dir "$cargo_target_dir"; then
+    echo "agentbox: ERROR — $cargo_target_dir is not writable by agentbox." >&2
+    exit 1
+  fi
 
   if [ "$#" -eq 0 ] || [ "${1:-}" = "daemon" ]; then
     ensure_dockerd || true
