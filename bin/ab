@@ -6,7 +6,7 @@
 # container so the inner Docker daemon (rootful, in-container) cannot reach the host —
 # nested Docker with no --privileged and no host docker socket.
 #
-#   ab start [--grant-gh] [--grant-all-of-dot-ssh]
+#   ab start [--no-git] [--grant-gh] [--grant-all-of-dot-ssh] [--apply]
 #                            create + start the container for the current project
 #   ab stop                  stop it (kept on disk; /tmp build state preserved)
 #   ab destroy               stop + remove it (destroyed; /tmp build state lost)
@@ -20,8 +20,8 @@
 #   ab codex  [args...]      docker exec codex
 #   ab bash                  docker exec bash
 #   ab exec <cmd...>         docker exec an arbitrary command (as agentbox)
-#   ab build   [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]
-#   ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]  (synonym for build)
+#   ab build   [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]
+#   ab rebuild [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]  (synonym for build)
 #                            build or rebuild the image and recreate the running container (--no-cache
 #                            busts Docker's build cache too — needed to actually pick up a newer
 #                            claude/codex release, since CLAUDE_CHANNEL=stable/CODEX_RELEASE=latest
@@ -41,6 +41,26 @@ set -euo pipefail
 grant_gh=0
 grant_all_of_dot_ssh=0
 grant_labels=()
+policy_labels=()
+policy_git_enabled=""
+policy_grant_gh=""
+policy_grant_all_of_dot_ssh=""
+policy_updates_check=""
+policy_git_source="default"
+policy_grant_gh_source="default"
+policy_grant_all_of_dot_ssh_source="default"
+policy_updates_source="default"
+policy_recorded_status="none"
+policy_recorded_git_enabled=""
+policy_recorded_grant_gh=""
+policy_recorded_grant_all_of_dot_ssh=""
+policy_recorded_digest=""
+policy_recorded_detail=""
+policy_needs_recreate=0
+policy_cli_git_enabled=""
+policy_cli_grant_gh=""
+policy_cli_grant_all_of_dot_ssh=""
+policy_apply=0
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
@@ -52,6 +72,8 @@ AB_GITHUB_REPO="nevdelap/agentbox"
 # (e.g. ~/.bin/ab -> .../agentbox/bin/ab). Override with $AGENTBOX_CONTEXT if needed.
 _self="$(readlink -f "${BASH_SOURCE[0]}")"
 CONTEXT="${AGENTBOX_CONTEXT:-$(cd "$(dirname "$_self")/.." && pwd)}"
+LAUNCHER_ROOT="$(cd "$(dirname "$_self")/.." && pwd)"
+GIT_BLOCKER="$LAUNCHER_ROOT/runtime/git-disabled"
 
 PROJECT_DIR="${AGENTBOX_DIR:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)" || {
@@ -122,6 +144,136 @@ ab_config_file() {
   return 0
 }
 
+# Policy files are deliberately separate from the first-match config files above: each policy
+# field inherits independently through all four tiers. The order here is least-specific first so
+# later assignments are the more-specific overrides.
+ab_policy_candidates() {
+  local root="$1" machine="$2" proj="${3#/}"
+  printf '%s\n' \
+    "$root/agentbox.toml" \
+    "$root/machines/$machine/agentbox.toml" \
+    "$root/projects/$proj/agentbox.toml" \
+    "$root/machines/$machine/projects/$proj/agentbox.toml"
+}
+
+policy_file_safe() {
+  local file="$1" mode last
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  mode="$(stat -c '%a' "$file" 2>/dev/null || true)"
+  [ -n "$mode" ] || return 1
+  last="${mode: -1}"
+  case "$last" in 2|3|6|7) return 1 ;; esac # world-writable
+  return 0
+}
+
+policy_fail() {
+  echo "agentbox: policy: $*" >&2
+  return 1
+}
+
+# Parse the intentionally small, strict TOML policy schema. This accepts TOML table headers,
+# boolean assignments, whitespace, and trailing comments; all other syntax is rejected before
+# Docker or the update check is reached.
+policy_parse_file() {
+  local file="$1" line t table key value
+  local -A seen=()
+  policy_parsed_git_enabled=""
+  policy_parsed_grant_gh=""
+  policy_parsed_grant_all_of_dot_ssh=""
+  policy_parsed_updates_check=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    t="${line#"${line%%[![:space:]]*}"}"
+    t="${t%"${t##*[![:space:]]}"}"
+    [ -n "$t" ] || continue
+    case "$t" in \#*) continue ;; esac
+    if [[ "$t" =~ ^\[([a-z]+)\]$ ]]; then
+      table="${BASH_REMATCH[1]}"
+      case "$table" in git|github|ssh|updates) ;; *) policy_fail "$file: unknown table [$table]"; return 1 ;; esac
+      continue
+    fi
+    [[ "$t" == *=* ]] || { policy_fail "$file: expected [table] or key = true|false: $t"; return 1; }
+    key="${t%%=*}"; value="${t#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    value="${value%%#*}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    [ -n "${table:-}" ] || { policy_fail "$file: key outside a recognized table: $key"; return 1; }
+    case "$table.$key" in
+      git.enabled) var=policy_parsed_git_enabled ;;
+      github.grant) var=policy_parsed_grant_gh ;;
+      ssh.grant_all) var=policy_parsed_grant_all_of_dot_ssh ;;
+      updates.check) var=policy_parsed_updates_check ;;
+      *) policy_fail "$file: unknown key $table.$key"; return 1 ;;
+    esac
+    [ -z "${seen[$table.$key]+x}" ] || { policy_fail "$file: duplicate key $table.$key"; return 1; }
+    case "$value" in true|false) ;; *) policy_fail "$file: $table.$key must be true or false"; return 1 ;; esac
+    seen[$table.$key]=1
+    printf -v "$var" '%s' "$value"
+  done < "$file"
+}
+
+policy_load_files() {
+  policy_file_git_enabled=""
+  policy_file_grant_gh=""
+  policy_file_grant_all_of_dot_ssh=""
+  policy_file_updates_check=""
+  policy_git_source="default"
+  policy_grant_gh_source="default"
+  policy_grant_all_of_dot_ssh_source="default"
+  policy_updates_source="default"
+  local file
+  while IFS= read -r file; do
+    [ -f "$file" ] || [ -L "$file" ] || continue
+    policy_file_safe "$file" || { policy_fail "$file must be a readable, non-world-writable regular file"; return 1; }
+    policy_parse_file "$file" || return 1
+    if [ -n "$policy_parsed_git_enabled" ]; then policy_file_git_enabled="$policy_parsed_git_enabled"; policy_git_source="$file"; fi
+    if [ -n "$policy_parsed_grant_gh" ]; then policy_file_grant_gh="$policy_parsed_grant_gh"; policy_grant_gh_source="$file"; fi
+    if [ -n "$policy_parsed_grant_all_of_dot_ssh" ]; then policy_file_grant_all_of_dot_ssh="$policy_parsed_grant_all_of_dot_ssh"; policy_grant_all_of_dot_ssh_source="$file"; fi
+    if [ -n "$policy_parsed_updates_check" ]; then policy_file_updates_check="$policy_parsed_updates_check"; policy_updates_source="$file"; fi
+  done < <(ab_policy_candidates "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR")
+}
+
+policy_parse_env_bool() {
+  local name="$1" value
+  if [[ ! -v "$name" ]]; then return 2; fi
+  value="${!name,,}"
+  case "$value" in
+    1|true|yes|on) POLICY_BOOL=1 ;;
+    0|false|no|off) POLICY_BOOL=0 ;;
+    *) policy_fail "$name must be a boolean (1/0, true/false, yes/no, or on/off)"; return 1 ;;
+  esac
+  return 0
+}
+
+policy_bool01() { [ "$1" = true ] && printf '1' || printf '0'; }
+policy_bool_text() { [ "$1" = 1 ] && printf 'true' || printf 'false'; }
+
+policy_load_host() {
+  policy_load_files || return 1
+  policy_git_enabled="$(policy_bool01 "${policy_file_git_enabled:-true}")"
+  policy_grant_gh="$(policy_bool01 "${policy_file_grant_gh:-false}")"
+  policy_grant_all_of_dot_ssh="$(policy_bool01 "${policy_file_grant_all_of_dot_ssh:-false}")"
+  policy_updates_check="$(policy_bool01 "${policy_file_updates_check:-true}")"
+  if [[ -v AGENTBOX_NO_GIT ]]; then policy_parse_env_bool AGENTBOX_NO_GIT || return 1; policy_git_enabled=$((1-POLICY_BOOL)); policy_git_source=environment; fi
+  if [[ -v AGENTBOX_GRANT_GH ]]; then policy_parse_env_bool AGENTBOX_GRANT_GH || return 1; policy_grant_gh="$POLICY_BOOL"; policy_grant_gh_source=environment; fi
+  if [[ -v AGENTBOX_GRANT_ALL_OF_DOT_SSH ]]; then policy_parse_env_bool AGENTBOX_GRANT_ALL_OF_DOT_SSH || return 1; policy_grant_all_of_dot_ssh="$POLICY_BOOL"; policy_grant_all_of_dot_ssh_source=environment; fi
+  if [[ -v AGENTBOX_NO_UPDATE_CHECK ]]; then policy_parse_env_bool AGENTBOX_NO_UPDATE_CHECK || return 1; policy_updates_check=$((1-POLICY_BOOL)); policy_updates_source=environment; fi
+  [ -n "$policy_cli_git_enabled" ] && policy_git_enabled="$policy_cli_git_enabled" && policy_git_source=cli
+  [ -n "$policy_cli_grant_gh" ] && policy_grant_gh="$policy_cli_grant_gh" && policy_grant_gh_source=cli
+  [ -n "$policy_cli_grant_all_of_dot_ssh" ] && policy_grant_all_of_dot_ssh="$policy_cli_grant_all_of_dot_ssh" && policy_grant_all_of_dot_ssh_source=cli
+  return 0
+}
+
+policy_payload() {
+  printf 'schema_version=1\ngit_enabled=%s\ngithub_grant=%s\nssh_grant_all=%s\n' \
+    "$(policy_bool_text "$1")" "$(policy_bool_text "$2")" "$(policy_bool_text "$3")"
+}
+
+policy_digest_for() {
+  policy_payload "$1" "$2" "$3" | sha256sum | cut -d' ' -f1
+}
+
 # Container-side path of a resolved config file. The whole config root is bind-mounted ro at
 # $AB_CFG_CONTAINER, so any resolved path maps by swapping that prefix. Empty in -> empty out
 # (nothing resolved, nothing to pass).
@@ -189,12 +341,6 @@ fi
 add_host_config_mounts() {
   jj_config_paths=()
   [ -f "$HOME/.claude.json" ] && mounts+=(-v "$HOME/.claude.json:/home/agentbox/.claude.json")
-  if [ -f "$HOME/.gitconfig" ]; then
-    mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
-  elif [ -f "$HOME/.config/git/config" ]; then
-    # XDG-style git config (e.g. home-manager's programs.git), used instead of ~/.gitconfig.
-    mounts+=(-v "$HOME/.config/git/config:/home/agentbox/.config/git/config:ro")
-  fi
   # jj loads the legacy user file and the platform config files from JJ_CONFIG. Keep these
   # read-only host mounts separate from /home/agentbox/.config/jj, where jj creates secure
   # repo/workspace config whose paths are specific to this container's /workspace mapping.
@@ -221,6 +367,22 @@ add_host_config_mounts() {
   fi
 }
 add_host_config_mounts
+
+# Git configuration is deliberately added only after host policy has been resolved. No-Git mode
+# omits both ~/.gitconfig and the XDG fallback, while Git-enabled mode retains the old fallback
+# behavior. The blocker is a read-only bind mount, so changing this policy requires container
+# recreation but never an image rebuild.
+add_policy_mounts() {
+  if [ "$policy_git_enabled" = 1 ]; then
+    if [ -f "$HOME/.gitconfig" ]; then
+      mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
+    elif [ -f "$HOME/.config/git/config" ]; then
+      mounts+=(-v "$HOME/.config/git/config:/home/agentbox/.config/git/config:ro")
+    fi
+  else
+    mounts+=(--mount "type=bind,src=$GIT_BLOCKER,dst=/usr/bin/git,readonly")
+  fi
+}
 
 # JJ_CONFIG overrides jj's default user-config search paths. That lets the host's user config
 # remain read-only while the default /home/agentbox/.config/jj path is backed by the writable,
@@ -708,9 +870,19 @@ prepare_host_state() {
   # invoking user so installed tools can write auth, config, sessions, and history to the host
   # instead of leaving them in the disposable container filesystem.
   mkdir -p "$HOME/.claude" "$HOME/.codex"
+  grant_gh="$policy_grant_gh"
+  grant_all_of_dot_ssh="$policy_grant_all_of_dot_ssh"
+  policy_labels=(
+    --label "org.agentbox.policy.version=1"
+    --label "org.agentbox.policy.git_enabled=$(policy_bool_text "$policy_git_enabled")"
+    --label "org.agentbox.policy.github_grant=$(policy_bool_text "$policy_grant_gh")"
+    --label "org.agentbox.policy.ssh_grant_all=$(policy_bool_text "$policy_grant_all_of_dot_ssh")"
+    --label "org.agentbox.policy.digest=sha256:$(policy_digest_for "$policy_git_enabled" "$policy_grant_gh" "$policy_grant_all_of_dot_ssh")"
+  )
   grant_labels=(
     --label "agentbox.grant-gh=$grant_gh"
     --label "agentbox.grant-all-of-dot-ssh=$grant_all_of_dot_ssh"
+    "${policy_labels[@]}"
   )
   if [ "$grant_gh" = 1 ]; then
     mkdir -p "$HOME/.config/gh"
@@ -732,14 +904,9 @@ adopt_existing_grants() {
   value="$(docker inspect -f '{{index .Config.Labels "agentbox.grant-gh"}}' "$cname" 2>/dev/null || true)"
   if [ "$value" = 1 ]; then
     grant_gh=1
-  elif [ "$value" != 0 ] && container_has_mount_destination /home/agentbox/.config/gh; then
-    # Containers created before grant labels existed are inferred from their mounts.
-    grant_gh=1
   fi
   value="$(docker inspect -f '{{index .Config.Labels "agentbox.grant-all-of-dot-ssh"}}' "$cname" 2>/dev/null || true)"
   if [ "$value" = 1 ]; then
-    grant_all_of_dot_ssh=1
-  elif [ "$value" != 0 ] && container_has_mount_destination /home/agentbox/.ssh; then
     grant_all_of_dot_ssh=1
   fi
 }
@@ -747,6 +914,171 @@ adopt_existing_grants() {
 container_has_mount_destination() {
   docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$cname" 2>/dev/null \
     | grep -qxF "$1"
+}
+
+container_git_mount_source() {
+  docker inspect -f '{{range .Mounts}}{{if eq .Destination "/usr/bin/git"}}{{.Source}}{{end}}{{end}}' "$cname" 2>/dev/null
+}
+
+policy_label() {
+  local key="$1" value
+  value="$(docker inspect -f "{{index .Config.Labels \"$key\"}}" "$cname" 2>/dev/null || true)"
+  [ "$value" = '<no value>' ] && value=""
+  printf '%s' "$value"
+}
+
+policy_inspect_recorded() {
+  policy_recorded_status=none
+  policy_recorded_git_enabled=""
+  policy_recorded_grant_gh=""
+  policy_recorded_grant_all_of_dot_ssh=""
+  policy_recorded_digest=""
+  policy_recorded_detail=""
+  exists || return 0
+
+  local version git gh ssh digest old_gh old_ssh expected source blocker_source
+  version="$(policy_label org.agentbox.policy.version)"
+  git="$(policy_label org.agentbox.policy.git_enabled)"
+  gh="$(policy_label org.agentbox.policy.github_grant)"
+  ssh="$(policy_label org.agentbox.policy.ssh_grant_all)"
+  digest="$(policy_label org.agentbox.policy.digest)"
+  if [ -z "$version$git$gh$ssh$digest" ]; then
+    # Containers predating policy labels are legacy only when their Git executable state is
+    # identifiable. A missing mount means the old launcher-provided Git remains available; the
+    # fixed blocker is a recognizable no-Git migration. Any other mount source is ambiguous and
+    # must not be silently treated as either enabled or disabled.
+    policy_recorded_status=legacy
+    if container_has_mount_destination /usr/bin/git; then
+      source="$(container_git_mount_source)"
+      blocker_source="$(readlink -f "$GIT_BLOCKER" 2>/dev/null || true)"
+      if [ -z "$source" ]; then
+        policy_recorded_status=invalid
+        policy_recorded_detail="legacy container has a /usr/bin/git mount with no inspectable source"
+      elif [ "$source" = "$GIT_BLOCKER" ] || {
+        [ -n "$blocker_source" ] && [ "$(readlink -f "$source" 2>/dev/null || true)" = "$blocker_source" ];
+      }; then
+        policy_recorded_git_enabled=0
+      else
+        policy_recorded_status=invalid
+        policy_recorded_detail="legacy container has an unrecognized /usr/bin/git mount source: $source"
+      fi
+    else
+      policy_recorded_git_enabled=1
+    fi
+    old_gh="$(policy_label agentbox.grant-gh)"
+    old_ssh="$(policy_label agentbox.grant-all-of-dot-ssh)"
+    case "$old_gh" in ''|0) policy_recorded_grant_gh=0 ;; 1) policy_recorded_grant_gh=1 ;; *) policy_recorded_status=invalid; policy_recorded_detail="old agentbox.grant-gh label is malformed: $old_gh" ;; esac
+    case "$old_ssh" in ''|0) policy_recorded_grant_all_of_dot_ssh=0 ;; 1) policy_recorded_grant_all_of_dot_ssh=1 ;; *) policy_recorded_status=invalid; policy_recorded_detail="old agentbox.grant-all-of-dot-ssh label is malformed: $old_ssh" ;; esac
+    if [ -z "$old_gh" ] && container_has_mount_destination /home/agentbox/.config/gh; then
+      policy_recorded_status=invalid
+      policy_recorded_detail="legacy container has a GitHub credential mount but no old grant label"
+    elif [ "$old_gh" = 0 ] && container_has_mount_destination /home/agentbox/.config/gh; then
+      policy_recorded_status=invalid
+      policy_recorded_detail="legacy GitHub grant label is 0 but its credential mount is present"
+    elif [ "$old_gh" = 1 ] && ! container_has_mount_destination /home/agentbox/.config/gh; then
+      policy_recorded_status=invalid
+      policy_recorded_detail="legacy GitHub grant label is 1 but its credential mount is absent"
+    fi
+    if [ -z "$old_ssh" ] && container_has_mount_destination /home/agentbox/.ssh; then
+      policy_recorded_status=invalid
+      policy_recorded_detail="legacy SSH grant has a credential mount but no old grant label"
+    elif [ "$old_ssh" = 0 ] && container_has_mount_destination /home/agentbox/.ssh; then
+      policy_recorded_status=invalid
+      policy_recorded_detail="legacy SSH grant label is 0 but its credential mount is present"
+    elif [ "$old_ssh" = 1 ] && ! container_has_mount_destination /home/agentbox/.ssh; then
+      policy_recorded_status=invalid
+      policy_recorded_detail="legacy SSH grant label is 1 but its credential mount is absent"
+    fi
+    [ -n "$policy_recorded_detail" ] || policy_recorded_detail="no versioned policy labels; migrated from legacy container state"
+    return 0
+  fi
+  if [[ "$version" != 1 || ( "$git" != true && "$git" != false ) || ( "$gh" != true && "$gh" != false ) || ( "$ssh" != true && "$ssh" != false ) || ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    policy_recorded_status=invalid
+    policy_recorded_detail="versioned policy labels are incomplete or malformed"
+    return 0
+  fi
+  policy_recorded_git_enabled="$(policy_bool01 "$git")"
+  policy_recorded_grant_gh="$(policy_bool01 "$gh")"
+  policy_recorded_grant_all_of_dot_ssh="$(policy_bool01 "$ssh")"
+  policy_recorded_digest="$digest"
+  expected="sha256:$(policy_digest_for "$policy_recorded_git_enabled" "$policy_recorded_grant_gh" "$policy_recorded_grant_all_of_dot_ssh")"
+  if [ "$digest" = "$expected" ]; then
+    policy_recorded_status=valid
+    policy_recorded_detail="versioned labels and digest are consistent"
+  else
+    policy_recorded_status=stale
+    policy_recorded_detail="recorded digest $digest does not match recorded values (expected $expected)"
+  fi
+}
+
+validate_git_blocker() {
+  local mode last
+  [ -f "$GIT_BLOCKER" ] && [ ! -L "$GIT_BLOCKER" ] && [ -r "$GIT_BLOCKER" ] && [ -x "$GIT_BLOCKER" ] || {
+    policy_fail "Git is disabled but blocker is missing or not readable/executable: $GIT_BLOCKER"; return 1;
+  }
+  mode="$(stat -c '%a' "$GIT_BLOCKER" 2>/dev/null || true)"
+  [ "$mode" = 755 ] || { policy_fail "Git blocker must have mode 0755: $GIT_BLOCKER (has ${mode:-unknown})"; return 1; }
+  last="${mode: -1}"
+  case "$last" in 2|3|6|7) policy_fail "Git blocker must not be world-writable: $GIT_BLOCKER"; return 1 ;; esac
+}
+
+policy_preflight() {
+  local mode="$1"
+  policy_load_host || return 1
+  policy_inspect_recorded
+  case "$policy_recorded_status" in
+    invalid)
+      if [ "$policy_apply" != 1 ]; then
+        policy_fail "existing container has invalid policy labels; use 'ab start --apply' to reconcile"
+        return 1
+      fi
+      # Explicit apply is the user’s acknowledgement that ambiguous recorded state may be
+      # replaced by the newly resolved host policy. Do not infer a grant from malformed metadata.
+      policy_recorded_status=stale
+      policy_recorded_git_enabled=1
+      policy_recorded_grant_gh=0
+      policy_recorded_grant_all_of_dot_ssh=0
+      ;;
+  esac
+  # An omitted container policy preserves recorded state. A policy explicitly supplied by CLI,
+  # host env, or TOML has already won in policy_load_host. Rebuilds intentionally reset omitted
+  # grants to preserve the established `ab rebuild` revoke workflow, but preserve Git state.
+  if [ "$policy_git_source" = default ] && [ "$policy_recorded_status" != none ]; then
+    policy_git_enabled="$policy_recorded_git_enabled"
+    policy_git_source=recorded
+  fi
+  if [ "$policy_grant_gh_source" = default ]; then
+    if [ "$mode" = start ] || [ "$mode" = exec ]; then
+      [ "$policy_recorded_status" != none ] && policy_grant_gh="$policy_recorded_grant_gh" && policy_grant_gh_source=recorded
+    else
+      policy_grant_gh=0
+      policy_grant_gh_source=rebuild-default
+    fi
+  fi
+  if [ "$policy_grant_all_of_dot_ssh_source" = default ]; then
+    if [ "$mode" = start ] || [ "$mode" = exec ]; then
+      [ "$policy_recorded_status" != none ] && policy_grant_all_of_dot_ssh="$policy_recorded_grant_all_of_dot_ssh" && policy_grant_all_of_dot_ssh_source=recorded
+    else
+      policy_grant_all_of_dot_ssh=0
+      policy_grant_all_of_dot_ssh_source=rebuild-default
+    fi
+  fi
+  [ "$policy_git_enabled" = 1 ] || validate_git_blocker || return 1
+  policy_needs_recreate=0
+  if exists; then
+    [ "$policy_recorded_status" = valid ] || policy_needs_recreate=1
+    if [ "$policy_recorded_status" = valid ]; then
+      [ "$policy_recorded_git_enabled" = "$policy_git_enabled" ] || policy_needs_recreate=1
+      [ "$policy_recorded_grant_gh" = "$policy_grant_gh" ] || policy_needs_recreate=1
+      [ "$policy_recorded_grant_all_of_dot_ssh" = "$policy_grant_all_of_dot_ssh" ] || policy_needs_recreate=1
+      [ "$policy_recorded_digest" = "sha256:$(policy_digest_for "$policy_git_enabled" "$policy_grant_gh" "$policy_grant_all_of_dot_ssh")" ] || policy_needs_recreate=1
+    fi
+    if [ "$policy_needs_recreate" = 1 ] && is_running && [ "$policy_apply" != 1 ]; then
+      echo "agentbox: $cname has policy state different from the resolved host policy; refusing to execute or change it while running." >&2
+      echo "agentbox: run the explicit apply operation, for example: AGENTBOX_NO_GIT=${policy_git_enabled:+$((1-policy_git_enabled))} ab start --apply" >&2
+      return 1
+    fi
+  fi
 }
 
 check_existing_grants() {
@@ -768,11 +1100,25 @@ parse_runtime_options() {
   local mode="$1" arg
   shift
   nocache=""
+  policy_cli_git_enabled=""
+  policy_cli_grant_gh=""
+  policy_cli_grant_all_of_dot_ssh=""
+  policy_apply=0
+  grant_gh=0
+  grant_all_of_dot_ssh=0
   while [ "$#" -gt 0 ]; do
     arg="$1"
     case "$arg" in
-      --grant-gh) grant_gh=1 ;;
-      --grant-all-of-dot-ssh) grant_all_of_dot_ssh=1 ;;
+      --no-git) policy_cli_git_enabled=0 ;;
+      --grant-gh) policy_cli_grant_gh=1; grant_gh=1 ;;
+      --grant-all-of-dot-ssh) policy_cli_grant_all_of_dot_ssh=1; grant_all_of_dot_ssh=1 ;;
+      --apply)
+        if [ "$mode" != start ]; then
+          echo "agentbox: $mode: --apply is only valid with start" >&2
+          return 1
+        fi
+        policy_apply=1
+        ;;
       --no-cache)
         if [ "$mode" != rebuild ]; then
           echo "agentbox: $mode: --no-cache is only valid with rebuild" >&2
@@ -788,27 +1134,36 @@ parse_runtime_options() {
 
 cmd_start() {
   require_sysbox
-  adopt_existing_grants
   prepare_host_state
-  if exists; then
-    check_existing_grants
-  fi
+  add_policy_mounts
   require_jj_state_mount
-  local tag
-  tag="$(build_image)" || exit 1
   warn_legacy_files
   if is_running; then
-    echo "agentbox: $cname is already running."
-    echo "agentbox: to recreate it (new settings/mounts), run: ab destroy && ab start"
-    wait_jj_state
-    return $?
+    if [ "$policy_needs_recreate" = 1 ]; then
+      echo "agentbox: applying policy to running $cname; active processes and container-local filesystem state will be interrupted." >&2
+      # The policy change is expressed entirely by container mounts and labels. Reuse the image
+      # already selected by the running container; applying policy must not trigger a tool-image
+      # refresh or spend time in a build.
+      local tag
+      tag="$(docker inspect -f '{{.Config.Image}}' "$cname" 2>/dev/null || true)"
+      [ -n "$tag" ] || { echo "agentbox: cannot apply policy: existing container image is unavailable" >&2; exit 1; }
+      docker rm -f "$cname" >/dev/null
+    else
+      echo "agentbox: $cname is already running."
+      wait_jj_state
+      return $?
+    fi
+  else
+    local tag
+    tag="$(build_image)" || exit 1
   fi
-  if exists; then
+  if exists && [ "$policy_needs_recreate" = 0 ]; then
     # An existing container keeps the bind mounts it was created with — `mounts` edits only take
     # effect on a fresh `docker run`, hence the `ab destroy && ab start` in the README.
     echo "agentbox: starting $cname ..." >&2
     docker start "$cname" >/dev/null
   else
+    exists && docker rm -f "$cname" >/dev/null 2>&1 || true
     echo "agentbox: creating + starting $cname ..." >&2
     build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
     docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
@@ -824,12 +1179,75 @@ cmd_start() {
 # that produced them. With four tiers per file, "why is THAT setup.sh running?" is otherwise a
 # manual walk of the tree — this answers it in one command, without starting a container.
 cmd_config() {
+  policy_inspect_recorded
+  local config_git_enabled="$policy_git_enabled"
+  local config_grant_gh="$policy_grant_gh"
+  local config_grant_all_of_dot_ssh="$policy_grant_all_of_dot_ssh"
+  local config_git_source="$policy_git_source"
+  local config_grant_gh_source="$policy_grant_gh_source"
+  local config_grant_all_of_dot_ssh_source="$policy_grant_all_of_dot_ssh_source"
+  local policy_file
+  # `ab start` preserves a container's recorded policy when the host supplied no explicit value.
+  # Show that effective start policy here as well, without mutating the resolved host globals or
+  # refusing merely because the existing container is stale.
+  if [ "$policy_recorded_status" != none ] && [ "$policy_recorded_status" != invalid ]; then
+    if [ "$policy_git_source" = default ]; then config_git_enabled="$policy_recorded_git_enabled"; config_git_source=recorded; fi
+    if [ "$policy_grant_gh_source" = default ]; then config_grant_gh="$policy_recorded_grant_gh"; config_grant_gh_source=recorded; fi
+    if [ "$policy_grant_all_of_dot_ssh_source" = default ]; then config_grant_all_of_dot_ssh="$policy_recorded_grant_all_of_dot_ssh"; config_grant_all_of_dot_ssh_source=recorded; fi
+  fi
   echo "agentbox $AB_VERSION"
   local root_note=""
   [ -d "$AB_CFG_ROOT" ] || root_note="   (absent — no per-host config on this machine)"
   echo "machine: $MACHINE"
   echo "project: $PROJECT_DIR"
   echo "root:    ${AB_CFG_ROOT/#"$HOME"/\~}$root_note"
+  echo
+  echo "policy files (least-specific -> most-specific; field inheritance):"
+  local policy_file_count=0
+  while IFS= read -r policy_file; do
+    if [ -e "$policy_file" ] || [ -L "$policy_file" ]; then
+      policy_file_count=$((policy_file_count + 1))
+      if policy_file_safe "$policy_file"; then
+        printf '  %s\n' "${policy_file/#"$HOME"/\~}"
+      else
+        printf '  %s (invalid: missing, unreadable, symlink, or world-writable)\n' "${policy_file/#"$HOME"/\~}"
+      fi
+    fi
+  done < <(ab_policy_candidates "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR")
+  [ "$policy_file_count" -gt 0 ] || echo "  (none — built-in defaults apply)"
+  echo
+  echo "policy:"
+  printf '  %-18s %s (source: %s)\n' "git.enabled" "$([ "$config_git_enabled" = 1 ] && echo true || echo false)" "$config_git_source"
+  printf '  %-18s %s (source: %s)\n' "github.grant" "$([ "$config_grant_gh" = 1 ] && echo true || echo false)" "$config_grant_gh_source"
+  printf '  %-18s %s (source: %s)\n' "ssh.grant_all" "$([ "$config_grant_all_of_dot_ssh" = 1 ] && echo true || echo false)" "$config_grant_all_of_dot_ssh_source"
+  printf '  %-18s %s (source: %s)\n' "updates.check" "$([ "$policy_updates_check" = 1 ] && echo true || echo false)" "$policy_updates_source"
+  printf '  recorded container: %s%s\n' "$policy_recorded_status" \
+    "${policy_recorded_detail:+ — $policy_recorded_detail}"
+  if [ "$policy_recorded_status" = valid ] || [ "$policy_recorded_status" = stale ] || [ "$policy_recorded_status" = legacy ]; then
+    printf '  recorded values:    git=%s github=%s ssh=%s digest=%s\n' \
+    "$([ "$policy_recorded_git_enabled" = 1 ] && echo true || echo false)" \
+    "$([ "$policy_recorded_grant_gh" = 1 ] && echo true || echo false)" \
+    "$([ "$policy_recorded_grant_all_of_dot_ssh" = 1 ] && echo true || echo false)" "${policy_recorded_digest:-none}"
+    if [ "$config_git_enabled" != "$policy_recorded_git_enabled" ]; then
+      printf '  delta: git.enabled effective=%s recorded=%s\n' "$([ "$config_git_enabled" = 1 ] && echo true || echo false)" "$([ "$policy_recorded_git_enabled" = 1 ] && echo true || echo false)"
+    fi
+    if [ "$config_grant_gh" != "$policy_recorded_grant_gh" ]; then
+      printf '  delta: github.grant effective=%s recorded=%s\n' "$([ "$config_grant_gh" = 1 ] && echo true || echo false)" "$([ "$policy_recorded_grant_gh" = 1 ] && echo true || echo false)"
+    fi
+    if [ "$config_grant_all_of_dot_ssh" != "$policy_recorded_grant_all_of_dot_ssh" ]; then
+      printf '  delta: ssh.grant_all effective=%s recorded=%s\n' "$([ "$config_grant_all_of_dot_ssh" = 1 ] && echo true || echo false)" "$([ "$policy_recorded_grant_all_of_dot_ssh" = 1 ] && echo true || echo false)"
+    fi
+    config_digest="sha256:$(policy_digest_for "$config_git_enabled" "$config_grant_gh" "$config_grant_all_of_dot_ssh")"
+    if [ "$policy_recorded_status" != legacy ] && [ "$config_digest" != "$policy_recorded_digest" ]; then
+      printf '  delta: policy.digest effective=%s recorded=%s\n' "$config_digest" "$policy_recorded_digest"
+    elif [ "$policy_recorded_status" = legacy ]; then
+      echo "  delta: policy.digest effective=$config_digest recorded=none (legacy; recreation will add it)"
+    else
+      echo "  delta: none"
+    fi
+  elif [ "$policy_recorded_status" = invalid ]; then
+    echo "  delta: unavailable until the invalid recorded policy is explicitly reconciled"
+  fi
   echo
   echo "in effect:"
   printf '  %-11s %s\n' "env"        "$(ab_config_show "$cfg_env")"
@@ -982,12 +1400,20 @@ cmd_exec() {
 }
 
 main() {
-  # Skip for --help/-h/bare and --version: those want fast, static, uncluttered output.
-  case "${1:-}" in "" | -h | --help | --version) : ;; *) check_for_update ;; esac
+  # Keep help/version static. Every other command parses/resolves policy before the courtesy
+  # update check, so invalid policy/options never trigger network access.
   case "${1:-}" in
-  start) shift; parse_runtime_options start "$@"; cmd_start ;;
-  stop) if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi ;;
+  start)
+    shift; parse_runtime_options start "$@"; policy_preflight start
+    [ "$policy_updates_check" = 1 ] && check_for_update
+    cmd_start
+    ;;
+  stop)
+    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
+    if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi
+    ;;
   destroy)
+    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     # Attempt BOTH removals independently and report every failure: a failed container rm
     # must not skip the volume rm (or vice versa). Exit non-zero if either failed so a
     # partial failure isn't masked (e.g. by `ab destroy && ab start`). Explicit ifs, not
@@ -1021,8 +1447,12 @@ main() {
       exit "$rc"
     fi
     ;;
-  status) is_running && echo "running: $cname" || echo "not running: $cname" ;;
+  status)
+    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
+    is_running && echo "running: $cname" || echo "not running: $cname"
+    ;;
   config)
+    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     shift
     if [ "${1:-}" = init ]; then
       shift
@@ -1031,17 +1461,25 @@ main() {
       cmd_config
     fi
     ;;
-  logs) docker logs --tail 80 "$cname" 2>&1 | tail -80 ;;
+  logs)
+    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
+    docker logs --tail 80 "$cname" 2>&1 | tail -80
+    ;;
   exec)
     shift
+    policy_preflight exec
+    [ "$policy_updates_check" = 1 ] && check_for_update
     cmd_exec "$@"
     ;;
   build | rebuild)
     shift
     parse_runtime_options rebuild "$@"
+    policy_preflight rebuild
+    [ "$policy_updates_check" = 1 ] && check_for_update
     require_sysbox
     tag="$(build_image force "$nocache")" || exit 1
     prepare_host_state
+    add_policy_mounts
     warn_legacy_files
     echo "agentbox: recreating $cname with $tag ..." >&2
     docker rm -f "$cname" >/dev/null 2>&1 || true
@@ -1063,7 +1501,7 @@ main() {
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
   --version) echo "agentbox $AB_VERSION"; exit 0 ;;
-  *) cmd_exec "$@" ;;
+  *) policy_preflight exec; [ "$policy_updates_check" = 1 ] && check_for_update; cmd_exec "$@" ;;
   esac
 }
 

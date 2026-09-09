@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentbox Git Disablement — Task Specification Review</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f4f6f8, #101318);
+      --panel: light-dark(#fff, #181c23);
+      --soft: light-dark(#f7f9fc, #1d222b);
+      --text: light-dark(#20252d, #edf1f7);
+      --muted: light-dark(#5e6877, #aeb8c7);
+      --line: light-dark(#dce2e9, #303844);
+      --accent: light-dark(#315fba, #9bb9ff);
+      --accent-soft: light-dark(#edf3ff, #202d49);
+      --green: light-dark(#18734b, #79d4a6);
+      --green-soft: light-dark(#eaf8f0, #183326);
+      --amber: light-dark(#97630c, #f4c96c);
+      --amber-soft: light-dark(#fff6df, #3a2d16);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 1040px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2, h3 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.6rem); letter-spacing: -0.045em; }
+    h2 { margin: 44px 0 14px; font-size: 1.55rem; }
+    h3 { margin: 0 0 8px; font-size: 1.08rem; }
+    p { margin: 10px 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    code { font-size: .91em; }
+    .eyebrow, .status, .severity { display: inline-block; border-radius: 99px; font-size: .76rem; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+    .eyebrow { color: var(--accent); }
+    .subtitle, .meta { color: var(--muted); }
+    .subtitle { max-width: 840px; font-size: 1.1rem; }
+    .meta { font-size: .9rem; }
+    .hero, .card, .callout, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 21px 23px; border-left: 5px solid var(--accent); }
+    .hero strong { font-size: 1.08rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 14px; }
+    .card { padding: 18px 19px; }
+    .card p { color: var(--muted); }
+    .callout { padding: 16px 18px; }
+    .callout.good { background: var(--green-soft); border-color: color-mix(in srgb, var(--green), var(--line) 55%); }
+    .callout.caution { background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber), var(--line) 55%); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 11px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    .status { padding: 2px 8px; color: var(--accent); background: var(--accent-soft); letter-spacing: .04em; }
+    .status.confirmed { color: var(--green); background: var(--green-soft); }
+    .status.open { color: var(--amber); background: var(--amber-soft); }
+    .severity { padding: 2px 8px; color: var(--amber); background: var(--amber-soft); letter-spacing: .04em; }
+    .severity.high { color: #b53a32; background: #fdecea; }
+    .decision { display: grid; grid-template-columns: 180px 1fr; gap: 12px 18px; padding: 16px 0; border-top: 1px solid var(--line); }
+    .decision:first-child { border-top: 0; }
+    .decision-label { color: var(--muted); font-weight: 700; }
+    footer { margin-top: 48px; padding-top: 18px; color: var(--muted); font-size: .88rem; border-top: 1px solid var(--line); }
+    @media (max-width: 680px) {
+      main { padding: 30px 16px 55px; }
+      th, td { padding: 9px 10px; }
+      .decision { grid-template-columns: 1fr; gap: 2px; }
+    }
+    @media print { :root { color-scheme: light; } body { background: #fff; } main { max-width: none; padding: 0; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">TASK SPECIFICATION REVIEW</div>
+      <h1>Agentbox Git Disablement</h1>
+      <p class="subtitle">Re-review of the executable specifications for tasks 1–7 in <code>design_docs/git_disablement_and_config_enhancements_implementation_plan.html</code>, checked against the normative design in <code>design_docs/git_disablement_and_config_enhancements.html</code>. The standard is independent implementation and review by separate Luna models with specification access only.</p>
+      <p class="meta">Reviewed 2026-09-12 · Final reassessment after the Task 5 resolved-policy output schema was made exhaustive.</p>
+    </header>
+
+    <section class="hero">
+      <strong>Verdict: tasks 1–7 form a coherent, separately reviewable Git-disablement critical path and are ready for independent implementation/review.</strong>
+      <p>This pass confirms that the task-local contracts, handoffs, grouping, and order are aligned with the design: task 1 has a named baseline artifact, task 2 has a raw input record, task 3 owns the lock and canonical context, task 4 is limited to mount construction, task 5 now has an exhaustive resolved-policy record, task 6 includes an explicit operation/readiness overlay, and task 7 defines durable records, readiness, and terminal handoffs.</p>
+    </section>
+
+    <h2>What is now sufficient</h2>
+    <div class="grid">
+      <article class="card">
+        <h3><span class="status confirmed">Ready shape</span> Task-local structure</h3>
+        <p>Each task now has scope, boundary, tests, and acceptance sections, giving Luna a defined place to start and finish.</p>
+      </article>
+      <article class="card">
+        <h3><span class="status confirmed">Resolved</span> Core handoffs</h3>
+        <p>Raw policy input → canonical context → mounts → resolved metadata → command decision → application is explicit.</p>
+      </article>
+      <article class="card">
+        <h3><span class="status confirmed">Resolved</span> Critical order</h3>
+        <p>Tasks 1–7 are correctly identified as the Git-disablement critical path, with general lifecycle work after it.</p>
+      </article>
+      <article class="card">
+        <h3><span class="status confirmed">Closed</span> Review status</h3>
+        <p>The task boundaries, grouping subtitles, dependency order, and implementation/review handoffs are internally consistent.</p>
+      </article>
+    </div>
+
+    <h2>Finding history</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Specification issue</th><th>Focused resolution</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>T1</strong><br><span class="status confirmed">Closed</span></td>
+          <td><span class="severity">Medium</span></td>
+          <td>Resolved. Task 4’s table scope and acceptance criteria now require mount-specification checks and explicitly assign lifecycle preservation and runtime proof to Task 7/13.</td>
+          <td>No change required.</td>
+        </tr>
+        <tr>
+          <td><strong>T2</strong><br><span class="status confirmed">Closed</span></td>
+          <td><span class="severity">Medium</span></td>
+          <td>Resolved. Task 5 now requires its record to contain the data needed by Task 6 and the Task 9 <code>ab config</code> presentation, while Task 7 owns label emission after mount application and verification. This matches the task boundary and creates a reviewable handoff.</td>
+          <td>No change required.</td>
+        </tr>
+        <tr>
+          <td><strong>T3</strong><br><span class="status confirmed">Closed</span></td>
+          <td>Resolved. Task 7 now provides a terminal handoff table covering successful completion, required-network/create/removal failure, optional-network degradation, and both readiness failure outcomes. It states task result, agent/exec permissions, retry path, Task 8 handoff, and cleanup permission.</td>
+          <td>No change required.</td>
+        </tr>
+        <tr>
+          <td><strong>T4</strong><br><span class="status confirmed">Closed</span></td>
+          <td><span class="severity">Medium</span></td>
+          <td>Resolved. Task 6 now defines the operation/readiness overlay, its allowed values, the gate applied before execution, an explicit overlay table, focused tests, and acceptance criteria for pre-existing non-complete operations.</td>
+          <td>No change required.</td>
+        </tr>
+        <tr>
+          <td><strong>T5</strong><br><span class="status confirmed">Closed</span></td>
+          <td><span class="severity">Medium</span></td>
+          <td>Resolved. Task 5 now explicitly enumerates the resolved-policy top-level fields, <code>label_values</code>, and the complete <code>recorded_state</code> structure consumed by Tasks 6/7 and Task 9.</td>
+          <td>No change required.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Task readiness</h2>
+    <div class="decision">
+      <div class="decision-label">Task 1</div>
+      <div><span class="status confirmed">Ready</span> The baseline artifact, required sections, no-change boundary, tests, and acceptance criteria are independently reviewable.</div>
+    </div>
+    <div class="decision">
+      <div class="decision-label">Task 2</div>
+      <div><span class="status confirmed">Ready</span> The raw policy-input record, exact controls, invalid-input behavior, and ownership boundaries are sufficient.</div>
+    </div>
+    <div class="decision">
+      <div class="decision-label">Task 3</div>
+      <div><span class="status confirmed">Ready</span> Lock ownership, canonical context, source recheck, outputs, tests, and handoff are now explicit.</div>
+    </div>
+    <div class="decision">
+      <div class="decision-label">Task 4</div>
+      <div><span class="status confirmed">Ready</span> Its table scope, tests, and acceptance criteria now consistently target mount-specification invariants, with lifecycle/runtime ownership handed to later tasks.</div>
+    </div>
+    <div class="decision">
+      <div class="decision-label">Task 5</div>
+      <div><span class="status confirmed">Ready</span> Its policy/metadata behavior and exhaustive resolved-policy record are independently implementable and reviewable.</div>
+    </div>
+    <div class="decision">
+      <div class="decision-label">Task 6</div>
+      <div><span class="status confirmed">Ready</span> The fixed decision kinds, base matrix, explicit operation/readiness overlay, refusal guarantees, and tests provide an independent review target.</div>
+    </div>
+    <div class="decision">
+      <div class="decision-label">Task 7</div>
+      <div><span class="status confirmed">Ready</span> The lifecycle interface, durable record, readiness adapter, failure outcomes, permissions, retries, and cleanup rules are independently reviewable.</div>
+    </div>
+
+    <h2>Final disposition</h2>
+    <div class="callout good">
+      The plan is ready for separate Luna implementer/reviewer pairs for tasks 1–7. The critical-path grouping, supporting-task separation, subtitles, dependency order, task boundaries, test ownership, and cross-task handoffs are coherent. No further specification or scope change is indicated by this review.
+    </div>
+    <p>This review covers only the executable specifications for tasks 1–7 and their support in the design document. It does not assess implementation correctness or add functionality.</p>
+
+    <footer>Task specification review. The implementation plan, design document, and implementation files were left unchanged.</footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+echo 'agentbox: Git is disabled in this agentbox.' >&2
+echo 'Use jj for local repository operations. Use gh with -R OWNER/REPO or gh api' >&2
+echo 'for remote GitHub operations.' >&2
+exit 1

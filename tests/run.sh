@@ -130,6 +130,212 @@ assert_eq "Dockerfile resolves (tier 1)" "$_cfg/machines/myhost/projects/home/al
 rm -rf "$_cfg"
 
 echo
+echo "agentbox.toml policy resolution (bin/ab)"
+_policy_root="$(mktemp -d)"
+mkdir -p "$_policy_root/machines/myhost" "$_policy_root/projects/home/alice/myproj" \
+  "$_policy_root/machines/myhost/projects/home/alice/myproj"
+printf '%s\n' '[git]' 'enabled = false' '[github]' 'grant = true' >"$_policy_root/agentbox.toml"
+printf '%s\n' '[git]' 'enabled = true' >"$_policy_root/machines/myhost/agentbox.toml"
+printf '%s\n' '[ssh]' 'grant_all = true' >"$_policy_root/projects/home/alice/myproj/agentbox.toml"
+printf '%s\n' '[git]' 'enabled = false' >"$_policy_root/machines/myhost/projects/home/alice/myproj/agentbox.toml"
+_saved_policy_root="$AB_CFG_ROOT"
+_saved_machine="$MACHINE"
+_saved_project="$PROJECT_DIR"
+_saved_cli_git="$policy_cli_git_enabled"
+_saved_cli_gh="$policy_cli_grant_gh"
+_saved_cli_ssh="$policy_cli_grant_all_of_dot_ssh"
+AB_CFG_ROOT="$_policy_root"
+MACHINE=myhost
+PROJECT_DIR=/home/alice/myproj
+policy_cli_git_enabled=""
+policy_cli_grant_gh=""
+policy_cli_grant_all_of_dot_ssh=""
+unset AGENTBOX_NO_GIT AGENTBOX_GRANT_GH AGENTBOX_GRANT_ALL_OF_DOT_SSH AGENTBOX_NO_UPDATE_CHECK
+policy_load_host
+assert_eq "policy field inheritance" "0" "$policy_git_enabled"
+assert_eq "policy machine/project override" "1" "$policy_grant_gh"
+assert_eq "policy project field" "1" "$policy_grant_all_of_dot_ssh"
+AGENTBOX_NO_GIT=0
+export AGENTBOX_NO_GIT
+policy_load_host
+assert_eq "explicit Git env re-enable" "1" "$policy_git_enabled"
+AGENTBOX_NO_GIT=maybe
+assert_eq "invalid policy env rejected" "1" "$(policy_load_host >/dev/null 2>&1; echo $?)"
+unset AGENTBOX_NO_GIT
+printf '%s\n' '[unknown]' 'value = true' >"$_policy_root/agentbox.toml"
+assert_eq "unknown policy table rejected" "1" "$(policy_load_host >/dev/null 2>&1; echo $?)"
+assert_eq "canonical policy digest stable" "$(policy_digest_for 1 0 0)" "$(policy_digest_for 1 0 0)"
+assert_eq "Git blocker mode" "755" "$(stat -c '%a' "$GIT_BLOCKER")"
+assert_eq "Git blocker validates" "0" "$(validate_git_blocker >/dev/null 2>&1; echo $?)"
+AB_CFG_ROOT="$_saved_policy_root"
+MACHINE="$_saved_machine"
+PROJECT_DIR="$_saved_project"
+policy_cli_git_enabled="$_saved_cli_git"
+policy_cli_grant_gh="$_saved_cli_gh"
+policy_cli_grant_all_of_dot_ssh="$_saved_cli_ssh"
+rm -rf "$_policy_root"
+
+echo
+echo "recorded policy inspection and lifecycle preflight (bin/ab)"
+# Inspect legacy state without Docker by replacing only the read-only inspect helpers. In
+# particular, a /usr/bin/git mount from an unknown source is ambiguous and must not be silently
+# migrated as Git-enabled. Old grant labels are authoritative; mounts contradicting them are
+# invalid rather than an implicit credential grant.
+_saved_exists_fn="$(declare -f exists 2>/dev/null || true)"
+_saved_policy_label_fn="$(declare -f policy_label 2>/dev/null || true)"
+_saved_mount_dest_fn="$(declare -f container_has_mount_destination 2>/dev/null || true)"
+_saved_git_source_fn="$(declare -f container_git_mount_source 2>/dev/null || true)"
+mock_version=""; mock_git=""; mock_gh=""; mock_ssh=""; mock_digest=""
+mock_git_mount=0; mock_git_source=""; mock_gh_mount=0; mock_ssh_mount=0
+exists() { return 0; }
+policy_label() {
+  case "$1" in
+    org.agentbox.policy.version) printf '%s' "$mock_version" ;;
+    org.agentbox.policy.git_enabled) printf '%s' "$mock_git" ;;
+    org.agentbox.policy.github_grant) printf '%s' "$mock_gh" ;;
+    org.agentbox.policy.ssh_grant_all) printf '%s' "$mock_ssh" ;;
+    org.agentbox.policy.digest) printf '%s' "$mock_digest" ;;
+    agentbox.grant-gh) printf '%s' "${mock_old_gh-}" ;;
+    agentbox.grant-all-of-dot-ssh) printf '%s' "${mock_old_ssh-}" ;;
+  esac
+}
+container_has_mount_destination() {
+  case "$1" in
+    /usr/bin/git) [ "$mock_git_mount" = 1 ] ;;
+    /home/agentbox/.config/gh) [ "$mock_gh_mount" = 1 ] ;;
+    /home/agentbox/.ssh) [ "$mock_ssh_mount" = 1 ] ;;
+    *) return 1 ;;
+  esac
+}
+container_git_mount_source() { printf '%s' "$mock_git_source"; }
+mock_old_gh=""; mock_old_ssh=""
+policy_inspect_recorded
+assert_eq "plain legacy defaults Git on" "legacy" "$policy_recorded_status"
+assert_eq "plain legacy records Git enabled" "1" "$policy_recorded_git_enabled"
+assert_eq "absent old GH label means false" "0" "$policy_recorded_grant_gh"
+mock_git_mount=1; mock_git_source="$GIT_BLOCKER"
+policy_inspect_recorded
+assert_eq "recognized blocker migrates Git off" "0" "$policy_recorded_git_enabled"
+assert_eq "recognized blocker is legacy" "legacy" "$policy_recorded_status"
+mock_git_source=/tmp/unrelated-git
+policy_inspect_recorded
+assert_eq "unknown blocker is invalid" "invalid" "$policy_recorded_status"
+assert_eq "unknown blocker explains state" "1" "$(printf '%s' "$policy_recorded_detail" | grep -c 'unrecognized')"
+mock_git_mount=0; mock_git_source=""; mock_gh_mount=1
+policy_inspect_recorded
+assert_eq "unlabelled GH mount is not inferred" "0" "$policy_recorded_grant_gh"
+assert_eq "unlabelled GH mount is invalid" "invalid" "$policy_recorded_status"
+mock_gh_mount=0
+policy_inspect_recorded
+assert_eq "repeated plain legacy inspection resets detail" "legacy" "$policy_recorded_status"
+assert_eq "repeated plain legacy detail is current" "1" "$(printf '%s' "$policy_recorded_detail" | grep -c 'no versioned policy labels')"
+mock_gh_mount=0; mock_old_gh=0; mock_gh_mount=1
+policy_inspect_recorded
+assert_eq "zero GH label with mount is invalid" "invalid" "$policy_recorded_status"
+mock_old_gh=1; mock_gh_mount=0
+policy_inspect_recorded
+assert_eq "one GH label without mount is invalid" "invalid" "$policy_recorded_status"
+mock_old_gh=bad; mock_gh_mount=0
+policy_inspect_recorded
+assert_eq "malformed old GH label is invalid" "invalid" "$policy_recorded_status"
+unset -f exists policy_label container_has_mount_destination container_git_mount_source
+eval "$_saved_exists_fn"
+eval "$_saved_policy_label_fn"
+eval "$_saved_mount_dest_fn"
+eval "$_saved_git_source_fn"
+
+# The state matrix exercises the lifecycle gate without requiring a Docker daemon: mismatches on
+# running containers refuse normally, explicit apply permits them, and stopped containers are
+# marked for same-name recreation. This is the host-side equivalent of the Docker-mocked flow.
+_saved_load_host_fn="$(declare -f policy_load_host 2>/dev/null || true)"
+_saved_inspect_fn="$(declare -f policy_inspect_recorded 2>/dev/null || true)"
+_saved_exists_fn="$(declare -f exists 2>/dev/null || true)"
+_saved_running_fn="$(declare -f is_running 2>/dev/null || true)"
+_saved_blocker_fn="$(declare -f validate_git_blocker 2>/dev/null || true)"
+mock_running=1
+policy_load_host() {
+  policy_git_enabled=1; policy_grant_gh=1; policy_grant_all_of_dot_ssh=0
+  policy_git_source=environment; policy_grant_gh_source=environment
+  policy_grant_all_of_dot_ssh_source=default
+  return 0
+}
+policy_inspect_recorded() {
+  policy_recorded_status=valid; policy_recorded_git_enabled=1; policy_recorded_grant_gh=0
+  policy_recorded_grant_all_of_dot_ssh=0; policy_recorded_digest="sha256:old"
+}
+exists() { return 0; }
+is_running() { [ "$mock_running" = 1 ]; }
+validate_git_blocker() { return 0; }
+policy_apply=0
+assert_eq "running mismatch refuses" "1" "$(policy_preflight start >/dev/null 2>&1; echo $?)"
+policy_apply=1
+assert_eq "running mismatch apply permits" "0" "$(policy_preflight start >/dev/null 2>&1; echo $?)"
+mock_running=0; policy_apply=0
+policy_preflight start >/dev/null 2>&1
+assert_eq "stopped mismatch requests recreate" "1" "$policy_needs_recreate"
+unset -f policy_load_host policy_inspect_recorded exists is_running validate_git_blocker
+eval "$_saved_load_host_fn"
+eval "$_saved_inspect_fn"
+eval "$_saved_exists_fn"
+eval "$_saved_running_fn"
+eval "$_saved_blocker_fn"
+
+# A running --apply must reuse the image recorded by Docker. The mocked command below fails the
+# test if build_image is called, and records the image passed to docker run.
+_saved_require_sysbox_fn="$(declare -f require_sysbox 2>/dev/null || true)"
+_saved_prepare_fn="$(declare -f prepare_host_state 2>/dev/null || true)"
+_saved_add_policy_fn="$(declare -f add_policy_mounts 2>/dev/null || true)"
+_saved_jj_mount_fn="$(declare -f require_jj_state_mount 2>/dev/null || true)"
+_saved_warn_fn="$(declare -f warn_legacy_files 2>/dev/null || true)"
+_saved_start_running_fn="$(declare -f is_running 2>/dev/null || true)"
+_saved_start_exists_fn="$(declare -f exists 2>/dev/null || true)"
+_saved_build_fn="$(declare -f build_image 2>/dev/null || true)"
+_saved_wait_fn="$(declare -f wait_jj_state 2>/dev/null || true)"
+_saved_connect_fn="$(declare -f connect_networks 2>/dev/null || true)"
+_saved_user_mounts_fn="$(declare -f build_user_mounts 2>/dev/null || true)"
+_saved_docker_fn="$(declare -f docker 2>/dev/null || true)"
+mock_run_image=""; mock_build_called=0
+require_sysbox() { :; }
+prepare_host_state() { :; }
+add_policy_mounts() { :; }
+require_jj_state_mount() { :; }
+warn_legacy_files() { :; }
+is_running() { return 0; }
+exists() { return 1; }
+build_image() { mock_build_called=1; return 1; }
+wait_jj_state() { :; }
+connect_networks() { :; }
+build_user_mounts() { :; }
+docker() {
+  case "$1" in
+    inspect) printf '%s\n' 'agentbox:test-image' ;;
+    rm) : ;;
+    run) mock_run_image="${*: -1}" ;;
+    *) : ;;
+  esac
+}
+_saved_start_mounts=("${mounts[@]}"); _saved_start_args=("${run_args[@]}"); _saved_start_labels=("${grant_labels[@]}")
+policy_needs_recreate=1; policy_apply=1; mounts=(); run_args=(); grant_labels=()
+cmd_start >/dev/null 2>&1
+assert_eq "policy apply skips image build" "0" "$mock_build_called"
+assert_eq "policy apply reuses existing image" "agentbox:test-image" "$mock_run_image"
+mounts=("${_saved_start_mounts[@]}"); run_args=("${_saved_start_args[@]}"); grant_labels=("${_saved_start_labels[@]}")
+unset -f require_sysbox prepare_host_state add_policy_mounts require_jj_state_mount warn_legacy_files
+unset -f is_running exists build_image wait_jj_state connect_networks build_user_mounts docker
+eval "$_saved_require_sysbox_fn"
+eval "$_saved_prepare_fn"
+eval "$_saved_add_policy_fn"
+eval "$_saved_jj_mount_fn"
+eval "$_saved_warn_fn"
+eval "$_saved_start_running_fn"
+eval "$_saved_start_exists_fn"
+eval "$_saved_build_fn"
+eval "$_saved_wait_fn"
+eval "$_saved_connect_fn"
+eval "$_saved_user_mounts_fn"
+[ -n "$_saved_docker_fn" ] && eval "$_saved_docker_fn"
+
+echo
 echo "ab_config_container_path (bin/ab)"
 # The config root is bind-mounted ro at /home/agentbox/.config/agentbox, so a resolved host path
 # maps into the container by swapping that prefix — this is what ab hands the entrypoint in
@@ -307,6 +513,8 @@ mkdir -p "$HOME/.config/jj" "$XDG_CONFIG_HOME/jj/conf.d"
 mounts=()
 jj_config_paths=()
 add_host_config_mounts
+policy_git_enabled=1
+add_policy_mounts
 assert_eq "mounts git config" "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro" \
   "$(ab_mount_dest_owner /home/agentbox/.gitconfig)"
 assert_eq "mounts jj legacy config" "$HOME/.jjconfig.toml:/home/agentbox/.jjconfig.toml:ro" \
@@ -334,11 +542,15 @@ HOME="$_state_home"
 mounts=()
 grant_gh=0
 grant_all_of_dot_ssh=0
+policy_git_enabled=1
+policy_grant_gh=0
+policy_grant_all_of_dot_ssh=0
 prepare_host_state
 assert_eq "creates Claude state dir" "1" "$([ -d "$HOME/.claude" ] && echo 1 || echo 0)"
 assert_eq "creates Codex state dir"  "1" "$([ -d "$HOME/.codex" ] && echo 1 || echo 0)"
 assert_eq "does not create gh state dir by default" "0" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
 grant_gh=1
+policy_grant_gh=1
 prepare_host_state
 assert_eq "creates gh state dir with grant" "1" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
 assert_eq "mounts gh state dir with grant" "$HOME/.config/gh:/home/agentbox/.config/gh" \
@@ -346,6 +558,7 @@ assert_eq "mounts gh state dir with grant" "$HOME/.config/gh:/home/agentbox/.con
 mkdir -p "$HOME/.ssh"
 : >"$HOME/.ssh/known_hosts"
 grant_all_of_dot_ssh=1
+policy_grant_all_of_dot_ssh=1
 prepare_host_state
 assert_eq "mounts all of ssh read-only with grant" "$HOME/.ssh:/home/agentbox/.ssh:ro" \
   "$(ab_mount_dest_owner /home/agentbox/.ssh)"
@@ -369,7 +582,8 @@ assert_eq "unknown option rejected" "1" "$(parse_runtime_options start --no-such
 echo
 echo "adopt_existing_grants (bin/ab)"
 # Convenience commands auto-start a stopped container. Persisted labels restore the grants
-# before cmd_start rebuilds its mount list; legacy containers fall back to their mount layout.
+# before cmd_start rebuilds its mount list; ambiguous legacy mount state is handled by policy
+# preflight instead of being inferred here.
 _saved_exists_fn="$(declare -f exists 2>/dev/null || true)"
 _saved_mount_owner_fn="$(declare -f container_has_mount_destination 2>/dev/null || true)"
 _mock_bin="$(mktemp -d)"

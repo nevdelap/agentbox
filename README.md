@@ -116,16 +116,39 @@ ab codex resume      # likewise for codex
 Each project directory gets its own container. Lifecycle:
 
 ```bash
-ab start [--grant-gh] [--grant-all-of-dot-ssh]                # create + start for this project
+ab start [--no-git] [--grant-gh] [--grant-all-of-dot-ssh] [--apply] # create + start for this project
 ab stop                                                       # stop (kept on disk; /tmp build state preserved)
 ab destroy                                                    # stop + remove container + its inner-docker/jj volumes (/tmp state lost)
 ab status                                                     # is it running?
 ab config                                                     # which per-machine/per-project config files are in effect
 ab logs                                                       # tail container / inner-dockerd logs
-ab build   [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # rebuild and recreate
-ab rebuild [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # synonym for build
+ab build   [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # rebuild and recreate
+ab rebuild [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # synonym for build
 ab --version                                                  # print the version
 ```
+
+`--no-git` makes the `git` command fail with guidance to use jj; it leaves the project
+workspace and collocated `.git` metadata intact. It also omits both Git config mounts
+(`~/.gitconfig` and the XDG fallback). `gh` remains independently grantable for remote/API
+work, while Git-dependent local `gh` operations fail through the same diagnostic. Git is
+available by default; there is deliberately no `--git` flag. A one-command re-enable uses
+`AGENTBOX_NO_GIT=0` or a more-specific `git.enabled = true` policy.
+
+Policy is container-scoped, not a temporary per-process setting. All start, build/rebuild,
+Claude, Codex, Bash, and exec paths validate the resolved policy before using Docker. A stopped
+container can be reconciled automatically. A running container with different or missing policy
+is not used silently; apply the change explicitly, for example:
+
+```bash
+AGENTBOX_NO_GIT=1 ab start --apply
+AGENTBOX_NO_GIT=0 ab start --apply
+```
+
+This recreates the same named container and preserves its Docker/jj volumes, but interrupts
+active processes and does not preserve container-local filesystem changes.
+For a policy-only `ab start --apply`, Agentbox reuses the image already recorded on the existing
+container; it does not rebuild bundled tools. A normal start of a stopped container may still
+perform its usual image freshness check.
 
 `ab start` and `rebuild` verify `sysbox-runc` is registered on the host and
 exit with install guidance if it isn't. The image rebuilds automatically when the build
@@ -144,6 +167,10 @@ Environment variables:
 | `AGENTBOX_DIR` | `$PWD` | project dir mounted at `/workspace` |
 | `AGENTBOX_CONTEXT` | auto (repo root) | build context dir (override only if needed) |
 | `AGENTBOX_MACHINE` | `$(hostname)` | machine name used to look up per-machine config (does not change the container's hostname) |
+| `AGENTBOX_NO_GIT` | unset | host policy: `1` disables Git, `0` explicitly enables it |
+| `AGENTBOX_GRANT_GH` | unset | host policy: grant GitHub CLI config/auth when true |
+| `AGENTBOX_GRANT_ALL_OF_DOT_SSH` | unset | host policy: grant the full host `.ssh` directory when true |
+| `AGENTBOX_NO_UPDATE_CHECK` | unset | host policy: suppress the host-side update notice when true |
 
 Migration note: `AGENTBOX_SSH=1` is no longer supported and is silently ignored. Use
 `ab start --grant-all-of-dot-ssh` (or `ab rebuild --grant-all-of-dot-ssh`) to grant the
@@ -158,9 +185,9 @@ container read-only access to the full `.ssh` directory, or use individual entri
   `oauthAccount` Claude Code checks to consider itself logged in; mounted only if present)
 - `~/.codex` → `/home/agentbox/.codex` (auth, config — e.g. `auth.json`, `config.toml`)
 - `~/.config/gh` → `/home/agentbox/.config/gh` (GitHub CLI auth and config; only with `--grant-gh`)
-- `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro; git identity — falls back to
+- `~/.gitconfig` → `/home/agentbox/.gitconfig` (ro when Git is enabled; git identity — falls back to
   `~/.config/git/config` → `/home/agentbox/.config/git/config` if `~/.gitconfig` is absent,
-  e.g. XDG-style setups such as home-manager's `programs.git`)
+  e.g. XDG-style setups such as home-manager's `programs.git`; omitted in no-Git mode)
 - `~/.jjconfig.toml` and `$XDG_CONFIG_HOME/jj/config.toml` + `conf.d` (normally
   `~/.config/jj`) → read-only user config files loaded through `JJ_CONFIG`; jj's secure
   repo/workspace state is kept separately in the writable per-project `agentbox-jj-<project>`
@@ -168,6 +195,8 @@ container read-only access to the full `.ssh` directory, or use individual entri
 - `~/.config/agentbox` → `/home/agentbox/.config/agentbox` (ro, if present; see
   [Per-host and per-project customization](#per-host-and-per-project-customization-configagentbox)
   — env vars, host port forwards, extra tools)
+- `/usr/bin/git` → the read-only Agentbox Git blocker (only in no-Git mode; the real image
+  package remains masked at this path)
 - `/nix/store` → `/nix/store` (ro; NixOS only — so workspace `/nix/store` paths resolve)
 - `/etc/localtime` → `/etc/localtime` (ro, if present on the host — so in-container time
   matches the host timezone)
@@ -224,6 +253,32 @@ each drive one mechanism (copy-pasteable samples live in
 the tier's directory, `cp` in the starter template) in one go — see
 [Scoping config to a machine or a project](#scoping-config-to-a-machine-or-a-project) below for
 the `--machine`/`--project` tier flags.
+
+### Launcher policy (`agentbox.toml`)
+
+Launcher policy is separate from the `env` files, which only provide environment variables
+inside containers. The following files are merged field-by-field from least-specific to
+most-specific, with an explicitly specified value—including `false`—overriding the inherited
+value:
+
+```text
+~/.config/agentbox/agentbox.toml
+~/.config/agentbox/machines/<machine>/agentbox.toml
+~/.config/agentbox/projects/<project-path>/agentbox.toml
+~/.config/agentbox/machines/<machine>/projects/<project-path>/agentbox.toml
+```
+
+Supported fields are `git.enabled`, `github.grant`, `ssh.grant_all`, and `updates.check`, all
+strict TOML booleans. Policy files contain no credentials and are mounted read-only with the
+rest of `~/.config/agentbox`, so agents may inspect them intentionally.
+
+For ordinary `ab start` and convenience commands, an omitted field preserves the corresponding
+state recorded on an existing container. Policy-free `ab rebuild` preserves recorded Git state
+but retains the established behavior that omitted GitHub/SSH grant flags revoke those grants.
+Explicit policy or host-environment values override the recorded state. Invalid TOML, unknown
+fields, unsafe policy files, and invalid policy environment values fail before update/network/
+Docker work. `ab config` shows every existing policy tier, the merged values and their sources,
+the recorded container policy and status details, and exact effective-versus-recorded deltas.
 
 Example — reach a macOS guest whose SSH the host forwards at `127.0.0.1:2222`, install
 `micro`, and copy in the SSH key a script needs to reach it:

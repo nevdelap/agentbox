@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentbox Git Disablement — Implementation Plan</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f4f6f8, #101318);
+      --panel: light-dark(#fff, #181c23);
+      --soft: light-dark(#f7f9fc, #1d222b);
+      --text: light-dark(#20252d, #edf1f7);
+      --muted: light-dark(#5e6877, #aeb8c7);
+      --line: light-dark(#dce2e9, #303844);
+      --accent: light-dark(#315fba, #9bb9ff);
+      --accent-soft: light-dark(#edf3ff, #202d49);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 980px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.6rem); letter-spacing: -0.045em; }
+    h2 { margin: 40px 0 14px; font-size: 1.45rem; }
+    p { margin: 10px 0; }
+    .eyebrow, .status { display: inline-block; border-radius: 99px; font-size: .76rem; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+    .eyebrow { color: var(--accent); }
+    .subtitle, .meta, .note { color: var(--muted); }
+    .subtitle { max-width: 820px; font-size: 1.1rem; }
+    .meta, .note { font-size: .9rem; }
+    .callout, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .callout { padding: 16px 18px; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 11px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr.group td { padding-top: 16px; padding-bottom: 8px; color: var(--accent); background: var(--accent-soft); font-weight: 750; border-bottom: 1px solid var(--line); }
+    .task-spec { margin: 20px 0; padding: 20px; background: var(--panel); border: 1px solid var(--line); border-left: 5px solid var(--accent); border-radius: 13px; }
+    .task-spec h3 { margin-top: 0; color: var(--accent); }
+    .task-spec h4 { margin: 18px 0 6px; }
+    .task-spec ul { margin-top: 6px; }
+    .spec-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px 24px; }
+    tr:last-child td { border-bottom: 0; }
+    .status { padding: 2px 8px; color: var(--accent); background: var(--accent-soft); letter-spacing: .04em; }
+    footer { margin-top: 48px; padding-top: 18px; color: var(--muted); font-size: .88rem; border-top: 1px solid var(--line); }
+    @media (max-width: 680px) {
+      main { padding: 30px 16px 55px; }
+      th, td { padding: 9px 10px; }
+    }
+    @media print { :root { color-scheme: light; } body { background: #fff; } main { max-width: none; padding: 0; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">IMPLEMENTATION PLAN</div>
+      <h1>Agentbox Git Disablement</h1>
+      <p class="subtitle">Ordered implementation breakdown for the Git disablement and configuration enhancements.</p>
+      <p class="meta">Planning pass · Tasks 1–7 have executable specifications below; tasks 8–14 remain at breakdown level.</p>
+    </header>
+
+    <section class="callout">
+      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–7 additionally define implementation scope, tests, and acceptance criteria for execution and review; tasks 8–14 remain a high-level breakdown and are not specified here yet. The full system design remains in the design document.
+    </section>
+
+    <h2>Implementation tasks</h2>
+    <p class="note">Dependencies list prerequisite task numbers; a range is inclusive. “Critical path” means directly required for the Git-disablement feature. “Supporting” means general lifecycle, observability, concurrency, or runtime improvement that supports the feature but must not block its core implementation unless a later task explicitly consumes it. Focused verification begins with each task and is consolidated in task 12.</p>
+    <table>
+      <thead>
+        <tr><th>Order</th><th>Role</th><th>Task</th><th>Implementation scope</th><th>Depends on</th></tr>
+      </thead>
+      <tbody>
+        <tr class="group"><td colspan="5">Foundation and Git-disablement critical path — implement the feature before general lifecycle improvements.</td></tr>
+        <tr>
+          <td>1</td>
+          <td>Foundation</td>
+          <td>Baseline and change inventory</td>
+          <td>Capture the current launcher, entrypoint, policy resolver, tests, runtime assets, and documentation touchpoints. Establish the task fixtures and test seams used by the later work.</td>
+          <td>None</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td>Critical path</td>
+          <td>Git disablement and access policy</td>
+          <td>Implement the host-facing control surfaces for Git availability, GitHub credential access, and full SSH access. This task owns command, environment, and configuration inputs, not their merged persistence or container metadata.</td>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td>Critical path</td>
+          <td>Identity, mount safety, and source consistency</td>
+          <td>Implement canonical project/config identities, protected-mount conflict handling, policy-source snapshots, grant-source checks, and source-change handling that later Git-policy work consumes.</td>
+          <td>1, 2</td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td>Critical path</td>
+          <td>No-Git blocker and credential mounts</td>
+          <td>Implement the Git blocker asset and mount integration, Git configuration omission, GitHub credential mounting, SSH mounting, and mount-specification checks that leave project/jj destinations unshadowed. Task 7 owns lifecycle preservation of that state.</td>
+          <td>2, 3</td>
+        </tr>
+        <tr>
+          <td>5</td>
+          <td>Critical path</td>
+          <td>Policy persistence and container metadata</td>
+          <td>Implement merged scoped configuration resolution, effective-policy labels and digest handling, legacy migration, and recorded-policy inspection for Git and credential state.</td>
+          <td>2, 3, 4</td>
+        </tr>
+        <tr>
+          <td>6</td>
+          <td>Critical path</td>
+          <td>Git policy state and command decisions</td>
+          <td>Implement the shared decision layer that determines whether each launcher command may proceed, must preserve existing Git state, must reconcile policy, or must refuse.</td>
+          <td>2, 3, 4, 5</td>
+        </tr>
+        <tr>
+          <td>7</td>
+          <td>Critical path</td>
+          <td>Policy application and recreation</td>
+          <td>Implement Git disablement and grant changes for new, stopped, and running agentboxes, including explicit apply/rebuild flows and preservation of named project, jj, and Docker state.</td>
+          <td>3, 4, 5, 6</td>
+        </tr>
+        <tr class="group"><td colspan="5">Supporting lifecycle and general improvements — add recovery, observability, coordination, and runtime support without obscuring the core path.</td></tr>
+        <tr>
+          <td>8</td>
+          <td>Supporting</td>
+          <td>Operation record reporting and recovery integration</td>
+          <td>Extend the Task 7 operation-record interface with user-facing reporting, recovery presentation, completion cleanup, and cross-command integration.</td>
+          <td>6, 7</td>
+        </tr>
+        <tr>
+          <td>9</td>
+          <td>Supporting</td>
+          <td>Command and report protocol</td>
+          <td>Implement command-facing result handling for Git-policy success, refusal, failure, status, logs, config, and config initialization, consuming the operation states from task 8.</td>
+          <td>6, 8</td>
+        </tr>
+        <tr>
+          <td>10</td>
+          <td>Supporting</td>
+          <td>Concurrency, updates, and retry identity</td>
+          <td>Use the Task 3 per-project lock, then implement host-wide update coordination and image/retry handling. Retry/image identity consumes Task 7/8 records and Task 7 recreation; this task does not introduce a second project-lock implementation.</td>
+          <td>7, 8</td>
+        </tr>
+        <tr>
+          <td>11</td>
+          <td>Supporting</td>
+          <td>Nested runtime integration</td>
+          <td>Complete nested Docker readiness and recovery integration, including its interaction with Git-policy application, operation records, command decisions, and lifecycle reporting.</td>
+          <td>7, 8, 9, 10</td>
+        </tr>
+        <tr class="group"><td colspan="5">Verification and release — prove the implementation and finish user-facing integration work.</td></tr>
+        <tr>
+          <td>12</td>
+          <td>Verification</td>
+          <td>Focused tests and mocked lifecycle coverage</td>
+          <td>Add final focused and regression coverage for no-Git behavior, Git/jj/gh interactions, credential grants, policy migration, state transitions, failures, races, retries, reports, and concurrency. Each preceding task also adds its local verification as part of completion.</td>
+          <td>1–11</td>
+        </tr>
+        <tr>
+          <td>13</td>
+          <td>Verification</td>
+          <td>End-to-end runtime validation</td>
+          <td>Own the supported-runtime checks removed from Task 4: direct <code>git</code>, jj, <code>gh --version</code>, Git-dependent <code>gh</code>, Git-config absence, workspace/.git/jj preservation, plus the full Docker/Sysbox lifecycle matrix for credential mounts, policy transitions, labels, volumes, nested runtime behavior, reports, retries, and cleanup.</td>
+          <td>6–12</td>
+        </tr>
+        <tr>
+          <td>14</td>
+          <td>Release</td>
+          <td>Interface documentation and release cleanup</td>
+          <td>Update user-facing help, README material, design status, implementation notes, and release checks to reflect the completed Git disablement implementation.</td>
+          <td>2, 5, 7, 9, 12, 13</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Executable specifications for tasks 1–7</h2>
+    <section class="callout">
+      <strong>Execution contract:</strong> Luna implements one task at a time in dependency order. Each task is complete only when its scope, tests, and acceptance criteria below are satisfied. A task must not silently expand into a later task; if implementation exposes a missing dependency or contradiction, stop at that boundary and report it for review. The mandatory baseline test command for every code task is <code>bash tests/run.sh</code>, plus <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>. Focused tests are added alongside the task that owns the behavior; task 12 later consolidates regression coverage.
+    </section>
+
+    <article class="task-spec">
+      <h3>Task 1 — Baseline and change inventory</h3>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Inspect <code>bin/ab</code>, <code>agentbox-entrypoint.sh</code>, <code>tests/run.sh</code>, <code>tests/smoke.sh</code>, <code>runtime/git-disabled</code>, <code>README.md</code>, and the design/review documents.</li>
+            <li>Record the existing command entry points: start, build, rebuild, claude, codex, bash, exec, config, and config initialization.</li>
+            <li>Map the existing policy, mount, label, container-inspection, and test seams that tasks 2–7 will use.</li>
+            <li>Do not change production behavior, interfaces, runtime assets, tests, README content, or design requirements in this task.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Deliverable</h4>
+          <ul>
+            <li>Produce the authoritative inventory artifact <code>design_docs/git_disablement_and_config_enhancements_implementation_baseline.html</code>, listing each inspected file, relevant function/section, current behavior, and planned task owner.</li>
+            <li>The artifact must contain exactly these sections: <em>Repository files</em>, <em>Launcher entry points</em>, <em>Policy/mount/label seams</em>, <em>Test fixtures</em>, <em>Test seams</em>, <em>Baseline commands/results</em>, <em>Pre-existing changes</em>, and <em>Task ownership</em>.</li>
+            <li><em>Test fixtures</em> must name the four-tier policy tree, valid/invalid policy files, absent/stopped/running container inspections, legacy/valid/stale label sets, Git/GitHub/SSH source types, protected/custom mount targets, and Docker helper mocks used by tasks 2–7.</li>
+            <li><em>Test seams</em> must name the pure functions, Docker/network helper boundaries, filesystem source checks, and entry-point dispatch seams each later task will exercise.</li>
+            <li>List pre-existing dirty changes separately; do not attribute them to Task 1.</li>
+            <li>Record the exact commands used for the baseline checks and their results.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests and acceptance</h4>
+      <ul>
+        <li>Run <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code> and <code>bash tests/run.sh</code> without changing the result.</li>
+        <li>Acceptance requires the named baseline artifact to exist with all eight required sections, a complete file/entry-point/function inventory, separate pre-existing changes, recorded baseline commands/results, named fixture/test seams, and implementation ownership for tasks 2–7. Task 1 must not change feature behavior.</li>
+      </ul>
+    </article>
+
+    <article class="task-spec">
+      <h3>Task 2 — Git disablement and access policy</h3>
+      <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Suggested precedence</a>, <a href="git_disablement_and_config_enhancements.html">Settings to make persistent</a>, <a href="git_disablement_and_config_enhancements.html">Command-specific grant semantics</a>, and <a href="git_disablement_and_config_enhancements.html">Policy-file contract</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Implement capture and validation of the policy control surfaces: <code>--no-git</code>, <code>--grant-gh</code>, <code>--grant-all-of-dot-ssh</code>, <code>AGENTBOX_NO_GIT</code>, <code>AGENTBOX_GRANT_GH</code>, and <code>AGENTBOX_GRANT_ALL_OF_DOT_SSH</code>. Capture them consistently for <code>start</code>, <code>build</code>, <code>rebuild</code>, <code>claude</code>, <code>codex</code>, <code>bash</code>, and <code>exec</code>.</li>
+            <li>Represent each input as unset, true, or false where the control supports false; preserve the distinction between unset and explicit false.</li>
+            <li>Accept host boolean spellings <code>1</code>, <code>true</code>, <code>yes</code>, <code>on</code>, <code>0</code>, <code>false</code>, <code>no</code>, and <code>off</code>, case-insensitively. Reject every other non-empty value.</li>
+            <li>Keep update-check controls out of this task; they are owned by Task 10.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary</h4>
+          <ul>
+            <li>This task owns the named CLI/environment/config control-surface interface and raw CLI/environment capture only; it does not parse or merge persistent files.</li>
+            <li>Its output is a raw policy-input record with exactly these fields: <code>cli_git_enabled</code>, <code>cli_grant_gh</code>, <code>cli_grant_ssh</code>, <code>env_git_enabled</code>, <code>env_grant_gh</code>, and <code>env_grant_ssh</code>. Each field is <code>unset</code>, <code>true</code>, or <code>false</code>.</li>
+            <li>Task 5 owns merged persistent resolution, defaults, labels, digest, and migration.</li>
+            <li>Task 6 owns command-specific state decisions; Task 7 owns mounts and lifecycle mutation.</li>
+            <li>Invalid input must be reported before any Docker, network, update-check, build, or container mutation.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests</h4>
+      <ul>
+        <li>Add shell-unit cases to <code>tests/run.sh</code> for every accepted boolean spelling, unset values, explicit false values, repeated flags, each supported command form, and invalid values.</li>
+        <li>Test that policy values are read from the host launcher environment and are not taken from container <code>env</code> files.</li>
+        <li>Test that invalid policy input exits non-zero and invokes no Docker or network helper, using mocked helpers/counters.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>All six named controls are captured consistently across supported entry points.</li>
+        <li>Unset, false, and true remain distinguishable until the resolver consumes them.</li>
+        <li>Invalid values have deterministic non-zero failure and no side effect.</li>
+        <li>The raw policy-input record has the six named fields and is consumable by Task 5 without reparsing CLI arguments or environment variables.</li>
+        <li>No persistent merge, mount, label, or container-state behavior is implemented under this task.</li>
+      </ul>
+    </article>
+
+    <article class="task-spec">
+      <h3>Task 3 — Identity, mount safety, and source consistency</h3>
+      <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Canonical configuration lookup</a>, <a href="git_disablement_and_config_enhancements.html">Protected mount destinations and conflicts</a>, <a href="git_disablement_and_config_enhancements.html">Policy snapshot and source-change consistency</a>, and <a href="git_disablement_and_config_enhancements.html">Update-check scope and concurrency</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Canonicalize the machine name with <code>^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$</code>; permit one-character names, permit at most 64 characters, and reject separators, whitespace, and all other characters.</li>
+            <li>Resolve <code>AGENTBOX_DIR</code> to an existing physical absolute path before project-tier lookup. Remove dot components and resolve symlinks; failure to resolve the project directory is fatal.</li>
+            <li>Use the physical project path plus machine name as identity. Preserve UTF-8 path components literally under <code>projects/</code>; do not case-fold or Unicode-normalize.</li>
+            <li>Canonicalize every custom mount destination as an absolute lexical path: collapse repeated separators and <code>.</code>/<code>..</code>, reject relative paths and paths escaping the container root, and compare path components without prefix-string matching.</li>
+            <li>Snapshot all four expected policy-file paths, including absent files. Existing policy files must be regular, readable, non-world-writable, non-symlink files; symlinked tier directories or policy files are rejected rather than followed.</li>
+            <li>For requested grant sources, capture the source type and identity before Docker work and recheck it immediately before mutation. Top-level <code>~/.config/gh</code>, <code>~/.ssh</code>, and <code>known_hosts</code> symlinks are rejected. Symlinks inside an accepted grant directory are not recursively validated by this task.</li>
+            <li>Implement the per-project advisory lock required before snapshotting: identity is SHA-256 of physical project path, NUL, and machine name; use <code>$XDG_RUNTIME_DIR/agentbox/locks/&lt;hash&gt;.lock</code>, then <code>$XDG_CACHE_HOME/agentbox/locks/&lt;hash&gt;.lock</code>, then <code>~/.cache/agentbox/locks/&lt;hash&gt;.lock</code>; use directory mode <code>0700</code>, file mode <code>0600</code>, a 30-second bounded wait, and distinct busy/lock-failed outcomes.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary</h4>
+          <ul>
+            <li>This task owns identity, canonical path comparison, source snapshot/recheck, and preflight rejection.</li>
+            <li>Its output is a locked canonical-context record containing the physical project path, machine name, four policy-source states, grant-source identities, and normalized mount destinations. Tasks 4–7 consume this record and must not recompute identity independently.</li>
+            <li>The lock handoff has exactly these logical fields: <code>lock_path</code>, <code>lock_identity</code>, <code>lock_result</code> (<code>acquired</code>, <code>busy</code>, or <code>failed</code>), <code>lock_timeout_seconds=30</code>, and a held lock handle for the operation lifetime. Task 10 reuses this handle and adds host-wide update coordination; it must not implement a second per-project lock.</li>
+            <li>Task 4 owns creation of policy mounts after these checks pass.</li>
+            <li>Task 5 consumes canonical identities for persistent policy lookup and metadata.</li>
+            <li>A source identity/type change causes one complete resnapshot/recheck; a second change fails with no Docker mutation.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests</h4>
+      <ul>
+        <li>Test one-character, 64-character, 65-character, invalid-character, and path-containing machine names.</li>
+        <li>Test physical-path resolution for symlinks, spaces, Unicode, nested paths, same basenames, dot components, and case-sensitive distinctions.</li>
+        <li>Test mount-target normalization for exact protected paths, parents, children, repeated separators, dot components, relative paths, and similar names such as <code>.ssh2</code>.</li>
+        <li>Test absent, regular, symlinked, directory, unreadable, and world-writable policy sources, plus source replacement between snapshot and mutation.</li>
+        <li>Test lock identity/path selection, directory/file permissions, acquisition, reentrant use by child operations, 30-second timeout, busy outcome, and lock-failed outcome.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>Every lookup and protected-mount comparison uses one canonical identity/path function.</li>
+        <li>No invalid machine, project, policy-source, or mount-target input reaches Docker or the network.</li>
+        <li>A source change is retried once from a complete new snapshot; a repeated change fails without mutation and identifies the changed source.</li>
+        <li>Every Task 2–7 policy-sensitive operation acquires the same per-project lock before reading the snapshot; no operation proceeds unlocked.</li>
+        <li>All listed path and source-type tests pass under <code>bash tests/run.sh</code>.</li>
+      </ul>
+    </article>
+
+    <article class="task-spec">
+      <h3>Task 4 — No-Git blocker and credential mounts</h3>
+      <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">What “disable Git” might mean</a>, <a href="git_disablement_and_config_enhancements.html">Leading implementation candidate: mount-based Git blocker</a>, <a href="git_disablement_and_config_enhancements.html">Credential-grant source validation</a>, and <a href="git_disablement_and_config_enhancements.html">Protected mount destinations and conflicts</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Validate the tracked <code>runtime/git-disabled</code> asset as a regular, non-symlink, readable, executable, non-world-writable file with mode <code>0755</code>, resolved relative to the launcher root.</li>
+            <li>When Git is disabled, mount that asset read-only over <code>/usr/bin/git</code>. When Git is enabled, do not add the blocker mount.</li>
+            <li>When Git is disabled, omit both <code>~/.gitconfig</code> and <code>~/.config/git/config</code> mounts.</li>
+            <li>When GitHub access is granted, mount the validated <code>~/.config/gh</code> source. When full SSH access is granted, mount <code>~/.ssh</code> read-only and <code>known_hosts</code> read-write only when the validated host file exists and is writable.</li>
+            <li>Reject custom mounts that target or obscure protected policy destinations.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary</h4>
+          <ul>
+            <li>This task owns mount construction, blocker asset integration, and mount-invariant validation after Task 3 preflight. Its output is a deterministic container-mount specification with exactly these entries: <code>git_blocker</code>, <code>git_config</code>, <code>github_config</code>, <code>ssh_dir</code>, <code>known_hosts</code>, and <code>custom_conflicts</code>; each entry records source, destination, and <code>absent</code>/<code>ro</code>/<code>rw</code> state.</li>
+            <li>It does not own container recreation or persistence of project/jj/Docker state; those are Task 7 lifecycle acceptance invariants.</li>
+            <li>It does not claim to block alternate Git binaries or hostile-user bypasses outside the protected destinations.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests</h4>
+      <ul>
+        <li>Mock mount construction for Git enabled/disabled, GitHub grant enabled/disabled, SSH grant enabled/disabled, and all combinations.</li>
+        <li>Test blocker missing, unreadable, non-executable, symlinked, world-writable, and wrong-mode failures.</li>
+        <li>Test exact protected-mount conflicts and verify no custom mount can shadow a policy destination.</li>
+        <li>Do not run container-runtime or end-to-end checks in this task. Those checks are owned by Task 13; Task 4 covers their corresponding mount-specification cases through mocks and inspection of generated mount arguments.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>When <code>git_enabled=false</code>, the generated mount specification contains one read-only <code>git_blocker</code> entry with source <code>runtime/git-disabled</code> and destination <code>/usr/bin/git</code>; when <code>git_enabled=true</code>, that entry is absent. The blocker’s exact output and non-zero runtime exit are accepted by Task 13.</li>
+        <li>When <code>git_enabled=false</code>, the generated mount specification omits both protected Git-config destinations; when <code>git_enabled=true</code>, it preserves the existing Git-config entries. It contains no entry that targets or obscures the workspace, collocated <code>.git</code>, jj configuration, or jj state destinations.</li>
+        <li>Credential mounts are present only when explicitly granted and only after source validation.</li>
+        <li>The mount specification leaves the workspace, collocated <code>.git</code>, jj configuration, and jj state destinations unmasked; lifecycle persistence across recreation is accepted by Task 7 and runtime-verified by Task 13.</li>
+      </ul>
+    </article>
+
+    <article class="task-spec">
+      <h3>Task 5 — Policy persistence and container metadata</h3>
+      <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Proposed persistent policy config</a>, <a href="git_disablement_and_config_enhancements.html">Policy-file contract</a>, <a href="git_disablement_and_config_enhancements.html">Canonical digest and legacy-label migration</a>, and <a href="git_disablement_and_config_enhancements.html">Policy-label versioning and migration</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Read the four exact policy paths: global <code>~/.config/agentbox/agentbox.toml</code>, machine, project, and machine/project tiers.</li>
+            <li>Parse only the four supported fields: <code>git.enabled</code>, <code>github.grant</code>, <code>ssh.grant_all</code>, and <code>updates.check</code>. Accept blank/comment-only files, LF/CRLF, exact table headers, boolean values, and trailing assignment comments; reject unknown/duplicate/unsupported syntax.</li>
+            <li>Merge fields from global to machine to project to machine/project, with later defined fields overriding earlier fields. Apply CLI over host environment over merged files. Use Git enabled, grants disabled, and update checks enabled as new-container defaults.</li>
+            <li>Compute the exact canonical policy digest over schema version, Git enabled, GitHub grant, and SSH grant; exclude update checks and source formatting.</li>
+            <li>Produce the values for exactly these version-1 policy labels: <code>org.agentbox.policy.version=1</code>, <code>org.agentbox.policy.git_enabled</code>, <code>org.agentbox.policy.github_grant</code>, <code>org.agentbox.policy.ssh_grant_all</code>, and <code>org.agentbox.policy.digest</code>. Parse and classify recorded labels, but leave label emission and mount-consistency verification to Task 7. Migrate valid old grant labels only when no new labels exist; classify malformed, partial, unsupported, contradictory, or digest-mismatched state as stale/invalid.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary</h4>
+          <ul>
+            <li>This task owns merged policy values, source reporting, labels, digest, and legacy migration.</li>
+            <li>Its output is one resolved-policy record with exactly these top-level fields: effective values <code>git_enabled</code>, <code>github_grant</code>, <code>ssh_grant_all</code>, <code>updates_check</code>, and <code>digest</code>; four source-tier/value entries named <code>global</code>, <code>machine</code>, <code>project</code>, and <code>machine_project</code>; <code>label_values</code> containing exactly <code>org.agentbox.policy.version</code>, <code>org.agentbox.policy.git_enabled</code>, <code>org.agentbox.policy.github_grant</code>, <code>org.agentbox.policy.ssh_grant_all</code>, and <code>org.agentbox.policy.digest</code>; and <code>recorded_state</code>.</li>
+            <li><code>recorded_state</code> contains exactly <code>classification</code> (<code>absent</code>, <code>legacy</code>, <code>valid</code>, <code>stale</code>, <code>invalid</code>, or <code>unsupported-version</code>), <code>lifecycle_state</code> (<code>absent</code>, <code>stopped</code>, or <code>running</code>), and <code>mount_consistency</code> (<code>unknown</code>, <code>matching</code>, or <code>contradictory</code>). Task 5 never emits a command decision or performs lifecycle mutation.</li>
+            <li>Task 2 supplies raw control values; Task 3 supplies canonical paths and source checks; Task 6 consumes the resolved policy for command decisions.</li>
+            <li>Do not stop, remove, recreate, or mount containers in this task.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests</h4>
+      <ul>
+        <li>Test all four tiers, field-level inheritance, explicit false overrides, CLI/environment precedence, unset values, new-container defaults, and command-family omissions.</li>
+        <li>Test every accepted and rejected grammar form, exact error location/reason, CRLF input, duplicate assignment, unknown table/key, and invalid host boolean.</li>
+        <li>Test canonical digest bytes and expected hash, equivalent-policy equality, and every container-affecting value change producing a different digest.</li>
+        <li>Test legacy labels, valid complete labels, missing/partial/malformed/higher-version labels, supplied mount-consistency classifications, and digest mismatch classification.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>The same effective input always produces the same merged values and digest regardless of file formatting or source tier.</li>
+        <li>Every invalid policy or label state is reported before mutation and is never silently guessed.</li>
+        <li>The resolved-policy record contains the contributing files, source tiers, effective values, digest, label values, and recorded-state data required by Task 6 and the Task 9 <code>ab config</code> presentation.</li>
+        <li>Task 6 can consume the named resolved-policy fields and recorded-state classification without parsing policy files or Docker labels itself; Task 7 is responsible for emitting labels only after the Task 4 mount specification is applied and verified.</li>
+      </ul>
+    </article>
+
+    <article class="task-spec">
+      <h3>Task 6 — Git policy state and command decisions</h3>
+      <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Launcher entry-point policy scope</a>, <a href="git_disablement_and_config_enhancements.html">Authoritative state and command matrix</a>, <a href="git_disablement_and_config_enhancements.html">Apply atomicity and failure recovery</a>, and <a href="git_disablement_and_config_enhancements.html">Policy-label versioning and migration</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Implement one shared read-only classification before Docker/network/update work for <code>start</code>, <code>start --apply</code>, <code>build</code>, <code>rebuild</code>, <code>exec</code> and convenience commands, and <code>config</code>.</li>
+            <li>Classify containers as absent, stopped/running legacy, stopped/running valid matching, stopped valid different, or stopped/running stale/invalid.</li>
+            <li>Implement the exact command outcomes in the design matrix: ordinary running mismatch refuses; explicit apply reconciles; stale/invalid stopped state requires explicit apply or explicit Git reconciliation input for rebuild; config never mutates.</li>
+            <li>Preserve ordinary policy-free start state for existing containers. For rebuild, omitted grants resolve false; Git state is preserved unless an explicit Git policy input is supplied. <code>--no-cache</code> alone is never reconciliation intent for ambiguous Git state.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary</h4>
+          <ul>
+            <li>This task owns the decision table and pre-mutation refusal/proceed/apply choice.</li>
+            <li>Its input record is the Task 2 raw policy input, Task 3 locked canonical context, Task 5 resolved policy, recorded-state classification, read-only container inspection, and any pre-existing Task 7 operation overlay. The overlay is explicit: <code>operation_status</code> is one of <code>none</code>, <code>in-progress</code>, <code>removal-failed</code>, <code>absent-after-failure</code>, <code>network-degraded</code>, <code>readiness-failed</code>, or <code>complete</code>; <code>readiness_result</code> is <code>not-applicable</code>, <code>ready</code>, <code>failed-but-running</code>, or <code>failed-and-exited</code>. Missing operation records are represented as <code>none</code>/<code>not-applicable</code>, not guessed from container state.</li>
+            <li>Its output is exactly one decision kind: <code>create</code>, <code>start-in-place</code>, <code>reconcile-stopped</code>, <code>reconcile-running</code>, <code>build-recreate</code>, <code>refuse</code>, or <code>report-only</code>, plus <code>reason_code</code>, <code>mutation_allowed</code>, <code>execution_allowed</code>, <code>explicit_exec_mode</code> (<code>allowed</code>, <code>diagnostic-only</code>, or <code>blocked</code>), <code>update_allowed</code>, and <code>explicit_apply_required</code>.</li>
+            <li>The mapping is fixed: <code>absent</code> lifecycle maps to <code>create</code>; stopped matching maps to <code>start-in-place</code>; stopped different maps to <code>reconcile-stopped</code>; running matching maps to <code>start-in-place</code>; running legacy maps to <code>start-in-place</code> only when inferred mounts match, otherwise <code>refuse</code>; explicit apply on a mismatch maps to <code>reconcile-stopped</code> or <code>reconcile-running</code>; build/rebuild maps to <code>build-recreate</code>; config maps to <code>report-only</code>; and stale/invalid state without the required explicit input maps to <code>refuse</code>.</li>
+            <li>After the base state matrix is evaluated, the operation/readiness overlay below is applied before <code>execution_allowed</code> can be true. A non-complete Task 7 operation or failed readiness result therefore cannot be bypassed by a matching policy/container row. This is a decision gate only; Task 7 owns lifecycle recovery and terminal record updates.</li>
+            <li>Task 7 performs the allowed Docker lifecycle operation and owns the minimum durable operation record/readiness interfaces; Task 8 later adds cross-command reporting/recovery integration; Task 9 later presents command-facing results.</li>
+            <li>Every decision must consume one immutable resolved policy snapshot and one read-only container inspection.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Decision table</h4>
+      <table>
+        <thead><tr><th>Existing state</th><th><code>start</code>/<code>exec</code></th><th><code>start --apply</code></th><th><code>build</code>/<code>rebuild</code></th><th><code>config</code></th></tr></thead>
+        <tbody>
+          <tr><td>Absent</td><td>Create/start with resolved policy.</td><td>Same as ordinary start.</td><td>Build image, then create/start with resolved rebuild policy.</td><td>Report absent; do not mutate.</td></tr>
+          <tr><td>Stopped legacy</td><td>Reconcile mounts/labels, preserve named volumes, start.</td><td>Same reconciliation explicitly acknowledged.</td><td>Recreate with complete labels and rebuild grant semantics.</td><td>Report inferred legacy state and deltas; do not mutate.</td></tr>
+          <tr><td>Stopped valid, matching</td><td>Start in place.</td><td>Start in place; no unnecessary recreation.</td><td>Rebuild/recreate using explicit rebuild options.</td><td>Report matching state; do not mutate.</td></tr>
+          <tr><td>Stopped valid, different</td><td>Recreate with resolved policy and preserve named volumes.</td><td>Same result with explicit apply intent.</td><td>Rebuild/recreate with resolved rebuild policy.</td><td>Report exact effective/recorded delta; do not mutate.</td></tr>
+          <tr><td>Stopped stale/invalid</td><td>Refuse before mutation; require explicit apply.</td><td>Use current explicit policy, revoke ambiguous grants, recreate.</td><td>Allow only with explicit Git input (<code>--no-git</code>, <code>AGENTBOX_NO_GIT</code>, or explicit <code>[git] enabled</code>); omitted grants resolve false; <code>--no-cache</code> alone is insufficient.</td><td>Report exact invalidity; do not mutate or update.</td></tr>
+          <tr><td>Running valid, matching</td><td>Proceed without recreation.</td><td>Proceed without recreation unless explicit policy differs.</td><td>Stop/remove/recreate for the rebuild.</td><td>Report matching state; do not mutate.</td></tr>
+          <tr><td>Running legacy, known mounts</td><td>Proceed only if resolved policy exactly matches inferred state; otherwise refuse.</td><td>Warn, stop/remove/recreate, write complete labels.</td><td>Recreate; ambiguous Git still requires explicit Git input and omitted grants resolve false.</td><td>Report inferred state and deltas; do not mutate.</td></tr>
+          <tr><td>Running stale or policy mismatch</td><td>Refuse without stop/remove/network/execution.</td><td>Warn, stop/remove/recreate with resolved policy.</td><td>Recreate; stale/invalid Git still requires explicit Git input; <code>--no-cache</code> alone is insufficient.</td><td>Report exact deltas; do not mutate.</td></tr>
+        </tbody>
+      </table>
+      <h4>Operation/readiness overlay</h4>
+      <table>
+        <thead><tr><th>Task 7 overlay</th><th>Ordinary start/exec/convenience/build/rebuild</th><th>Explicit <code>exec</code></th><th>Mutation/update flags</th></tr></thead>
+        <tbody>
+          <tr><td><code>none</code> or <code>complete</code> with <code>not-applicable</code>/<code>ready</code></td><td>Use the base decision table.</td><td><code>allowed</code> when the base decision permits execution.</td><td>Use the base decision table.</td></tr>
+          <tr><td><code>in-progress</code>, <code>removal-failed</code>, or <code>absent-after-failure</code></td><td><code>refuse</code>; agent execution is blocked and no ordinary update or mutation is allowed.</td><td><code>blocked</code>, unless a fresh read-only inspection proves a usable old container; in that exception it is <code>diagnostic-only</code>.</td><td><code>mutation_allowed=false</code>, <code>execution_allowed=false</code>, <code>update_allowed=false</code>, <code>explicit_apply_required=true</code>.</td></tr>
+          <tr><td><code>network-degraded</code> with an outer container running</td><td><code>refuse</code> for agent/convenience execution; an explicit apply or rebuild may retry the required operation.</td><td><code>diagnostic-only</code>.</td><td><code>mutation_allowed=false</code>, <code>execution_allowed=false</code>, <code>update_allowed=false</code>, <code>explicit_apply_required=true</code>.</td></tr>
+          <tr><td><code>readiness-failed</code> with <code>failed-but-running</code> or <code>failed-and-exited</code></td><td><code>refuse</code> for ordinary agent/convenience execution; nested commands are not considered usable.</td><td><code>diagnostic-only</code> while the outer container is available, otherwise <code>blocked</code>.</td><td><code>mutation_allowed=false</code>, <code>execution_allowed=false</code>, <code>update_allowed=false</code>, <code>explicit_apply_required=true</code>.</td></tr>
+        </tbody>
+      </table>
+      <h4>Tests</h4>
+      <ul>
+        <li>Add mocked state fixtures for absent, stopped/running legacy, valid matching, valid different, stale, invalid, and policy-mismatch states.</li>
+        <li>Exercise every matrix cell for ordinary start/exec, start apply, build/rebuild, and config, including running legacy and ambiguous credentials.</li>
+        <li>Add mocked Task 7 overlays for every operation status and readiness result above; assert that <code>in-progress</code>, removal/absence failure, degraded network, and readiness failure always gate ordinary execution even when the base state is matching, and that explicit <code>exec</code> receives exactly the allowed, diagnostic-only, or blocked mode specified by the overlay.</li>
+        <li>Assert refusal paths call no stop, remove, create, network, update, or execution helper; assert apply paths select reconciliation exactly once.</li>
+        <li>Test <code>start</code>, <code>build</code>, <code>rebuild</code>, <code>claude</code>, <code>codex</code>, <code>bash</code>, and <code>exec</code> share the same decision function and cannot bypass policy through convenience commands.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>Each supported command/state combination has exactly one deterministic outcome.</li>
+        <li>Running containers are never stopped by ordinary start/exec policy mismatch.</li>
+        <li>Ambiguous or stale state is never silently enabled, disabled, or credential-preserved.</li>
+        <li>A pre-existing non-complete Task 7 operation record or failed readiness result always prevents ordinary agent/convenience execution and update/mutation; the named overlay reason and explicit-exec mode are returned without re-running lifecycle work.</li>
+        <li>Read-only config and refusal paths have no Docker/network/update side effect.</li>
+        <li>Every decision has one named decision kind and reason code; no caller needs to infer whether mutation, execution, or update checking is allowed.</li>
+      </ul>
+    </article>
+
+    <article class="task-spec">
+      <h3>Task 7 — Policy application and recreation</h3>
+      <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Authoritative state and command matrix</a>, <a href="git_disablement_and_config_enhancements.html">Apply atomicity and failure recovery</a>, <a href="git_disablement_and_config_enhancements.html">Protected mount destinations and conflicts</a>, and <a href="git_disablement_and_config_enhancements.html">Nested-Docker restart recovery contract</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Apply the resolved policy to absent and stopped containers, and implement explicit stop/remove/recreate for running containers.</li>
+            <li>Use the existing image for policy-only recreation; do not rebuild the image solely because Git or a credential mount changed.</li>
+            <li>Preserve the project bind mount, named inner-Docker volume, and jj volume across policy recreation. Do not promise preservation of container-local filesystem changes.</li>
+            <li>Consume the Task 3 canonical context, Task 4 mount specification, Task 5 resolved policy/labels, and Task 6 decision. Construct the complete container arguments from those records; do not recompute policy or mount destinations.</li>
+            <li>Preserve the existing network selection and attachment semantics: the default/required network failure is fatal, while explicitly optional extra-network failure is returned as a degraded result for Task 8; do not redesign networking in this task.</li>
+            <li>Perform preflight, blocker/source validation, and read-only inspection before the first Docker mutation. Create the durable operation record before any create or before removing an existing container, then update it before and after each lifecycle phase.</li>
+            <li>Use the exact operation-record location and permissions from the design: <code>$XDG_STATE_HOME/agentbox/operations/&lt;sha256(physical-project-path + NUL + machine)&gt;.toml</code>, defaulting to <code>~/.local/state</code>, directory mode <code>0700</code>, record mode <code>0600</code>, temporary-file-plus-atomic-rename writes, and no credential/policy-file contents.</li>
+            <li>The operation record fields are <code>operation_id</code>, <code>started_at</code>, optional <code>completed_at</code>, <code>phase</code>, <code>status</code>, <code>container_name</code>, optional old/new container ids, <code>policy_digest</code>, <code>image_reference</code>, named-volume names, network outcomes, and <code>diagnostic</code>. Phases are <code>preflight</code>, <code>removal</code>, <code>creation</code>, <code>required-network</code>, <code>nested-readiness</code>, and <code>completion</code>; statuses are <code>in-progress</code>, <code>removal-failed</code>, <code>absent-after-failure</code>, <code>network-degraded</code>, <code>readiness-failed</code>, and <code>complete</code>.</li>
+            <li>Expose a readiness adapter with exactly the outcomes <code>ready</code>, <code>failed-but-running</code>, and <code>failed-and-exited</code>. The adapter must verify the outer container and invoke the current nested-Docker readiness hook; Task 11 later supplies the expanded nested-daemon state machine behind this same interface.</li>
+            <li>Task 7 is complete only after the operation record exists before mutation, all required Docker phases have been attempted, the new container’s mounts and labels match the Task 4/5 outputs, and the readiness adapter returns <code>ready</code>. Task 7 failure leaves the terminal record in place; Task 8 may present or clean it only under the record status rules.</li>
+            <li>Its handoff is an <code>operation_result</code> containing the record path, terminal status, <code>task_status</code> (<code>pass</code>, <code>fail</code>, or <code>degraded-fail</code>), <code>agent_execution</code> (<code>allowed</code> or <code>blocked</code>), <code>explicit_exec</code> (<code>allowed</code>, <code>diagnostic-only</code>, or <code>blocked</code>), retry command, <code>record_cleanup</code> (<code>permitted</code> or <code>forbidden</code>), container name/id when known, failed phase when applicable, readiness result, network outcomes, image reference, and preserved volume names.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary</h4>
+          <ul>
+            <li>This task owns Docker stop/remove/create/start/reconcile mechanics, the minimum durable operation-record lifecycle required before mutation, and the readiness-adapter seam for Git-policy changes.</li>
+            <li>Task 6 decides whether this task may run. Task 8 adds cross-command reporting/recovery integration to the record this task creates; it does not make the record optional.</li>
+            <li>Task 11 replaces the readiness adapter’s nested-runtime implementation with the detailed recovery state machine; it does not remove Task 7’s readiness requirement.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Terminal handoff table</h4>
+      <table>
+        <thead><tr><th>Terminal outcome</th><th>Task result</th><th>Agent/convenience use</th><th>Explicit <code>ab exec</code></th><th>Task 8 handoff and cleanup</th></tr></thead>
+        <tbody>
+          <tr><td><code>complete</code> with readiness <code>ready</code></td><td><code>pass</code></td><td>Allowed.</td><td>Allowed.</td><td>Pass the complete record; cleanup permitted after final inspection.</td></tr>
+          <tr><td>Required network, create, or removal failure</td><td><code>fail</code></td><td>Blocked.</td><td>Blocked unless a fresh inspection proves a usable existing container after removal failure; never use an unknown old container.</td><td>Pass the terminal failure record; cleanup forbidden; retry only through explicit apply/rebuild after inspection.</td></tr>
+          <tr><td><code>network-degraded</code> optional-network failure</td><td><code>degraded-fail</code></td><td>Blocked while the non-complete record exists.</td><td><code>diagnostic-only</code> if the outer container is running; network-dependent commands may fail.</td><td>Pass the degraded record; cleanup forbidden; explicit apply/rebuild retries the attachment.</td></tr>
+          <tr><td><code>readiness-failed</code> with <code>failed-but-running</code></td><td><code>fail</code></td><td>Blocked.</td><td><code>diagnostic-only</code>; commands requiring nested Docker return the not-ready diagnostic.</td><td>Pass the readiness result; cleanup forbidden; explicit outer stop/start or the documented retry begins a new cycle.</td></tr>
+          <tr><td><code>readiness-failed</code> with <code>failed-and-exited</code></td><td><code>fail</code></td><td>Blocked.</td><td><code>diagnostic-only</code> while the outer container remains available.</td><td>Pass the terminal readiness result; cleanup forbidden; only the bounded replacement path may retry.</td></tr>
+        </tbody>
+      </table>
+      <h4>Tests</h4>
+      <ul>
+        <li>Mock Docker operations for absent creation, stopped start, stopped reconciliation, running explicit apply, policy-only image reuse, and volume preservation.</li>
+        <li>Test that ordinary running mismatch never calls stop/remove and that apply calls the recreation sequence exactly once.</li>
+        <li>Test mount/label arguments for Git enabled/disabled and each credential-grant combination.</li>
+        <li>Test Docker create, required network, and readiness failures return the failed phase while preserving named-volume identity.</li>
+        <li>Test that the operation record is atomically present before removal, records each phase, contains no credential/policy-file contents, and records removal/create/network/readiness failure outcomes.</li>
+        <li>Test the readiness adapter with each of its three outcomes and verify that completion is impossible unless it returns <code>ready</code>.</li>
+        <li>Test every terminal-handoff row for task result, agent/convenience permission, explicit-exec permission, Task 8 handoff, retry command, and cleanup permission.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>A policy change produces the same logical container name and preserves the project, jj, and inner-Docker named volumes.</li>
+        <li>Policy-only apply does not invoke image build or destroy named volumes.</li>
+        <li>Every created container has mounts and labels matching the resolved policy snapshot.</li>
+        <li>Every policy-application operation creates and updates its durable operation record before its first Docker mutation; a successful record is cleaned up only after mount/label inspection and readiness succeed.</li>
+        <li>Failures stop before unauthorized later phases and expose phase/container/volume information through the Task 7 record for Tasks 8 and 9.</li>
+        <li>Each terminal outcome has exactly one operation result and permission set from the handoff table; no later task needs to infer whether the container may be used or the record may be removed.</li>
+      </ul>
+    </article>
+
+    <h2>Task review handoff</h2>
+    <section class="callout">
+      For each task 1–7, Luna’s handoff must list the changed files, explicitly identify any requested out-of-scope change, show the task-local test commands and results, and map every acceptance criterion to evidence. The reviewer must verify that no later-task behavior was smuggled into the task, that the mandatory shell checks pass, and that the implementation matches the task’s stated boundaries. A task is accepted only when both the implementation evidence and the reviewer’s criterion-by-criterion result are present.
+    </section>
+
+    <p class="note">Ordering is provisional until implementation begins. The critical path is tasks 1–7; supporting tasks 8–11 must not become accidental prerequisites for beginning the core Git-disablement work. Reordering a task requires updating its dependency column and preserving the separation between this breakdown and the detailed specification.</p>
+
+    <footer>This is an implementation breakdown with executable specifications for tasks 1–7, not the complete system behavioral specification.</footer>
+  </main>
+</body>
+</html>
