@@ -152,18 +152,31 @@ policy_cli_git_enabled=""
 policy_cli_grant_gh=""
 policy_cli_grant_all_of_dot_ssh=""
 unset AGENTBOX_NO_GIT AGENTBOX_GRANT_GH AGENTBOX_GRANT_ALL_OF_DOT_SSH AGENTBOX_NO_UPDATE_CHECK
+policy_input_reset
 policy_load_host
 assert_eq "policy field inheritance" "0" "$policy_git_enabled"
 assert_eq "policy machine/project override" "1" "$policy_grant_gh"
 assert_eq "policy project field" "1" "$policy_grant_all_of_dot_ssh"
 AGENTBOX_NO_GIT=0
 export AGENTBOX_NO_GIT
+policy_input_reset
 policy_load_host
 assert_eq "explicit Git env re-enable" "1" "$policy_git_enabled"
 AGENTBOX_NO_GIT=maybe
+policy_input_reset
 assert_eq "invalid policy env rejected" "1" "$(policy_load_host >/dev/null 2>&1; echo $?)"
 unset AGENTBOX_NO_GIT
+printf '%s\n' 'AGENTBOX_GRANT_GH=invalid' >"$_policy_root/env"
+AGENTBOX_GRANT_GH=0
+export AGENTBOX_GRANT_GH
+policy_input_reset
+policy_load_host >/dev/null 2>&1; _policy_env_rc=$?
+assert_eq "container env file is not policy input" "0" "$_policy_env_rc"
+assert_eq "host policy wins over container env file" "0" "$policy_grant_gh"
+rm -f "$_policy_root/env"
+unset AGENTBOX_GRANT_GH
 printf '%s\n' '[unknown]' 'value = true' >"$_policy_root/agentbox.toml"
+policy_input_reset
 assert_eq "unknown policy table rejected" "1" "$(policy_load_host >/dev/null 2>&1; echo $?)"
 assert_eq "canonical policy digest stable" "$(policy_digest_for 1 0 0)" "$(policy_digest_for 1 0 0)"
 assert_eq "Git blocker mode" "755" "$(stat -c '%a' "$GIT_BLOCKER")"
@@ -569,6 +582,85 @@ assert_eq "gh grant label enabled" "--label agentbox.grant-gh=1" "${grant_labels
 HOME="$_saved_home"
 mounts=("${_saved_mounts[@]}")
 rm -rf "$_state_home"
+
+echo
+echo "raw policy input capture (bin/ab)"
+unset AGENTBOX_NO_GIT AGENTBOX_GRANT_GH AGENTBOX_GRANT_ALL_OF_DOT_SSH
+policy_input_reset
+_raw_unset="$(printf '%s\n' \
+  cli_git_enabled=unset cli_grant_gh=unset cli_grant_ssh=unset \
+  env_git_enabled=unset env_grant_gh=unset env_grant_ssh=unset)"
+assert_eq "raw record has six unset fields" "$_raw_unset" "$(policy_input_record)"
+
+for value in 1 true yes on TRUE YES ON; do
+  AGENTBOX_NO_GIT="$value"; export AGENTBOX_NO_GIT
+  policy_input_reset; policy_input_capture_env
+  assert_eq "no-git true spelling $value" false "${policy_input[env_git_enabled]}"
+done
+for value in 0 false no off FALSE NO OFF; do
+  AGENTBOX_NO_GIT="$value"; export AGENTBOX_NO_GIT
+  policy_input_reset; policy_input_capture_env
+  assert_eq "no-git false spelling $value" true "${policy_input[env_git_enabled]}"
+done
+for value in 1 true yes on TRUE YES ON; do
+  AGENTBOX_GRANT_GH="$value"; export AGENTBOX_GRANT_GH
+  policy_input_reset; policy_input_capture_env
+  assert_eq "grant-gh true spelling $value" true "${policy_input[env_grant_gh]}"
+done
+for value in 0 false no off FALSE NO OFF; do
+  AGENTBOX_GRANT_GH="$value"; export AGENTBOX_GRANT_GH
+  policy_input_reset; policy_input_capture_env
+  assert_eq "grant-gh false spelling $value" false "${policy_input[env_grant_gh]}"
+done
+for value in 1 true yes on TRUE YES ON; do
+  AGENTBOX_GRANT_ALL_OF_DOT_SSH="$value"; export AGENTBOX_GRANT_ALL_OF_DOT_SSH
+  policy_input_reset; policy_input_capture_env
+  assert_eq "grant-ssh true spelling $value" true "${policy_input[env_grant_ssh]}"
+done
+for value in 0 false no off FALSE NO OFF; do
+  AGENTBOX_GRANT_ALL_OF_DOT_SSH="$value"; export AGENTBOX_GRANT_ALL_OF_DOT_SSH
+  policy_input_reset; policy_input_capture_env
+  assert_eq "grant-ssh false spelling $value" false "${policy_input[env_grant_ssh]}"
+done
+unset AGENTBOX_NO_GIT AGENTBOX_GRANT_GH AGENTBOX_GRANT_ALL_OF_DOT_SSH
+policy_input_reset
+parse_runtime_options start --no-git --grant-gh --grant-all-of-dot-ssh --no-git
+assert_eq "start captures CLI Git false" false "${policy_input[cli_git_enabled]}"
+assert_eq "start captures CLI GitHub true" true "${policy_input[cli_grant_gh]}"
+assert_eq "start captures CLI SSH true" true "${policy_input[cli_grant_ssh]}"
+parse_runtime_options rebuild --no-cache --grant-gh
+assert_eq "rebuild captures CLI Git unset" unset "${policy_input[cli_git_enabled]}"
+assert_eq "rebuild captures CLI GitHub true" true "${policy_input[cli_grant_gh]}"
+assert_eq "rebuild captures CLI SSH unset" unset "${policy_input[cli_grant_ssh]}"
+parse_exec_options exec --no-git --grant-gh echo hello
+assert_eq "exec captures policy prefix" "false true unset" \
+  "${policy_input[cli_git_enabled]} ${policy_input[cli_grant_gh]} ${policy_input[cli_grant_ssh]}"
+assert_eq "exec preserves command arguments" "echo hello" "${policy_command_args[*]}"
+parse_convenience_options claude --grant-gh --no-git --resume
+assert_eq "claude captures policy flags" "true false unset" \
+  "${policy_input[cli_grant_gh]} ${policy_input[cli_git_enabled]} ${policy_input[cli_grant_ssh]}"
+assert_eq "claude preserves command arguments" "claude --resume" "${policy_command_args[*]}"
+parse_convenience_options codex --grant-all-of-dot-ssh --model o3
+assert_eq "codex captures SSH grant" true "${policy_input[cli_grant_ssh]}"
+assert_eq "codex preserves command arguments" "codex --model o3" "${policy_command_args[*]}"
+parse_convenience_options bash -- --no-git
+assert_eq "bash delimiter preserves command argument" "bash --no-git" "${policy_command_args[*]}"
+
+_saved_docker_fn="$(declare -f docker 2>/dev/null || true)"
+_saved_update_fn="$(declare -f check_for_update 2>/dev/null || true)"
+policy_test_docker_calls=0
+policy_test_update_calls=0
+docker() { policy_test_docker_calls=$((policy_test_docker_calls + 1)); return 1; }
+check_for_update() { policy_test_update_calls=$((policy_test_update_calls + 1)); return 0; }
+AGENTBOX_GRANT_GH=invalid; export AGENTBOX_GRANT_GH
+policy_input_reset
+assert_eq "invalid policy fails preflight" "1" "$(policy_preflight start >/dev/null 2>&1; echo $?)"
+assert_eq "invalid policy skips Docker" "0" "$policy_test_docker_calls"
+assert_eq "invalid policy skips update check" "0" "$policy_test_update_calls"
+unset AGENTBOX_GRANT_GH
+unset -f docker check_for_update
+[ -n "$_saved_docker_fn" ] && eval "$_saved_docker_fn"
+[ -n "$_saved_update_fn" ] && eval "$_saved_update_fn"
 
 echo
 echo "runtime grant options (bin/ab)"

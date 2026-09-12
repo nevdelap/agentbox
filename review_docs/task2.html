@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Task 2</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --good: light-dark(#18734b, #79d4a6); --good-soft: light-dark(#eaf8f0, #183326); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1000px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--good); }
+    .hero strong { color: var(--good); font-size: 1.08rem; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS IMPLEMENTATION REVIEW</div>
+      <h1>Task 2 review</h1>
+      <p class="meta">jj current Task 2 working-copy revision <code>a4a2e16b</code> · change <code>vzoopyno</code> · reviewed 2026-09-12</p>
+    </header>
+
+    <section class="hero">
+      <strong>Disposition: accepted.</strong>
+      <p>The Task 2 implementation captures and validates the raw host policy controls, preserves unset/true/false state, and prevents invalid policy input from reaching Docker or update-check work.</p>
+      <p><strong>Quality grade: A+</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Reviewed scope</h2>
+    <p>The reviewed jj revision changes <a href="../bin/ab"><code>bin/ab</code></a> and <a href="../tests/run.sh"><code>tests/run.sh</code></a>. The review is limited to Task 2; the Task 1 baseline, CI follow-ups, and later Task 3+ behavior are not attributed to this disposition.</p>
+
+    <h2>Acceptance review</h2>
+    <table>
+      <thead><tr><th>Task 2 requirement</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>Six-field raw policy record</td><td>Pass</td><td><code>policy_input</code> always exposes <code>cli_git_enabled</code>, <code>cli_grant_gh</code>, <code>cli_grant_ssh</code>, <code>env_git_enabled</code>, <code>env_grant_gh</code>, and <code>env_grant_ssh</code>.</td></tr>
+        <tr><td>CLI capture</td><td>Pass</td><td><code>--no-git</code>, <code>--grant-gh</code>, and <code>--grant-all-of-dot-ssh</code> are captured for start/build/rebuild, exec, and convenience command paths.</td></tr>
+        <tr><td>Environment capture and validation</td><td>Pass</td><td>All required boolean spellings are accepted case-insensitively; invalid values fail deterministically; <code>AGENTBOX_NO_GIT</code> is inverted into the Git-enabled field.</td></tr>
+        <tr><td>Unset/false distinction</td><td>Pass</td><td>Raw fields retain <code>unset</code>, <code>true</code>, or <code>false</code> until policy resolution consumes them.</td></tr>
+        <tr><td>Host/container environment separation</td><td>Pass</td><td>Tests verify that a container <code>env</code> file does not provide policy input.</td></tr>
+        <tr><td>No side effects on invalid input</td><td>Pass</td><td>Mocked tests verify invalid policy input returns non-zero without Docker or update-check calls.</td></tr>
+        <tr><td>Task boundary</td><td>Pass</td><td>No new persistent-file schema, mount construction, label emission, or lifecycle mutation was added by this Task 2 revision.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Findings</h2>
+    <p>No actionable findings. The implementation matches the Task 2 contract and keeps persistent resolution, mounts, labels, and lifecycle decisions assigned to later tasks.</p>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code></td><td>Pass.</td></tr>
+        <tr><td><code>bash tests/run.sh</code></td><td>Pass: all 241 tests passed under <code>umask 022</code>.</td></tr>
+        <tr><td>Invalid preflight side-effect check</td><td>Pass: invalid policy returned non-zero with Docker calls <code>0</code> and update-check calls <code>0</code>.</td></tr>
+        <tr><td>Argument-boundary checks</td><td>Pass: policy prefixes are captured while command arguments after <code>--</code> remain intact.</td></tr>
+      </tbody>
+    </table>
+
+    <footer>Rufus Task 2 review. Task 2 is accepted; later tasks remain subject to independent review against their own contracts.</footer>
+  </main>
+</body>
+</html>
