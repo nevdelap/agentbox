@@ -728,15 +728,17 @@ add_host_config_mounts
 # behavior. The blocker is a read-only bind mount, so changing this policy requires container
 # recreation but never an image rebuild.
 add_policy_mounts() {
-  if [ "$policy_git_enabled" = 1 ]; then
-    if [ -f "$HOME/.gitconfig" ]; then
-      mounts+=(-v "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro")
-    elif [ -f "$HOME/.config/git/config" ]; then
-      mounts+=(-v "$HOME/.config/git/config:/home/agentbox/.config/git/config:ro")
-    fi
-  else
-    mounts+=(--mount "type=bind,src=$GIT_BLOCKER,dst=/usr/bin/git,readonly")
-  fi
+  mount_spec_build
+  case "${mount_spec_state[git_config]}" in
+    ro)
+      mounts+=(-v "${mount_spec_source[git_config]}:${mount_spec_destination[git_config]}:ro")
+      ;;
+  esac
+  case "${mount_spec_state[git_blocker]}" in
+    ro)
+      mounts+=(--mount "type=bind,src=${mount_spec_source[git_blocker]},dst=${mount_spec_destination[git_blocker]},readonly")
+      ;;
+  esac
 }
 
 # JJ_CONFIG overrides jj's default user-config search paths. That lets the host's user config
@@ -1399,6 +1401,98 @@ grant_sources_recheck() {
   }
 }
 
+# The policy mount specification is the one source of truth for the protected mounts assembled
+# below. Keep the keys and their order stable: callers/tests can inspect the complete decision
+# without depending on the incidental order of the Docker argument array. An absent source is
+# represented by `none`; the git_config destination lists both protected config candidates when
+# neither is selected, making the no-Git omission explicit.
+mount_spec_keys=(git_blocker git_config github_config ssh_dir known_hosts custom_conflicts)
+declare -A mount_spec_source=()
+declare -A mount_spec_destination=()
+declare -A mount_spec_state=()
+
+mount_spec_reset() {
+  local key
+  for key in "${mount_spec_keys[@]}"; do
+    mount_spec_source["$key"]=none
+    mount_spec_destination["$key"]=none
+    mount_spec_state["$key"]=absent
+  done
+  mount_spec_destination[git_blocker]=/usr/bin/git
+  mount_spec_destination[git_config]='/home/agentbox/.gitconfig|/home/agentbox/.config/git/config'
+  mount_spec_destination[github_config]=/home/agentbox/.config/gh
+  mount_spec_destination[ssh_dir]=/home/agentbox/.ssh
+  mount_spec_destination[known_hosts]=/home/agentbox/.ssh/known_hosts
+}
+mount_spec_reset
+
+mount_spec_set() {
+  local key="$1" source="$2" destination="$3" state="$4"
+  mount_spec_source["$key"]="$source"
+  mount_spec_destination["$key"]="$destination"
+  mount_spec_state["$key"]="$state"
+}
+
+# Print `key<TAB>source<TAB>destination<TAB>state` in the normative fixed order.
+mount_spec_record() {
+  local key
+  for key in "${mount_spec_keys[@]}"; do
+    printf '%s\t%s\t%s\t%s\n' \
+      "$key" "${mount_spec_source[$key]}" "${mount_spec_destination[$key]}" "${mount_spec_state[$key]}"
+  done
+}
+
+# Resolve and validate the policy-owned mounts. This function only records decisions; the
+# consumer functions append the corresponding Docker arguments after all retry-capable policy
+# checks have completed. It deliberately does not create credential sources.
+mount_spec_build() {
+  local git_source gh_source ssh_source known_hosts_source
+  mount_spec_reset
+
+  if [ "$policy_git_enabled" = 1 ]; then
+    if [ -f "$HOME/.gitconfig" ]; then
+      git_source="$HOME/.gitconfig"
+      mount_spec_set git_config "$git_source" /home/agentbox/.gitconfig ro
+    elif [ -f "$HOME/.config/git/config" ]; then
+      git_source="$HOME/.config/git/config"
+      mount_spec_set git_config "$git_source" /home/agentbox/.config/git/config ro
+    fi
+  else
+    validate_git_blocker || return 1
+    mount_spec_set git_blocker "$GIT_BLOCKER" /usr/bin/git ro
+  fi
+
+  if [ "$policy_grant_gh" = 1 ]; then
+    gh_source="$HOME/.config/gh"
+    grant_source_dir_safe "$gh_source" "GitHub" || return 1
+    mount_spec_set github_config "$gh_source" /home/agentbox/.config/gh rw
+  fi
+
+  if [ "$policy_grant_all_of_dot_ssh" = 1 ]; then
+    ssh_source="$HOME/.ssh"
+    grant_source_dir_safe "$ssh_source" "SSH" || return 1
+    mount_spec_set ssh_dir "$ssh_source" /home/agentbox/.ssh ro
+    known_hosts_source="$HOME/.ssh/known_hosts"
+    if [ -e "$known_hosts_source" ] || [ -L "$known_hosts_source" ]; then
+      grant_source_file_safe "$known_hosts_source" || return 1
+      mount_spec_set known_hosts "$known_hosts_source" /home/agentbox/.ssh/known_hosts rw
+    fi
+  fi
+
+  # Custom destinations are validated during policy preflight and rechecked immediately before
+  # user mounts are appended. The fixed absent record is the valid mount-spec result; an invalid
+  # custom file never reaches Docker argument construction.
+}
+
+# Validate the complete mount boundary for callers that are assembling a specification outside
+# the normal policy preflight path (the normal path performs this check before Docker inspection).
+mount_spec_validate() {
+  mount_spec_build || return 1
+  if [ -n "${cfg_mounts:-}" ]; then
+    validate_custom_mounts || return 1
+  fi
+}
+
 prepare_host_state() {
   # Docker creates missing -v sources as root-owned directories. Create the state dirs as the
   # invoking user so installed tools can write auth, config, sessions, and history to the host
@@ -1406,6 +1500,7 @@ prepare_host_state() {
   mkdir -p "$HOME/.claude" "$HOME/.codex"
   grant_gh="$policy_grant_gh"
   grant_all_of_dot_ssh="$policy_grant_all_of_dot_ssh"
+  mount_spec_build
   policy_labels=(
     --label "org.agentbox.policy.version=1"
     --label "org.agentbox.policy.git_enabled=$(policy_bool_text "$policy_git_enabled")"
@@ -1419,15 +1514,20 @@ prepare_host_state() {
     "${policy_labels[@]}"
   )
   if [ "$grant_gh" = 1 ]; then
-    mkdir -p "$HOME/.config/gh"
-    mounts+=(-v "$HOME/.config/gh:/home/agentbox/.config/gh")
+    [ "${mount_spec_state[github_config]}" = rw ] || {
+      policy_fail "GitHub grant mount specification is not writable"; return 1;
+    }
+    mounts+=(-v "${mount_spec_source[github_config]}:${mount_spec_destination[github_config]}")
   fi
-  if [ "$grant_all_of_dot_ssh" = 1 ] && [ -d "$HOME/.ssh" ]; then
-    mounts+=(-v "$HOME/.ssh:/home/agentbox/.ssh:ro")
+  if [ "$grant_all_of_dot_ssh" = 1 ]; then
+    [ "${mount_spec_state[ssh_dir]}" = ro ] || {
+      policy_fail "SSH grant mount specification is absent"; return 1;
+    }
+    mounts+=(-v "${mount_spec_source[ssh_dir]}:${mount_spec_destination[ssh_dir]}:ro")
     # Keep SSH's learned-host state persistent and writable while the rest of the credential
     # directory remains read-only. Missing host files are deliberately not created or mounted.
-    if [ -f "$HOME/.ssh/known_hosts" ]; then
-      mounts+=(-v "$HOME/.ssh/known_hosts:/home/agentbox/.ssh/known_hosts")
+    if [ "${mount_spec_state[known_hosts]}" = rw ]; then
+      mounts+=(-v "${mount_spec_source[known_hosts]}:${mount_spec_destination[known_hosts]}")
     fi
   fi
 }
