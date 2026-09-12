@@ -11,6 +11,10 @@ requirements as the source of truth.
 - Read the relevant design documents before changing code.
 - Confirm the current repository state, including whether it is a Jujutsu repository and
   which bookmark or remote reference is the task’s starting point.
+- Before starting every task, fetch the latest refs from `origin`, verify the resulting
+  `main@origin`, and base the task directly on that commit. This is especially mandatory
+  when the task depends on the previous task, because a locally cached `main@origin` may
+  not include the dependency’s merged changes.
 - Implement only the assigned task and preserve unrelated user or reviewer changes.
 - Keep each task as exactly one Jujutsu change based directly on `main@origin`.
   Rebase it onto `main@origin` before handoff, and use a task bookmark for
@@ -122,11 +126,26 @@ independent assessment, finding record, quality grade, and acceptance dispositio
 role silently takes over the other’s work, and both identify the exact Jujutsu commit whenever
 the shared task change changes.
 
-This is a living roles document. Igor and Rufus may refine it as they improve their work and
-learn from the implementation and review loop. They work independently within their stated
-responsibilities and together when coordinating handoffs, findings, fixes, and acceptance.
-Approved role-document updates may be included in the active task’s single Jujutsu change as
-the work progresses; they do not require a separate task or review-only change.
+This is a shared, jointly maintained living roles document. Igor and Rufus may both propose and
+approve refinements as they improve their work and learn from the implementation and review
+loop. They work independently within their stated responsibilities and together when
+coordinating handoffs, findings, fixes, and acceptance. The document defines shared process and
+ownership; it is not production-task behavior.
+
+Either role may push back on a change made by the other when it conflicts with the design
+contract, task boundary, safety requirements, or agreed process. The concern should be stated
+with concrete evidence and resolved through the handoff/review loop; neither role may silently
+override the other’s documented responsibility.
+
+The user is the ultimate arbiter. When Igor and Rufus disagree, or when a decision requires
+authorization beyond the documented role contract, the user’s explicit direction determines the
+outcome.
+
+An explicitly approved role-document update may be included in the active task’s single
+Jujutsu change as the work progresses. Such an approved shared-document update is not an
+unrelated scope violation and does not require a separate task or review-only change. The
+implementation handoff and review record should identify the update and its approval so that
+the shared change remains clear to both roles.
 
 ### Remote handoff safeguards
 
