@@ -62,6 +62,18 @@ policy_recorded_grant_gh=""
 policy_recorded_grant_all_of_dot_ssh=""
 policy_recorded_digest=""
 policy_recorded_detail=""
+policy_recorded_classification="absent"
+policy_recorded_lifecycle_state="absent"
+policy_recorded_mount_consistency="unknown"
+policy_mount_consistency="unknown"
+# Task 5's resolved-policy record is deliberately data-only. Later tasks may consume it, but
+# constructing this record never decides whether to mutate a container or executes a command.
+policy_tier_names=(global machine project machine_project)
+declare -A policy_tier_path=() policy_tier_state=()
+declare -A policy_tier_git_enabled=() policy_tier_grant_gh=()
+declare -A policy_tier_grant_all_of_dot_ssh=() policy_tier_updates_check=()
+declare -A policy_resolved_effective=() policy_resolved_source=()
+declare -A policy_resolved_labels=()
 policy_needs_recreate=0
 policy_cli_git_enabled=""
 policy_cli_grant_gh=""
@@ -509,48 +521,137 @@ policy_lock_acquire() {
   }
 }
 
+# Reset and populate the deterministic Task 5 record. The source tier entries retain every tier,
+# including absent files and omitted fields, so consumers never have to reparse TOML to explain a
+# resolved value.
+policy_resolved_reset() {
+  local tier
+  policy_tier_path=()
+  policy_tier_state=()
+  policy_tier_git_enabled=()
+  policy_tier_grant_gh=()
+  policy_tier_grant_all_of_dot_ssh=()
+  policy_tier_updates_check=()
+  policy_resolved_effective=()
+  policy_resolved_source=()
+  policy_resolved_labels=()
+  for tier in "${policy_tier_names[@]}"; do
+    policy_tier_path["$tier"]=""
+    policy_tier_state["$tier"]=absent
+    policy_tier_git_enabled["$tier"]="unset"
+    policy_tier_grant_gh["$tier"]="unset"
+    policy_tier_grant_all_of_dot_ssh["$tier"]="unset"
+    policy_tier_updates_check["$tier"]="unset"
+  done
+  policy_recorded_classification=absent
+  policy_recorded_lifecycle_state=absent
+  policy_recorded_mount_consistency=unknown
+}
+
+policy_resolved_source_value() {
+  local source="$1" tier
+  case "$source" in
+    cli|environment|default|recorded|rebuild-default) printf '%s' "$source"; return 0 ;;
+  esac
+  for tier in "${policy_tier_names[@]}"; do
+    [ "${policy_tier_path[$tier]}" = "$source" ] && { printf '%s' "$tier"; return 0; }
+  done
+  printf '%s' "$source"
+}
+
+policy_resolved_update() {
+  policy_resolved_effective[git_enabled]="$(policy_bool_text "$policy_git_enabled")"
+  policy_resolved_effective[github_grant]="$(policy_bool_text "$policy_grant_gh")"
+  policy_resolved_effective[ssh_grant_all]="$(policy_bool_text "$policy_grant_all_of_dot_ssh")"
+  policy_resolved_effective[updates_check]="$(policy_bool_text "$policy_updates_check")"
+  policy_resolved_effective[digest]="sha256:$(policy_digest_for "$policy_git_enabled" "$policy_grant_gh" "$policy_grant_all_of_dot_ssh")"
+  policy_resolved_source[git_enabled]="$(policy_resolved_source_value "$policy_git_source")"
+  policy_resolved_source[github_grant]="$(policy_resolved_source_value "$policy_grant_gh_source")"
+  policy_resolved_source[ssh_grant_all]="$(policy_resolved_source_value "$policy_grant_all_of_dot_ssh_source")"
+  policy_resolved_source[updates_check]="$(policy_resolved_source_value "$policy_updates_source")"
+  policy_resolved_labels[org.agentbox.policy.version]=1
+  policy_resolved_labels[org.agentbox.policy.git_enabled]="${policy_resolved_effective[git_enabled]}"
+  policy_resolved_labels[org.agentbox.policy.github_grant]="${policy_resolved_effective[github_grant]}"
+  policy_resolved_labels[org.agentbox.policy.ssh_grant_all]="${policy_resolved_effective[ssh_grant_all]}"
+  policy_resolved_labels[org.agentbox.policy.digest]="${policy_resolved_effective[digest]}"
+}
+
+# Emit one stable, flat representation of the resolved-policy record. Dotted keys make the five
+# normative top-level fields explicit while remaining usable by shell tests and later consumers.
+policy_resolved_record() {
+  local tier
+  printf 'effective.git_enabled=%s\n' "${policy_resolved_effective[git_enabled]}"
+  printf 'effective.github_grant=%s\n' "${policy_resolved_effective[github_grant]}"
+  printf 'effective.ssh_grant_all=%s\n' "${policy_resolved_effective[ssh_grant_all]}"
+  printf 'effective.updates_check=%s\n' "${policy_resolved_effective[updates_check]}"
+  printf 'effective.digest=%s\n' "${policy_resolved_effective[digest]}"
+  for tier in "${policy_tier_names[@]}"; do
+    printf '%s.path=%s\n' "$tier" "${policy_tier_path[$tier]}"
+    printf '%s.state=%s\n' "$tier" "${policy_tier_state[$tier]}"
+    printf '%s.git_enabled=%s\n' "$tier" "${policy_tier_git_enabled[$tier]}"
+    printf '%s.github_grant=%s\n' "$tier" "${policy_tier_grant_gh[$tier]}"
+    printf '%s.ssh_grant_all=%s\n' "$tier" "${policy_tier_grant_all_of_dot_ssh[$tier]}"
+    printf '%s.updates_check=%s\n' "$tier" "${policy_tier_updates_check[$tier]}"
+  done
+  printf 'source.git_enabled=%s\n' "${policy_resolved_source[git_enabled]}"
+  printf 'source.github_grant=%s\n' "${policy_resolved_source[github_grant]}"
+  printf 'source.ssh_grant_all=%s\n' "${policy_resolved_source[ssh_grant_all]}"
+  printf 'source.updates_check=%s\n' "${policy_resolved_source[updates_check]}"
+  printf 'label_values.org.agentbox.policy.version=%s\n' "${policy_resolved_labels[org.agentbox.policy.version]}"
+  printf 'label_values.org.agentbox.policy.git_enabled=%s\n' "${policy_resolved_labels[org.agentbox.policy.git_enabled]}"
+  printf 'label_values.org.agentbox.policy.github_grant=%s\n' "${policy_resolved_labels[org.agentbox.policy.github_grant]}"
+  printf 'label_values.org.agentbox.policy.ssh_grant_all=%s\n' "${policy_resolved_labels[org.agentbox.policy.ssh_grant_all]}"
+  printf 'label_values.org.agentbox.policy.digest=%s\n' "${policy_resolved_labels[org.agentbox.policy.digest]}"
+  printf 'recorded_state.classification=%s\n' "$policy_recorded_classification"
+  printf 'recorded_state.lifecycle_state=%s\n' "$policy_recorded_lifecycle_state"
+  printf 'recorded_state.mount_consistency=%s\n' "$policy_recorded_mount_consistency"
+}
+
 # Parse the intentionally small, strict TOML policy schema. This accepts TOML table headers,
 # boolean assignments, whitespace, and trailing comments; all other syntax is rejected before
-# Docker or the update check is reached.
+# Docker or the update check is reached. Diagnostics always identify the source line.
 policy_parse_file() {
-  local file="$1" line t table key value input
+  local file="$1" line t table key value input var line_number=0
   local -A seen=()
   policy_parsed_git_enabled=""
   policy_parsed_grant_gh=""
   policy_parsed_grant_all_of_dot_ssh=""
   policy_parsed_updates_check=""
+  table=""
   if [ "${policy_snapshot_state[$file]:-}" = regular ]; then
     input="${policy_snapshot_content[$file]}"
   else
     input="$(<"$file")"
   fi
   while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    line="${line%$'\r'}"
     t="${line#"${line%%[![:space:]]*}"}"
     t="${t%"${t##*[![:space:]]}"}"
     [ -n "$t" ] || continue
     case "$t" in \#*) continue ;; esac
     if [[ "$t" =~ ^\[([a-z]+)\]$ ]]; then
       table="${BASH_REMATCH[1]}"
-      case "$table" in git|github|ssh|updates) ;; *) policy_fail "$file: unknown table [$table]"; return 1 ;; esac
+      case "$table" in git|github|ssh|updates) ;; *) policy_fail "$file:$line_number: unknown table [$table]"; return 1 ;; esac
       continue
     fi
-    [[ "$t" == *=* ]] || { policy_fail "$file: expected [table] or key = true|false: $t"; return 1; }
+    [[ "$t" == *=* ]] || { policy_fail "$file:$line_number: expected [table] or key = true|false: $t"; return 1; }
     key="${t%%=*}"; value="${t#*=}"
     key="${key%"${key##*[![:space:]]}"}"
     key="${key#"${key%%[![:space:]]*}"}"
     value="${value%%#*}"
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
-    [ -n "${table:-}" ] || { policy_fail "$file: key outside a recognized table: $key"; return 1; }
+    [ -n "${table:-}" ] || { policy_fail "$file:$line_number: key outside a recognized table: $key"; return 1; }
     case "$table.$key" in
       git.enabled) var=policy_parsed_git_enabled ;;
       github.grant) var=policy_parsed_grant_gh ;;
       ssh.grant_all) var=policy_parsed_grant_all_of_dot_ssh ;;
       updates.check) var=policy_parsed_updates_check ;;
-      *) policy_fail "$file: unknown key $table.$key"; return 1 ;;
+      *) policy_fail "$file:$line_number: unknown key $table.$key"; return 1 ;;
     esac
-    [ -z "${seen[$table.$key]+x}" ] || { policy_fail "$file: duplicate key $table.$key"; return 1; }
-    case "$value" in true|false) ;; *) policy_fail "$file: $table.$key must be true or false"; return 1 ;; esac
+    [ -z "${seen[$table.$key]+x}" ] || { policy_fail "$file:$line_number: duplicate key $table.$key"; return 1; }
+    case "$value" in true|false) ;; *) policy_fail "$file:$line_number: $table.$key must be true or false"; return 1 ;; esac
     seen[$table.$key]=1
     printf -v "$var" '%s' "$value"
   done <<< "$input"
@@ -565,15 +666,33 @@ policy_load_files() {
   policy_grant_gh_source="default"
   policy_grant_all_of_dot_ssh_source="default"
   policy_updates_source="default"
-  local file
+  local file tier
+  local tier_index=0
+  policy_resolved_reset
   policy_snapshot_take || return 1
   for file in "${policy_snapshot_paths[@]}"; do
+    tier="${policy_tier_names[$tier_index]}"
+    policy_tier_path["$tier"]="$file"
+    policy_tier_state["$tier"]="${policy_snapshot_state[$file]}"
+    tier_index=$((tier_index + 1))
     [ "${policy_snapshot_state[$file]}" = regular ] || continue
     policy_parse_file "$file" || return 1
-    if [ -n "$policy_parsed_git_enabled" ]; then policy_file_git_enabled="$policy_parsed_git_enabled"; policy_git_source="$file"; fi
-    if [ -n "$policy_parsed_grant_gh" ]; then policy_file_grant_gh="$policy_parsed_grant_gh"; policy_grant_gh_source="$file"; fi
-    if [ -n "$policy_parsed_grant_all_of_dot_ssh" ]; then policy_file_grant_all_of_dot_ssh="$policy_parsed_grant_all_of_dot_ssh"; policy_grant_all_of_dot_ssh_source="$file"; fi
-    if [ -n "$policy_parsed_updates_check" ]; then policy_file_updates_check="$policy_parsed_updates_check"; policy_updates_source="$file"; fi
+    if [ -n "$policy_parsed_git_enabled" ]; then
+      policy_file_git_enabled="$policy_parsed_git_enabled"; policy_git_source="$file"
+      policy_tier_git_enabled["$tier"]="$policy_parsed_git_enabled"
+    fi
+    if [ -n "$policy_parsed_grant_gh" ]; then
+      policy_file_grant_gh="$policy_parsed_grant_gh"; policy_grant_gh_source="$file"
+      policy_tier_grant_gh["$tier"]="$policy_parsed_grant_gh"
+    fi
+    if [ -n "$policy_parsed_grant_all_of_dot_ssh" ]; then
+      policy_file_grant_all_of_dot_ssh="$policy_parsed_grant_all_of_dot_ssh"; policy_grant_all_of_dot_ssh_source="$file"
+      policy_tier_grant_all_of_dot_ssh["$tier"]="$policy_parsed_grant_all_of_dot_ssh"
+    fi
+    if [ -n "$policy_parsed_updates_check" ]; then
+      policy_file_updates_check="$policy_parsed_updates_check"; policy_updates_source="$file"
+      policy_tier_updates_check["$tier"]="$policy_parsed_updates_check"
+    fi
   done
 }
 
@@ -617,6 +736,7 @@ policy_load_host() {
   [ -n "$policy_cli_git_enabled" ] && policy_git_enabled="$policy_cli_git_enabled" && policy_git_source=cli
   [ -n "$policy_cli_grant_gh" ] && policy_grant_gh="$policy_cli_grant_gh" && policy_grant_gh_source=cli
   [ -n "$policy_cli_grant_all_of_dot_ssh" ] && policy_grant_all_of_dot_ssh="$policy_cli_grant_all_of_dot_ssh" && policy_grant_all_of_dot_ssh_source=cli
+  policy_resolved_update
   return 0
 }
 
@@ -1554,6 +1674,16 @@ container_git_mount_source() {
   docker inspect -f '{{range .Mounts}}{{if eq .Destination "/usr/bin/git"}}{{.Source}}{{end}}{{end}}' "$cname" 2>/dev/null
 }
 
+policy_namespace_labels() {
+  local line key
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    case "$key" in
+      org.agentbox.policy.*) printf '%s\n' "$line" ;;
+    esac
+  done < <(docker inspect -f '{{range $key, $value := .Config.Labels}}{{println $key "=" $value}}{{end}}' "$cname" 2>/dev/null || true)
+}
+
 policy_label() {
   local key="$1" value
   value="$(docker inspect -f "{{index .Config.Labels \"$key\"}}" "$cname" 2>/dev/null || true)"
@@ -1563,30 +1693,61 @@ policy_label() {
 
 policy_inspect_recorded() {
   policy_recorded_status=none
+  policy_recorded_classification=absent
+  policy_recorded_lifecycle_state=absent
+  policy_recorded_mount_consistency="${1:-${policy_mount_consistency:-unknown}}"
   policy_recorded_git_enabled=""
   policy_recorded_grant_gh=""
   policy_recorded_grant_all_of_dot_ssh=""
   policy_recorded_digest=""
   policy_recorded_detail=""
-  exists || return 0
+  case "$policy_recorded_mount_consistency" in
+    unknown|matching|contradictory) ;;
+    *) policy_recorded_mount_consistency=unknown; policy_recorded_classification=invalid; policy_recorded_status=invalid; policy_recorded_detail="supplied mount consistency is invalid"; return 0 ;;
+  esac
+  if ! exists; then
+    policy_resolved_update 2>/dev/null || true
+    return 0
+  fi
+  if is_running; then policy_recorded_lifecycle_state=running; else policy_recorded_lifecycle_state=stopped; fi
 
-  local version git gh ssh digest old_gh old_ssh expected source blocker_source
+  local version git gh ssh digest old_gh old_ssh expected source blocker_source namespace_line namespace_key namespace_labels
   version="$(policy_label org.agentbox.policy.version)"
   git="$(policy_label org.agentbox.policy.git_enabled)"
   gh="$(policy_label org.agentbox.policy.github_grant)"
   ssh="$(policy_label org.agentbox.policy.ssh_grant_all)"
   digest="$(policy_label org.agentbox.policy.digest)"
+  namespace_labels="$(policy_namespace_labels)"
+  while IFS= read -r namespace_line; do
+    [ -n "$namespace_line" ] || continue
+    namespace_key="${namespace_line%%=*}"
+    namespace_key="${namespace_key#"${namespace_key%%[![:space:]]*}"}"
+    namespace_key="${namespace_key%"${namespace_key##*[![:space:]]}"}"
+    case "$namespace_key" in
+      org.agentbox.policy.version|org.agentbox.policy.git_enabled|org.agentbox.policy.github_grant|org.agentbox.policy.ssh_grant_all|org.agentbox.policy.digest) ;;
+      *)
+        policy_recorded_status=invalid
+        policy_recorded_classification=invalid
+        policy_recorded_detail="unsupported recorded policy label: $namespace_key"
+        policy_resolved_update 2>/dev/null || true
+        return 0
+        ;;
+    esac
+  done <<< "$namespace_labels"
   if [ -z "$version$git$gh$ssh$digest" ]; then
     # Containers predating policy labels are legacy only when their Git executable state is
     # identifiable. A missing mount means the old launcher-provided Git remains available; the
     # fixed blocker is a recognizable no-Git migration. Any other mount source is ambiguous and
     # must not be silently treated as either enabled or disabled.
     policy_recorded_status=legacy
+    policy_recorded_classification=legacy
     if container_has_mount_destination /usr/bin/git; then
       source="$(container_git_mount_source)"
       blocker_source="$(readlink -f "$GIT_BLOCKER" 2>/dev/null || true)"
       if [ -z "$source" ]; then
         policy_recorded_status=invalid
+        policy_recorded_classification=invalid
+        policy_recorded_mount_consistency=contradictory
         policy_recorded_detail="legacy container has a /usr/bin/git mount with no inspectable source"
       elif [ "$source" = "$GIT_BLOCKER" ] || {
         [ -n "$blocker_source" ] && [ "$(readlink -f "$source" 2>/dev/null || true)" = "$blocker_source" ];
@@ -1594,6 +1755,8 @@ policy_inspect_recorded() {
         policy_recorded_git_enabled=0
       else
         policy_recorded_status=invalid
+        policy_recorded_classification=invalid
+        policy_recorded_mount_consistency=contradictory
         policy_recorded_detail="legacy container has an unrecognized /usr/bin/git mount source: $source"
       fi
     else
@@ -1601,34 +1764,67 @@ policy_inspect_recorded() {
     fi
     old_gh="$(policy_label agentbox.grant-gh)"
     old_ssh="$(policy_label agentbox.grant-all-of-dot-ssh)"
-    case "$old_gh" in ''|0) policy_recorded_grant_gh=0 ;; 1) policy_recorded_grant_gh=1 ;; *) policy_recorded_status=invalid; policy_recorded_detail="old agentbox.grant-gh label is malformed: $old_gh" ;; esac
-    case "$old_ssh" in ''|0) policy_recorded_grant_all_of_dot_ssh=0 ;; 1) policy_recorded_grant_all_of_dot_ssh=1 ;; *) policy_recorded_status=invalid; policy_recorded_detail="old agentbox.grant-all-of-dot-ssh label is malformed: $old_ssh" ;; esac
+    case "$old_gh" in ''|0) policy_recorded_grant_gh=0 ;; 1) policy_recorded_grant_gh=1 ;; *) policy_recorded_status=invalid; policy_recorded_classification=invalid; policy_recorded_detail="old agentbox.grant-gh label is malformed: $old_gh" ;; esac
+    case "$old_ssh" in ''|0) policy_recorded_grant_all_of_dot_ssh=0 ;; 1) policy_recorded_grant_all_of_dot_ssh=1 ;; *) policy_recorded_status=invalid; policy_recorded_classification=invalid; policy_recorded_detail="old agentbox.grant-all-of-dot-ssh label is malformed: $old_ssh" ;; esac
     if [ -z "$old_gh" ] && container_has_mount_destination /home/agentbox/.config/gh; then
       policy_recorded_status=invalid
+      policy_recorded_classification=invalid
+      policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy container has a GitHub credential mount but no old grant label"
     elif [ "$old_gh" = 0 ] && container_has_mount_destination /home/agentbox/.config/gh; then
       policy_recorded_status=invalid
+      policy_recorded_classification=invalid
+      policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy GitHub grant label is 0 but its credential mount is present"
     elif [ "$old_gh" = 1 ] && ! container_has_mount_destination /home/agentbox/.config/gh; then
       policy_recorded_status=invalid
+      policy_recorded_classification=invalid
+      policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy GitHub grant label is 1 but its credential mount is absent"
     fi
     if [ -z "$old_ssh" ] && container_has_mount_destination /home/agentbox/.ssh; then
       policy_recorded_status=invalid
+      policy_recorded_classification=invalid
+      policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy SSH grant has a credential mount but no old grant label"
     elif [ "$old_ssh" = 0 ] && container_has_mount_destination /home/agentbox/.ssh; then
       policy_recorded_status=invalid
+      policy_recorded_classification=invalid
+      policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy SSH grant label is 0 but its credential mount is present"
     elif [ "$old_ssh" = 1 ] && ! container_has_mount_destination /home/agentbox/.ssh; then
       policy_recorded_status=invalid
+      policy_recorded_classification=invalid
+      policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy SSH grant label is 1 but its credential mount is absent"
     fi
     [ -n "$policy_recorded_detail" ] || policy_recorded_detail="no versioned policy labels; migrated from legacy container state"
+    if [ "$policy_recorded_mount_consistency" = contradictory ]; then
+      policy_recorded_status=invalid
+      policy_recorded_classification=invalid
+      if [[ "$policy_recorded_detail" != *"mount consistency is contradictory"* ]]; then
+        policy_recorded_detail="$policy_recorded_detail; recorded mount consistency is contradictory"
+      fi
+    else
+      policy_recorded_mount_consistency=matching
+    fi
+    policy_resolved_update 2>/dev/null || true
     return 0
   fi
+  case "$version" in
+    2|3|4|5|6|7|8|9|[1-9][0-9]*)
+      policy_recorded_status=invalid
+      policy_recorded_classification=unsupported-version
+      policy_recorded_detail="unsupported recorded policy label version: $version"
+      policy_resolved_update 2>/dev/null || true
+      return 0
+      ;;
+  esac
   if [[ "$version" != 1 || ( "$git" != true && "$git" != false ) || ( "$gh" != true && "$gh" != false ) || ( "$ssh" != true && "$ssh" != false ) || ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     policy_recorded_status=invalid
+    policy_recorded_classification=invalid
     policy_recorded_detail="versioned policy labels are incomplete or malformed"
+    policy_resolved_update 2>/dev/null || true
     return 0
   fi
   policy_recorded_git_enabled="$(policy_bool01 "$git")"
@@ -1638,11 +1834,19 @@ policy_inspect_recorded() {
   expected="sha256:$(policy_digest_for "$policy_recorded_git_enabled" "$policy_recorded_grant_gh" "$policy_recorded_grant_all_of_dot_ssh")"
   if [ "$digest" = "$expected" ]; then
     policy_recorded_status=valid
+    policy_recorded_classification=valid
     policy_recorded_detail="versioned labels and digest are consistent"
   else
     policy_recorded_status=stale
+    policy_recorded_classification=stale
     policy_recorded_detail="recorded digest $digest does not match recorded values (expected $expected)"
   fi
+  if [ "$policy_recorded_mount_consistency" = contradictory ]; then
+    policy_recorded_status=stale
+    policy_recorded_classification=stale
+    policy_recorded_detail="$policy_recorded_detail; recorded mount consistency is contradictory"
+  fi
+  policy_resolved_update 2>/dev/null || true
 }
 
 validate_git_blocker() {
@@ -1668,7 +1872,7 @@ policy_preflight() {
     grant_sources_snapshot || return 1
     custom_mounts_snapshot_take || return 1
   fi
-  policy_inspect_recorded
+  policy_inspect_recorded "${policy_mount_consistency:-unknown}"
   case "$policy_recorded_status" in
     invalid)
       if [ "$policy_apply" != 1 ]; then
@@ -1706,6 +1910,9 @@ policy_preflight() {
       policy_grant_all_of_dot_ssh_source=rebuild-default
     fi
   fi
+  # Persisted-state adoption and command-family omissions above are part of the resolved policy.
+  # Refresh the one handoff record after those compatibility rules, before any consumer can use it.
+  policy_resolved_update
   if [ "${policy_operation_requested:-0}" = 1 ]; then
     grant_sources_validate_snapshot || return 1
   fi
@@ -1960,7 +2167,7 @@ cmd_start() {
 # manual walk of the tree — this answers it in one command, without starting a container.
 cmd_config() {
   policy_resolution_recheck config || return 1
-  policy_inspect_recorded
+  policy_inspect_recorded "${policy_mount_consistency:-unknown}"
   local config_git_enabled="$policy_git_enabled"
   local config_grant_gh="$policy_grant_gh"
   local config_grant_all_of_dot_ssh="$policy_grant_all_of_dot_ssh"

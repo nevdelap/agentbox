@@ -441,6 +441,32 @@ policy_load_host
 assert_eq "policy field inheritance" "0" "$policy_git_enabled"
 assert_eq "policy machine/project override" "1" "$policy_grant_gh"
 assert_eq "policy project field" "1" "$policy_grant_all_of_dot_ssh"
+assert_eq "global tier Git value" false "${policy_tier_git_enabled[global]}"
+assert_eq "machine tier Git value" true "${policy_tier_git_enabled[machine]}"
+assert_eq "project tier SSH value" true "${policy_tier_grant_all_of_dot_ssh[project]}"
+assert_eq "machine/project tier Git value" false "${policy_tier_git_enabled[machine_project]}"
+assert_eq "omitted tier field is unset" unset "${policy_tier_updates_check[machine]}"
+assert_eq "resolved policy effective Git" false "${policy_resolved_effective[git_enabled]}"
+assert_eq "resolved policy source tier" machine_project "${policy_resolved_source[git_enabled]}"
+assert_eq "resolved policy label count" 5 "${#policy_resolved_labels[@]}"
+assert_eq "resolved policy has all top-level sections" 1 "$(
+  _record="$(policy_resolved_record)"
+  for _section in effective global machine project machine_project label_values recorded_state; do
+    printf '%s\n' "$_record" | grep -q "^${_section}\." || exit 1
+  done
+  echo 1
+)"
+_policy_expected_hash="$(printf 'schema_version=1\ngit_enabled=false\ngithub_grant=true\nssh_grant_all=true\n' | sha256sum | cut -d' ' -f1)"
+assert_eq "canonical digest expected bytes" "sha256:$_policy_expected_hash" "${policy_resolved_effective[digest]}"
+assert_eq "updates excluded from digest" "$(policy_digest_for 0 1 1)" "$(policy_digest_for 0 1 1)"
+printf '%s\r\n' '[git]' 'enabled = true # CRLF' >"$_policy_root/agentbox.toml"
+policy_load_host
+assert_eq "CRLF policy accepted" true "${policy_tier_git_enabled[global]}"
+printf '%s\n' '[git]' 'enabled = true' '[git]' 'enabled = false' >"$_policy_root/agentbox.toml"
+_policy_parse_error="$(policy_load_host 2>&1 >/dev/null)"
+assert_eq "duplicate error has exact line" 1 "$(printf '%s' "$_policy_parse_error" | grep -c "$_policy_root/agentbox.toml:4:")"
+assert_eq "duplicate error has reason" 1 "$(printf '%s' "$_policy_parse_error" | grep -c 'duplicate key git.enabled')"
+printf '%s\n' '[git]' 'enabled = true' >"$_policy_root/agentbox.toml"
 AGENTBOX_NO_GIT=0
 export AGENTBOX_NO_GIT
 policy_input_reset
@@ -480,12 +506,16 @@ echo "recorded policy inspection and lifecycle preflight (bin/ab)"
 # migrated as Git-enabled. Old grant labels are authoritative; mounts contradicting them are
 # invalid rather than an implicit credential grant.
 _saved_exists_fn="$(declare -f exists 2>/dev/null || true)"
+_saved_running_fn="$(declare -f is_running 2>/dev/null || true)"
 _saved_policy_label_fn="$(declare -f policy_label 2>/dev/null || true)"
+_saved_namespace_labels_fn="$(declare -f policy_namespace_labels 2>/dev/null || true)"
 _saved_mount_dest_fn="$(declare -f container_has_mount_destination 2>/dev/null || true)"
 _saved_git_source_fn="$(declare -f container_git_mount_source 2>/dev/null || true)"
 mock_version=""; mock_git=""; mock_gh=""; mock_ssh=""; mock_digest=""
 mock_git_mount=0; mock_git_source=""; mock_gh_mount=0; mock_ssh_mount=0
 exists() { return 0; }
+is_running() { return 0; }
+policy_namespace_labels() { :; }
 policy_label() {
   case "$1" in
     org.agentbox.policy.version) printf '%s' "$mock_version" ;;
@@ -509,6 +539,8 @@ container_git_mount_source() { printf '%s' "$mock_git_source"; }
 mock_old_gh=""; mock_old_ssh=""
 policy_inspect_recorded
 assert_eq "plain legacy defaults Git on" "legacy" "$policy_recorded_status"
+assert_eq "legacy classification" "legacy" "$policy_recorded_classification"
+assert_eq "existing container lifecycle" "running" "$policy_recorded_lifecycle_state"
 assert_eq "plain legacy records Git enabled" "1" "$policy_recorded_git_enabled"
 assert_eq "absent old GH label means false" "0" "$policy_recorded_grant_gh"
 mock_git_mount=1; mock_git_source="$GIT_BLOCKER"
@@ -536,9 +568,56 @@ assert_eq "one GH label without mount is invalid" "invalid" "$policy_recorded_st
 mock_old_gh=bad; mock_gh_mount=0
 policy_inspect_recorded
 assert_eq "malformed old GH label is invalid" "invalid" "$policy_recorded_status"
+exists() { return 1; }
+policy_inspect_recorded
+assert_eq "absent container classification" "absent" "$policy_recorded_classification"
+assert_eq "absent container lifecycle" "absent" "$policy_recorded_lifecycle_state"
+exists() { return 0; }
+mock_old_gh=""; mock_old_ssh=""; mock_git_mount=0; mock_git_source=""
+is_running() { return 1; }
+mock_version=1; mock_git=true; mock_gh=false; mock_ssh=false
+mock_digest="sha256:$(policy_digest_for 1 0 0)"
+policy_inspect_recorded
+assert_eq "complete labels are valid" "valid" "$policy_recorded_classification"
+assert_eq "stopped container lifecycle" "stopped" "$policy_recorded_lifecycle_state"
+assert_eq "complete labels mount state unknown" "unknown" "$policy_recorded_mount_consistency"
+policy_namespace_labels() {
+  printf '%s\n' \
+    'org.agentbox.policy.version = 1' \
+    'org.agentbox.policy.git_enabled = true' \
+    'org.agentbox.policy.github_grant = false' \
+    'org.agentbox.policy.ssh_grant_all = false' \
+    'org.agentbox.policy.digest = placeholder'
+}
+policy_inspect_recorded
+assert_eq "known enumerated labels remain valid" "valid" "$policy_recorded_classification"
+mock_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+policy_inspect_recorded
+assert_eq "digest mismatch is stale" "stale" "$policy_recorded_classification"
+mock_version=2; mock_digest=""; mock_git=""; mock_gh=""; mock_ssh=""
+policy_inspect_recorded
+assert_eq "higher version is unsupported" "unsupported-version" "$policy_recorded_classification"
+mock_version=1; mock_git=true; mock_gh=""; mock_ssh=false; mock_digest=""
+policy_inspect_recorded
+assert_eq "partial labels are invalid" "invalid" "$policy_recorded_classification"
+mock_gh=false; mock_digest="sha256:$(policy_digest_for 1 0 0)"
+policy_inspect_recorded contradictory
+assert_eq "supplied contradictory mounts are stale" "stale" "$policy_recorded_classification"
+assert_eq "supplied mount state is retained" "contradictory" "$policy_recorded_mount_consistency"
+mock_version=""; mock_git=""; mock_gh=""; mock_ssh=""; mock_digest=""
+policy_inspect_recorded contradictory
+assert_eq "legacy contradictory mounts are invalid" "invalid" "$policy_recorded_classification"
+assert_eq "legacy contradiction is not migratable" "invalid" "$policy_recorded_status"
+assert_eq "legacy contradiction is explained" 1 "$(printf '%s' "$policy_recorded_detail" | grep -c 'mount consistency is contradictory')"
+policy_namespace_labels() { printf '%s\n' 'org.agentbox.policy.extra=value'; }
+policy_inspect_recorded
+assert_eq "extra policy label is invalid" "invalid" "$policy_recorded_classification"
+assert_eq "extra policy label is explained" 1 "$(printf '%s' "$policy_recorded_detail" | grep -c 'unsupported recorded policy label')"
 unset -f exists policy_label container_has_mount_destination container_git_mount_source
 eval "$_saved_exists_fn"
+eval "$_saved_running_fn"
 eval "$_saved_policy_label_fn"
+eval "$_saved_namespace_labels_fn"
 eval "$_saved_mount_dest_fn"
 eval "$_saved_git_source_fn"
 
@@ -552,13 +631,13 @@ _saved_running_fn="$(declare -f is_running 2>/dev/null || true)"
 _saved_blocker_fn="$(declare -f validate_git_blocker 2>/dev/null || true)"
 mock_running=1
 policy_load_host() {
-  policy_git_enabled=1; policy_grant_gh=1; policy_grant_all_of_dot_ssh=0
-  policy_git_source=environment; policy_grant_gh_source=environment
-  policy_grant_all_of_dot_ssh_source=default
+  policy_git_enabled=1; policy_grant_gh=0; policy_grant_all_of_dot_ssh=0
+  policy_git_source=default; policy_grant_gh_source=default
+  policy_grant_all_of_dot_ssh_source=default; policy_updates_check=1; policy_updates_source=default
   return 0
 }
 policy_inspect_recorded() {
-  policy_recorded_status=valid; policy_recorded_git_enabled=1; policy_recorded_grant_gh=0
+  policy_recorded_status=valid; policy_recorded_git_enabled=0; policy_recorded_grant_gh=1
   policy_recorded_grant_all_of_dot_ssh=0; policy_recorded_digest="sha256:old"
 }
 exists() { return 0; }
@@ -567,10 +646,17 @@ validate_git_blocker() { return 0; }
 policy_apply=0
 assert_eq "running mismatch refuses" "1" "$(policy_preflight start >/dev/null 2>&1; echo $?)"
 policy_apply=1
-assert_eq "running mismatch apply permits" "0" "$(policy_preflight start >/dev/null 2>&1; echo $?)"
+policy_preflight start >/dev/null 2>&1; _preflight_rc=$?
+assert_eq "running mismatch apply permits" "0" "$_preflight_rc"
+assert_eq "start record adopts recorded Git" false "${policy_resolved_effective[git_enabled]}"
+assert_eq "start effective grant is adopted" 1 "$policy_grant_gh"
+assert_eq "start record adopts recorded grant" true "${policy_resolved_effective[github_grant]}"
 mock_running=0; policy_apply=0
 policy_preflight start >/dev/null 2>&1
 assert_eq "stopped mismatch requests recreate" "1" "$policy_needs_recreate"
+policy_preflight rebuild >/dev/null 2>&1
+assert_eq "rebuild record preserves recorded Git" false "${policy_resolved_effective[git_enabled]}"
+assert_eq "rebuild record resets omitted grant" false "${policy_resolved_effective[github_grant]}"
 unset -f policy_load_host policy_inspect_recorded exists is_running validate_git_blocker
 eval "$_saved_load_host_fn"
 eval "$_saved_inspect_fn"
