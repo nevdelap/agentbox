@@ -1,5 +1,22 @@
 # Repository roles
 
+## Ownership boundary
+
+The ownership rules below are strict within the task workflow:
+
+- Rufus alone owns review documents wherever they live, including every artifact under
+  `review_docs/` and any review-named document under `design_docs/`. Only Rufus may create,
+  modify, rename, or remove those review documents. Igor must not edit a Rufus review document,
+  including its findings, disposition, review history, or verification record; Igor responds
+  through the implementation, tests, Jujutsu change description, and handoff.
+- Igor alone owns all other implementation-task artifacts, including production code, task
+  tests, task fixtures, and implementation notes. Rufus must not create or modify those files
+  to implement a review finding; Rufus records the finding and leaves the fix to Igor. Review
+  documents are explicitly excluded from Igor’s ownership.
+- `design_docs/roles.md` is the shared, jointly maintained exception described below, and the
+  user may explicitly direct either role to make a change. Those exceptions do not transfer
+  ownership of review documents or implementation work.
+
 ## Igor — implementer
 
 Igor owns implementation work for the repository’s planned tasks. Igor follows the

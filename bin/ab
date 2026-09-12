@@ -74,15 +74,34 @@ declare -A policy_tier_git_enabled=() policy_tier_grant_gh=()
 declare -A policy_tier_grant_all_of_dot_ssh=() policy_tier_updates_check=()
 declare -A policy_resolved_effective=() policy_resolved_source=()
 declare -A policy_resolved_labels=()
+# A recorded-state decision must be derived from one Docker inspect result. These maps are a
+# short-lived cache used only while policy_inspect_recorded classifies that result.
+declare -A policy_container_snapshot_labels=() policy_container_snapshot_mount_sources=()
+policy_container_snapshot_lifecycle=absent
+policy_container_snapshot_ready=0
 policy_needs_recreate=0
 policy_cli_git_enabled=""
 policy_cli_grant_gh=""
 policy_cli_grant_all_of_dot_ssh=""
 policy_apply=0
 policy_command_args=()
+policy_explicit_exec_command=0
 policy_input_env_captured=0
 policy_operation_requested=0
 policy_snapshot_retry_count=0
+
+# Task 6's decision record is the only command-facing policy gate.  Task 7 may populate the
+# operation/readiness overlay before calling policy_decide; the defaults deliberately mean that
+# no operation record exists, rather than guessing from the container's lifecycle state.
+policy_operation_status="none"
+policy_readiness_result="not-applicable"
+policy_decision_kind=""
+policy_decision_reason_code=""
+policy_decision_mutation_allowed=0
+policy_decision_execution_allowed=0
+policy_decision_explicit_exec_mode="blocked"
+policy_decision_update_allowed=0
+policy_decision_explicit_apply_required=0
 
 # Task 2's raw host-policy record. Keep capture separate from the resolved policy below so later
 # policy work consumes one validated snapshot instead of reparsing CLI arguments or environment.
@@ -1666,16 +1685,162 @@ adopt_existing_grants() {
 }
 
 container_has_mount_destination() {
+  if [ "$policy_container_snapshot_ready" = 1 ]; then
+    [ "${policy_container_snapshot_mount_sources[$1]+present}" = present ]
+    return
+  fi
   docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$cname" 2>/dev/null \
     | grep -qxF "$1"
 }
 
 container_git_mount_source() {
+  if [ "$policy_container_snapshot_ready" = 1 ]; then
+    printf '%s' "${policy_container_snapshot_mount_sources[/usr/bin/git]-}"
+    return 0
+  fi
   docker inspect -f '{{range .Mounts}}{{if eq .Destination "/usr/bin/git"}}{{.Source}}{{end}}{{end}}' "$cname" 2>/dev/null
+}
+
+# Policy classification must consume only the one captured Docker inspection. Keep these
+# accessors separate from the general lifecycle helpers above: callers in the decision layer
+# cannot accidentally fall back to a second Docker inspection when the snapshot is incomplete.
+policy_snapshot_has_mount_destination() {
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  [ "${policy_container_snapshot_mount_sources[$1]+present}" = present ]
+}
+
+policy_snapshot_git_mount_source() {
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  printf '%s' "${policy_container_snapshot_mount_sources[/usr/bin/git]-}"
+}
+
+policy_snapshot_namespace_labels() {
+  local key
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  for key in "${!policy_container_snapshot_labels[@]}"; do
+    case "$key" in
+      org.agentbox.policy.*) printf '%s=%s\n' "$key" "${policy_container_snapshot_labels[$key]}" ;;
+    esac
+  done
+}
+
+policy_snapshot_label() {
+  local key="$1"
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  printf '%s' "${policy_container_snapshot_labels[$key]-}"
+}
+
+policy_container_snapshot_reset() {
+  policy_container_snapshot_labels=()
+  policy_container_snapshot_mount_sources=()
+  policy_container_snapshot_lifecycle=absent
+  policy_container_snapshot_ready=0
+}
+
+policy_container_snapshot() {
+  local raw line rest key value destination source
+  policy_container_snapshot_reset
+  raw="$(docker inspect -f '{{if .State.Running}}lifecycle=running{{else}}lifecycle=stopped{{end}}{{range $key, $value := .Config.Labels}}{{printf "\nlabel=%s=%s" $key $value}}{{end}}{{range .Mounts}}{{printf "\nmount=%s=%s" .Destination .Source}}{{end}}' "$cname" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      lifecycle=running) policy_container_snapshot_lifecycle=running ;;
+      lifecycle=stopped) policy_container_snapshot_lifecycle=stopped ;;
+      label=*)
+        rest="${line#label=}"
+        key="${rest%%=*}"
+        value="${rest#*=}"
+        policy_container_snapshot_labels["$key"]="$value"
+        ;;
+      mount=*)
+        rest="${line#mount=}"
+        destination="${rest%%=*}"
+        source="${rest#*=}"
+        policy_container_snapshot_mount_sources["$destination"]="$source"
+        ;;
+    esac
+  done <<< "$raw"
+  policy_container_snapshot_ready=1
+}
+
+# Inspect policy-owned mount destinations for a complete versioned label record. The label values
+# describe the intended container, but Docker mounts are the effective state; a valid digest must
+# not make contradictory mounts look safe. This is read-only and deliberately uses only the
+# snapshot accessors so all classification inputs come from the same inspection seam.
+policy_inspect_versioned_mounts() {
+  local git_enabled="$1" grant_gh="$2" grant_ssh="$3" source blocker_source
+  local -a contradictions=()
+  [ "$policy_recorded_mount_consistency" = contradictory ] && contradictions+=("supplied mount consistency is contradictory")
+
+  if [ "$git_enabled" = 1 ]; then
+    if policy_snapshot_has_mount_destination /usr/bin/git; then
+      source="$(policy_snapshot_git_mount_source)"
+      contradictions+=("Git-enabled label contradicts /usr/bin/git mount${source:+ from $source}")
+    fi
+    if policy_snapshot_has_mount_destination /home/agentbox/.gitconfig &&
+       policy_snapshot_has_mount_destination /home/agentbox/.config/git/config; then
+      contradictions+=("Git config has both protected destinations mounted")
+    fi
+  else
+    if ! policy_snapshot_has_mount_destination /usr/bin/git; then
+      contradictions+=("Git-disabled label has no /usr/bin/git blocker mount")
+    else
+      source="$(policy_snapshot_git_mount_source)"
+      blocker_source="$(readlink -f "$GIT_BLOCKER" 2>/dev/null || true)"
+      if [ -z "$source" ] || {
+        [ "$source" != "$GIT_BLOCKER" ] &&
+        { [ -z "$blocker_source" ] || [ "$(readlink -f "$source" 2>/dev/null || true)" != "$blocker_source" ]; };
+      }; then
+        contradictions+=("Git-disabled label has an unrecognized /usr/bin/git mount source: ${source:-none}")
+      fi
+      if policy_snapshot_has_mount_destination /home/agentbox/.gitconfig; then
+        contradictions+=("Git-disabled label contradicts /home/agentbox/.gitconfig mount")
+      fi
+      if policy_snapshot_has_mount_destination /home/agentbox/.config/git/config; then
+        contradictions+=("Git-disabled label contradicts /home/agentbox/.config/git/config mount")
+      fi
+    fi
+  fi
+
+  if [ "$grant_gh" = 1 ]; then
+    policy_snapshot_has_mount_destination /home/agentbox/.config/gh || \
+      contradictions+=("GitHub-grant label requires /home/agentbox/.config/gh mount")
+  elif policy_snapshot_has_mount_destination /home/agentbox/.config/gh; then
+    contradictions+=("GitHub-grant label is false but /home/agentbox/.config/gh is mounted")
+  fi
+
+  if [ "$grant_ssh" = 1 ]; then
+    policy_snapshot_has_mount_destination /home/agentbox/.ssh || \
+      contradictions+=("SSH-grant label requires /home/agentbox/.ssh mount")
+  else
+    if policy_snapshot_has_mount_destination /home/agentbox/.ssh; then
+      contradictions+=("SSH-grant label is false but /home/agentbox/.ssh is mounted")
+    fi
+    if policy_snapshot_has_mount_destination /home/agentbox/.ssh/known_hosts; then
+      contradictions+=("SSH-grant label is false but /home/agentbox/.ssh/known_hosts is mounted")
+    fi
+  fi
+
+  if [ "${#contradictions[@]}" -gt 0 ]; then
+    policy_recorded_mount_consistency=contradictory
+    policy_recorded_status=stale
+    policy_recorded_classification=stale
+    policy_recorded_detail="${policy_recorded_detail}; mount contradiction: ${contradictions[*]}"
+  else
+    policy_recorded_mount_consistency=matching
+  fi
+  return 0
 }
 
 policy_namespace_labels() {
   local line key
+  if [ "$policy_container_snapshot_ready" = 1 ]; then
+    for key in "${!policy_container_snapshot_labels[@]}"; do
+      case "$key" in
+        org.agentbox.policy.*) printf '%s=%s\n' "$key" "${policy_container_snapshot_labels[$key]}" ;;
+      esac
+    done
+    return 0
+  fi
   while IFS= read -r line; do
     key="${line%%=*}"
     case "$key" in
@@ -1686,12 +1851,16 @@ policy_namespace_labels() {
 
 policy_label() {
   local key="$1" value
+  if [ "$policy_container_snapshot_ready" = 1 ]; then
+    printf '%s' "${policy_container_snapshot_labels[$key]-}"
+    return 0
+  fi
   value="$(docker inspect -f "{{index .Config.Labels \"$key\"}}" "$cname" 2>/dev/null || true)"
   [ "$value" = '<no value>' ] && value=""
   printf '%s' "$value"
 }
 
-policy_inspect_recorded() {
+policy_inspect_recorded_from_snapshot() {
   policy_recorded_status=none
   policy_recorded_classification=absent
   policy_recorded_lifecycle_state=absent
@@ -1705,19 +1874,19 @@ policy_inspect_recorded() {
     unknown|matching|contradictory) ;;
     *) policy_recorded_mount_consistency=unknown; policy_recorded_classification=invalid; policy_recorded_status=invalid; policy_recorded_detail="supplied mount consistency is invalid"; return 0 ;;
   esac
-  if ! exists; then
-    policy_resolved_update 2>/dev/null || true
-    return 0
+  if [ "$policy_container_snapshot_lifecycle" = running ]; then
+    policy_recorded_lifecycle_state=running
+  else
+    policy_recorded_lifecycle_state=stopped
   fi
-  if is_running; then policy_recorded_lifecycle_state=running; else policy_recorded_lifecycle_state=stopped; fi
 
   local version git gh ssh digest old_gh old_ssh expected source blocker_source namespace_line namespace_key namespace_labels
-  version="$(policy_label org.agentbox.policy.version)"
-  git="$(policy_label org.agentbox.policy.git_enabled)"
-  gh="$(policy_label org.agentbox.policy.github_grant)"
-  ssh="$(policy_label org.agentbox.policy.ssh_grant_all)"
-  digest="$(policy_label org.agentbox.policy.digest)"
-  namespace_labels="$(policy_namespace_labels)"
+  version="$(policy_snapshot_label org.agentbox.policy.version)"
+  git="$(policy_snapshot_label org.agentbox.policy.git_enabled)"
+  gh="$(policy_snapshot_label org.agentbox.policy.github_grant)"
+  ssh="$(policy_snapshot_label org.agentbox.policy.ssh_grant_all)"
+  digest="$(policy_snapshot_label org.agentbox.policy.digest)"
+  namespace_labels="$(policy_snapshot_namespace_labels)"
   while IFS= read -r namespace_line; do
     [ -n "$namespace_line" ] || continue
     namespace_key="${namespace_line%%=*}"
@@ -1741,8 +1910,8 @@ policy_inspect_recorded() {
     # must not be silently treated as either enabled or disabled.
     policy_recorded_status=legacy
     policy_recorded_classification=legacy
-    if container_has_mount_destination /usr/bin/git; then
-      source="$(container_git_mount_source)"
+    if policy_snapshot_has_mount_destination /usr/bin/git; then
+      source="$(policy_snapshot_git_mount_source)"
       blocker_source="$(readlink -f "$GIT_BLOCKER" 2>/dev/null || true)"
       if [ -z "$source" ]; then
         policy_recorded_status=invalid
@@ -1762,37 +1931,37 @@ policy_inspect_recorded() {
     else
       policy_recorded_git_enabled=1
     fi
-    old_gh="$(policy_label agentbox.grant-gh)"
-    old_ssh="$(policy_label agentbox.grant-all-of-dot-ssh)"
+    old_gh="$(policy_snapshot_label agentbox.grant-gh)"
+    old_ssh="$(policy_snapshot_label agentbox.grant-all-of-dot-ssh)"
     case "$old_gh" in ''|0) policy_recorded_grant_gh=0 ;; 1) policy_recorded_grant_gh=1 ;; *) policy_recorded_status=invalid; policy_recorded_classification=invalid; policy_recorded_detail="old agentbox.grant-gh label is malformed: $old_gh" ;; esac
     case "$old_ssh" in ''|0) policy_recorded_grant_all_of_dot_ssh=0 ;; 1) policy_recorded_grant_all_of_dot_ssh=1 ;; *) policy_recorded_status=invalid; policy_recorded_classification=invalid; policy_recorded_detail="old agentbox.grant-all-of-dot-ssh label is malformed: $old_ssh" ;; esac
-    if [ -z "$old_gh" ] && container_has_mount_destination /home/agentbox/.config/gh; then
+    if [ -z "$old_gh" ] && policy_snapshot_has_mount_destination /home/agentbox/.config/gh; then
       policy_recorded_status=invalid
       policy_recorded_classification=invalid
       policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy container has a GitHub credential mount but no old grant label"
-    elif [ "$old_gh" = 0 ] && container_has_mount_destination /home/agentbox/.config/gh; then
+    elif [ "$old_gh" = 0 ] && policy_snapshot_has_mount_destination /home/agentbox/.config/gh; then
       policy_recorded_status=invalid
       policy_recorded_classification=invalid
       policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy GitHub grant label is 0 but its credential mount is present"
-    elif [ "$old_gh" = 1 ] && ! container_has_mount_destination /home/agentbox/.config/gh; then
+    elif [ "$old_gh" = 1 ] && ! policy_snapshot_has_mount_destination /home/agentbox/.config/gh; then
       policy_recorded_status=invalid
       policy_recorded_classification=invalid
       policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy GitHub grant label is 1 but its credential mount is absent"
     fi
-    if [ -z "$old_ssh" ] && container_has_mount_destination /home/agentbox/.ssh; then
+    if [ -z "$old_ssh" ] && policy_snapshot_has_mount_destination /home/agentbox/.ssh; then
       policy_recorded_status=invalid
       policy_recorded_classification=invalid
       policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy SSH grant has a credential mount but no old grant label"
-    elif [ "$old_ssh" = 0 ] && container_has_mount_destination /home/agentbox/.ssh; then
+    elif [ "$old_ssh" = 0 ] && policy_snapshot_has_mount_destination /home/agentbox/.ssh; then
       policy_recorded_status=invalid
       policy_recorded_classification=invalid
       policy_recorded_mount_consistency=contradictory
       policy_recorded_detail="legacy SSH grant label is 0 but its credential mount is present"
-    elif [ "$old_ssh" = 1 ] && ! container_has_mount_destination /home/agentbox/.ssh; then
+    elif [ "$old_ssh" = 1 ] && ! policy_snapshot_has_mount_destination /home/agentbox/.ssh; then
       policy_recorded_status=invalid
       policy_recorded_classification=invalid
       policy_recorded_mount_consistency=contradictory
@@ -1831,6 +2000,14 @@ policy_inspect_recorded() {
   policy_recorded_grant_gh="$(policy_bool01 "$gh")"
   policy_recorded_grant_all_of_dot_ssh="$(policy_bool01 "$ssh")"
   policy_recorded_digest="$digest"
+  policy_inspect_versioned_mounts \
+    "$policy_recorded_git_enabled" \
+    "$policy_recorded_grant_gh" \
+    "$policy_recorded_grant_all_of_dot_ssh"
+  if [ "$policy_recorded_status" = stale ]; then
+    policy_resolved_update 2>/dev/null || true
+    return 0
+  fi
   expected="sha256:$(policy_digest_for "$policy_recorded_git_enabled" "$policy_recorded_grant_gh" "$policy_recorded_grant_all_of_dot_ssh")"
   if [ "$digest" = "$expected" ]; then
     policy_recorded_status=valid
@@ -1849,6 +2026,28 @@ policy_inspect_recorded() {
   policy_resolved_update 2>/dev/null || true
 }
 
+policy_inspect_recorded() {
+  local consistency="${1:-${policy_mount_consistency:-unknown}}" rc
+  if ! policy_container_snapshot; then
+    policy_recorded_status=none
+    policy_recorded_classification=absent
+    policy_recorded_lifecycle_state=absent
+    policy_recorded_mount_consistency="$consistency"
+    policy_recorded_git_enabled=""
+    policy_recorded_grant_gh=""
+    policy_recorded_grant_all_of_dot_ssh=""
+    policy_recorded_digest=""
+    policy_recorded_detail=""
+    policy_resolved_update 2>/dev/null || true
+    policy_container_snapshot_reset
+    return 0
+  fi
+  policy_inspect_recorded_from_snapshot "$consistency"
+  rc=$?
+  policy_container_snapshot_reset
+  return "$rc"
+}
+
 validate_git_blocker() {
   local mode last
   [ -f "$GIT_BLOCKER" ] && [ ! -L "$GIT_BLOCKER" ] && [ -r "$GIT_BLOCKER" ] && [ -x "$GIT_BLOCKER" ] || {
@@ -1858,6 +2057,261 @@ validate_git_blocker() {
   [ "$mode" = 755 ] || { policy_fail "Git blocker must have mode 0755: $GIT_BLOCKER (has ${mode:-unknown})"; return 1; }
   last="${mode: -1}"
   case "$last" in 2|3|6|7) policy_fail "Git blocker must not be world-writable: $GIT_BLOCKER"; return 1 ;; esac
+}
+
+# Task 6: classify one command against one immutable policy/inspection snapshot.  This function
+# only assigns the decision record below; it never calls Docker, updates policy, or performs a
+# lifecycle operation.  Task 7 can supply policy_operation_status/policy_readiness_result before
+# invoking it, and the overlay is intentionally applied after the base state decision.
+policy_decision_reset() {
+  policy_decision_kind=refuse
+  policy_decision_reason_code=invalid-input
+  policy_decision_mutation_allowed=0
+  policy_decision_execution_allowed=0
+  policy_decision_explicit_exec_mode=blocked
+  policy_decision_update_allowed=0
+  policy_decision_explicit_apply_required=0
+}
+
+policy_decision_record() {
+  printf 'kind=%s\n' "$policy_decision_kind"
+  printf 'reason_code=%s\n' "$policy_decision_reason_code"
+  printf 'mutation_allowed=%s\n' "$policy_decision_mutation_allowed"
+  printf 'execution_allowed=%s\n' "$policy_decision_execution_allowed"
+  printf 'explicit_exec_mode=%s\n' "$policy_decision_explicit_exec_mode"
+  printf 'update_allowed=%s\n' "$policy_decision_update_allowed"
+  printf 'explicit_apply_required=%s\n' "$policy_decision_explicit_apply_required"
+  printf 'operation_status=%s\n' "$policy_operation_status"
+  printf 'readiness_result=%s\n' "$policy_readiness_result"
+}
+
+policy_decision_overlay_valid() {
+  case "${policy_operation_status:-none}" in
+    none|in-progress|removal-failed|absent-after-failure|network-degraded|readiness-failed|complete) ;;
+    *) return 1 ;;
+  esac
+  case "${policy_readiness_result:-not-applicable}" in
+    not-applicable|ready|failed-but-running|failed-and-exited) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+policy_decision_git_input_explicit() {
+  case "${policy_git_source:-default}" in
+    default|recorded|rebuild-default|'') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+policy_decision_policy_matches_recorded() {
+  [ "$policy_recorded_status" = valid ] || [ "$policy_recorded_status" = legacy ] || return 1
+  [ "$policy_recorded_git_enabled" = "$policy_git_enabled" ] || return 1
+  [ "$policy_recorded_grant_gh" = "$policy_grant_gh" ] || return 1
+  [ "$policy_recorded_grant_all_of_dot_ssh" = "$policy_grant_all_of_dot_ssh" ] || return 1
+  if [ "$policy_recorded_status" = valid ]; then
+    [ "$policy_recorded_digest" = "sha256:$(policy_digest_for "$policy_git_enabled" "$policy_grant_gh" "$policy_grant_all_of_dot_ssh")" ] || return 1
+  fi
+  return 0
+}
+
+policy_decision_apply_overlay() {
+  local status="${policy_operation_status:-none}" readiness="${policy_readiness_result:-not-applicable}"
+  [ "$status" = none ] || [ "$status" = complete ] || [ "$readiness" = not-applicable ] || [ "$readiness" = ready ] || {
+    policy_decision_kind=refuse
+    policy_decision_reason_code="operation-$status"
+    policy_decision_mutation_allowed=0
+    policy_decision_execution_allowed=0
+    policy_decision_explicit_exec_mode=blocked
+    policy_decision_update_allowed=0
+    policy_decision_explicit_apply_required=1
+  }
+
+  case "$status" in
+    none|complete)
+      case "$readiness" in
+        not-applicable|ready) return 0 ;;
+        failed-but-running|failed-and-exited)
+          policy_decision_kind=refuse
+          policy_decision_reason_code="readiness-$readiness"
+          policy_decision_mutation_allowed=0
+          policy_decision_execution_allowed=0
+          policy_decision_explicit_exec_mode=diagnostic-only
+          [ "$policy_recorded_lifecycle_state" = running ] || policy_decision_explicit_exec_mode=blocked
+          policy_decision_update_allowed=0
+          policy_decision_explicit_apply_required=1
+          return 0
+          ;;
+      esac
+      ;;
+    in-progress|removal-failed|absent-after-failure)
+      policy_decision_kind=refuse
+      policy_decision_reason_code="operation-$status"
+      policy_decision_mutation_allowed=0
+      policy_decision_execution_allowed=0
+      policy_decision_explicit_exec_mode=blocked
+      policy_decision_update_allowed=0
+      policy_decision_explicit_apply_required=1
+      return 0
+      ;;
+    network-degraded)
+      policy_decision_kind=refuse
+      policy_decision_reason_code=operation-network-degraded
+      policy_decision_mutation_allowed=0
+      policy_decision_execution_allowed=0
+      policy_decision_explicit_exec_mode=diagnostic-only
+      [ "$policy_recorded_lifecycle_state" = running ] || policy_decision_explicit_exec_mode=blocked
+      policy_decision_update_allowed=0
+      policy_decision_explicit_apply_required=1
+      return 0
+      ;;
+    readiness-failed)
+      policy_decision_kind=refuse
+      policy_decision_reason_code="readiness-${readiness:-not-applicable}"
+      policy_decision_mutation_allowed=0
+      policy_decision_execution_allowed=0
+      policy_decision_explicit_exec_mode=diagnostic-only
+      [ "$policy_recorded_lifecycle_state" = running ] || policy_decision_explicit_exec_mode=blocked
+      policy_decision_update_allowed=0
+      policy_decision_explicit_apply_required=1
+      return 0
+      ;;
+  esac
+}
+
+policy_decide() {
+  local mode="$1" classification="$policy_recorded_classification" lifecycle="$policy_recorded_lifecycle_state"
+  policy_decision_reset
+  case "$mode" in
+    build) mode=rebuild ;;
+    start|exec|rebuild|config) ;;
+    *) return 1 ;;
+  esac
+  policy_decision_overlay_valid || {
+    policy_decision_reason_code=invalid-operation-overlay
+    return 0
+  }
+
+  if [ "$mode" = config ]; then
+    policy_decision_kind=report-only
+    policy_decision_reason_code="report-$classification"
+    case "$classification" in
+      absent|legacy|valid) policy_decision_update_allowed=1 ;;
+      stale|invalid|unsupported-version) policy_decision_update_allowed=0 ;;
+      *) policy_decision_kind=refuse; policy_decision_reason_code=invalid-recorded-state ;;
+    esac
+    policy_decision_apply_overlay
+    # Config is always read-only. An operation overlay changes whether its update check is safe,
+    # but it must remain capable of reporting the overlay rather than hiding the state.
+    if [ "$policy_operation_status" != none ] || [ "$policy_readiness_result" != not-applicable ]; then
+      policy_decision_kind=report-only
+    fi
+    return 0
+  fi
+
+  case "$mode" in
+    rebuild)
+      if [[ "$classification" = stale || "$classification" = invalid || "$classification" = unsupported-version ]]; then
+        if policy_decision_git_input_explicit; then
+          policy_decision_kind=build-recreate
+          policy_decision_reason_code=explicit-git-reconciliation
+          policy_decision_mutation_allowed=1
+          policy_decision_update_allowed=1
+        else
+          policy_decision_reason_code=ambiguous-git-state
+          policy_decision_explicit_apply_required=1
+        fi
+      else
+        policy_decision_kind=build-recreate
+        policy_decision_reason_code=explicit-rebuild
+        policy_decision_mutation_allowed=1
+        policy_decision_update_allowed=1
+      fi
+      ;;
+    start|exec)
+      if [ "$classification" = absent ] || [ "$lifecycle" = absent ]; then
+        policy_decision_kind=create
+        policy_decision_reason_code=container-absent
+        policy_decision_mutation_allowed=1
+        policy_decision_execution_allowed=1
+        policy_decision_update_allowed=1
+      elif [ "$classification" = legacy ]; then
+        if [ "$lifecycle" = running ] && policy_decision_policy_matches_recorded; then
+          policy_decision_kind=start-in-place
+          policy_decision_reason_code=legacy-mounts-match
+          policy_decision_execution_allowed=1
+          policy_decision_update_allowed=1
+        elif [ "$lifecycle" = running ] && [ "$policy_apply" != 1 ]; then
+          policy_decision_reason_code=running-legacy-mismatch
+          policy_decision_explicit_apply_required=1
+        elif [ "$lifecycle" = running ]; then
+          policy_decision_kind=reconcile-running
+          policy_decision_reason_code=explicit-apply
+          policy_decision_mutation_allowed=1
+          policy_decision_execution_allowed=1
+          policy_decision_update_allowed=1
+        else
+          policy_decision_kind=reconcile-stopped
+          policy_decision_reason_code=legacy-state
+          policy_decision_mutation_allowed=1
+          policy_decision_execution_allowed=1
+          policy_decision_update_allowed=1
+        fi
+      elif [[ "$classification" = stale || "$classification" = invalid || "$classification" = unsupported-version ]]; then
+        if [ "$mode" = start ] && [ "$policy_apply" = 1 ]; then
+          if [ "$lifecycle" = running ]; then policy_decision_kind=reconcile-running; else policy_decision_kind=reconcile-stopped; fi
+          policy_decision_reason_code=explicit-apply
+          policy_decision_mutation_allowed=1
+          policy_decision_execution_allowed=1
+          policy_decision_update_allowed=1
+        else
+          policy_decision_reason_code="${classification}-recorded-state"
+          policy_decision_explicit_apply_required=1
+        fi
+      elif policy_decision_policy_matches_recorded; then
+        policy_decision_kind=start-in-place
+        policy_decision_reason_code=policy-matches-recorded
+        [ "$lifecycle" = stopped ] && policy_decision_mutation_allowed=1
+        policy_decision_execution_allowed=1
+        policy_decision_update_allowed=1
+      elif [ "$lifecycle" = running ]; then
+        if [ "$policy_apply" = 1 ] && [ "$mode" = start ]; then
+          policy_decision_kind=reconcile-running
+          policy_decision_reason_code=explicit-apply
+          policy_decision_mutation_allowed=1
+          policy_decision_execution_allowed=1
+          policy_decision_update_allowed=1
+        else
+          policy_decision_reason_code=running-policy-mismatch
+          policy_decision_explicit_apply_required=1
+        fi
+      else
+        policy_decision_kind=reconcile-stopped
+        policy_decision_reason_code=stopped-policy-mismatch
+        policy_decision_mutation_allowed=1
+        policy_decision_execution_allowed=1
+        policy_decision_update_allowed=1
+      fi
+      ;;
+  esac
+
+  if [ "$policy_decision_execution_allowed" = 1 ]; then
+    policy_decision_explicit_exec_mode=allowed
+  fi
+  policy_decision_apply_overlay
+}
+
+# Keep the handoff name readable to later task owners while retaining policy_decide as the
+# implementation name used by the launcher. Both entry points produce the same one-record result.
+policy_decision() {
+  policy_decide "$@"
+}
+
+policy_decision_require() {
+  [ "$policy_decision_kind" != refuse ] || {
+    policy_fail "${policy_decision_reason_code}; explicit apply/reconciliation may be required"
+    return 1
+  }
+  return 0
 }
 
 policy_preflight() {
@@ -1875,28 +2329,29 @@ policy_preflight() {
   policy_inspect_recorded "${policy_mount_consistency:-unknown}"
   case "$policy_recorded_status" in
     invalid)
-      if [ "$policy_apply" != 1 ]; then
-        policy_fail "existing container has invalid policy labels; use 'ab start --apply' to reconcile"
-        return 1
+      if [ "$policy_apply" = 1 ]; then
+        # Explicit apply is the user’s acknowledgement that ambiguous recorded state may be
+        # replaced by the newly resolved host policy. Do not infer a grant from malformed metadata.
+        policy_recorded_status=stale
+        policy_recorded_git_enabled=1
+        policy_recorded_grant_gh=0
+        policy_recorded_grant_all_of_dot_ssh=0
       fi
-      # Explicit apply is the user’s acknowledgement that ambiguous recorded state may be
-      # replaced by the newly resolved host policy. Do not infer a grant from malformed metadata.
-      policy_recorded_status=stale
-      policy_recorded_git_enabled=1
-      policy_recorded_grant_gh=0
-      policy_recorded_grant_all_of_dot_ssh=0
       ;;
   esac
   # An omitted container policy preserves recorded state. A policy explicitly supplied by CLI,
   # host env, or TOML has already won in policy_load_host. Rebuilds intentionally reset omitted
   # grants to preserve the established `ab rebuild` revoke workflow, but preserve Git state.
-  if [ "$policy_git_source" = default ] && [ "$policy_recorded_status" != none ]; then
+  if [ "$policy_git_source" = default ] &&
+     { [ "$policy_recorded_status" = valid ] || [ "$policy_recorded_status" = legacy ] || [ "$policy_recorded_status" = stale ]; }; then
     policy_git_enabled="$policy_recorded_git_enabled"
     policy_git_source=recorded
   fi
   if [ "$policy_grant_gh_source" = default ]; then
     if [ "$mode" = start ] || [ "$mode" = exec ]; then
-      [ "$policy_recorded_status" != none ] && policy_grant_gh="$policy_recorded_grant_gh" && policy_grant_gh_source=recorded
+      if [ "$policy_recorded_status" = valid ] || [ "$policy_recorded_status" = legacy ] || [ "$policy_recorded_status" = stale ]; then
+        policy_grant_gh="$policy_recorded_grant_gh"; policy_grant_gh_source=recorded
+      fi
     else
       policy_grant_gh=0
       policy_grant_gh_source=rebuild-default
@@ -1904,7 +2359,9 @@ policy_preflight() {
   fi
   if [ "$policy_grant_all_of_dot_ssh_source" = default ]; then
     if [ "$mode" = start ] || [ "$mode" = exec ]; then
-      [ "$policy_recorded_status" != none ] && policy_grant_all_of_dot_ssh="$policy_recorded_grant_all_of_dot_ssh" && policy_grant_all_of_dot_ssh_source=recorded
+      if [ "$policy_recorded_status" = valid ] || [ "$policy_recorded_status" = legacy ] || [ "$policy_recorded_status" = stale ]; then
+        policy_grant_all_of_dot_ssh="$policy_recorded_grant_all_of_dot_ssh"; policy_grant_all_of_dot_ssh_source=recorded
+      fi
     else
       policy_grant_all_of_dot_ssh=0
       policy_grant_all_of_dot_ssh_source=rebuild-default
@@ -1921,19 +2378,23 @@ policy_preflight() {
     validate_custom_mounts || return 1
   fi
   policy_needs_recreate=0
-  if exists; then
-    [ "$policy_recorded_status" = valid ] || policy_needs_recreate=1
-    if [ "$policy_recorded_status" = valid ]; then
-      [ "$policy_recorded_git_enabled" = "$policy_git_enabled" ] || policy_needs_recreate=1
-      [ "$policy_recorded_grant_gh" = "$policy_grant_gh" ] || policy_needs_recreate=1
-      [ "$policy_recorded_grant_all_of_dot_ssh" = "$policy_grant_all_of_dot_ssh" ] || policy_needs_recreate=1
-      [ "$policy_recorded_digest" = "sha256:$(policy_digest_for "$policy_git_enabled" "$policy_grant_gh" "$policy_grant_all_of_dot_ssh")" ] || policy_needs_recreate=1
+  if [ "$policy_recorded_lifecycle_state" != absent ]; then
+    if ! policy_decision_policy_matches_recorded; then policy_needs_recreate=1; fi
+    # Legacy containers have no complete labels even when their inferred mounts match. A stopped
+    # legacy container therefore still needs reconciliation, while a running one may be used in
+    # place when the inferred policy is an exact match.
+    if [ "$policy_recorded_status" = legacy ] && [ "$policy_recorded_lifecycle_state" = stopped ]; then
+      policy_needs_recreate=1
     fi
-    if [ "$policy_needs_recreate" = 1 ] && is_running && [ "$policy_apply" != 1 ]; then
-      echo "agentbox: $cname has policy state different from the resolved host policy; refusing to execute or change it while running." >&2
-      echo "agentbox: run the explicit apply operation, for example: AGENTBOX_NO_GIT=${policy_git_enabled:+$((1-policy_git_enabled))} ab start --apply" >&2
-      return 1
+  fi
+  policy_decide "$mode" || return 1
+  if [ "$policy_decision_kind" = refuse ]; then
+    if [ "$mode" = exec ] && [ "$policy_explicit_exec_command" = 1 ] &&
+       [ "$policy_decision_explicit_exec_mode" = diagnostic-only ]; then
+      return 0
     fi
+    policy_fail "${policy_decision_reason_code}; use the explicit apply/reconciliation path"
+    return 1
   fi
 }
 
@@ -2051,6 +2512,7 @@ parse_exec_options() {
   local arg
   shift
   policy_input_begin || return 1
+  policy_explicit_exec_command=1
   policy_command_args=()
   while [ "$#" -gt 0 ]; do
     arg="$1"
@@ -2077,6 +2539,7 @@ parse_exec_options() {
 parse_convenience_options() {
   local arg
   policy_input_begin || return 1
+  policy_explicit_exec_command=0
   policy_command_args=()
   [ "$#" -gt 0 ] || return 0
   policy_command_args+=("$1")
@@ -2102,6 +2565,7 @@ parse_convenience_options() {
 }
 
 cmd_start() {
+  if [ "${policy_operation_requested:-0}" = 1 ]; then policy_decision_require || exit 1; fi
   if [ "${policy_operation_requested:-0}" = 1 ]; then
     policy_resolution_recheck start || exit 1
     grant_sources_validate_snapshot || exit 1
@@ -2168,6 +2632,7 @@ cmd_start() {
 cmd_config() {
   policy_resolution_recheck config || return 1
   policy_inspect_recorded "${policy_mount_consistency:-unknown}"
+  policy_decide config || return 1
   local config_git_enabled="$policy_git_enabled"
   local config_grant_gh="$policy_grant_gh"
   local config_grant_all_of_dot_ssh="$policy_grant_all_of_dot_ssh"
@@ -2344,16 +2809,31 @@ ab_append_current_env() {
 }
 
 cmd_exec() {
+  local diagnostic_exec=0
   if [ "${policy_operation_requested:-0}" = 1 ]; then
     policy_resolution_recheck exec || exit 1
     grant_sources_validate_snapshot || exit 1
     grant_sources_recheck || exit 1
+    if [ "$policy_decision_kind" = refuse ] &&
+       [ "$policy_explicit_exec_command" = 1 ] &&
+       [ "$policy_decision_explicit_exec_mode" = diagnostic-only ]; then
+      diagnostic_exec=1
+    else
+      policy_decision_require || exit 1
+    fi
   fi
   require_jj_state_mount
-  is_running || cmd_start
-  # Covers a concurrent `ab start`, or a container started directly with `docker start`, where
-  # cmd_start was not the process that waited for the entrypoint's jj ownership repair.
-  wait_jj_state
+  if [ "$diagnostic_exec" = 1 ]; then
+    # Diagnostic-only explicit exec is permitted only against the already-running outer
+    # container. It must not auto-start, wait for nested readiness, mutate, or retry lifecycle
+    # work while a prior Task 7 operation is degraded or not ready.
+    is_running || { policy_fail "diagnostic-only exec requires a running outer container"; exit 1; }
+  else
+    is_running || cmd_start
+    # Covers a concurrent `ab start`, or a container started directly with `docker start`, where
+    # cmd_start was not the process that waited for the entrypoint's jj ownership repair.
+    wait_jj_state
+  fi
   # No command (or a bare `bash`) → an interactive shell. Interactive non-login bash
   # sources ~/.bashrc on startup, which is where claude()/codex() are defined.
   if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = bash ]; }; then
@@ -2401,7 +2881,7 @@ main() {
     policy_operation_begin || exit 1
     policy_preflight start
     policy_resolution_recheck start || exit 1
-    [ "$policy_updates_check" = 1 ] && check_for_update
+    [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     cmd_start
     ;;
   stop)
@@ -2452,7 +2932,9 @@ main() {
     ;;
   config)
     policy_operation_begin || exit 1
-    policy_load_host; grant_sources_snapshot || exit 1; [ "$policy_updates_check" = 1 ] && check_for_update
+    policy_preflight config || exit 1
+    policy_resolution_recheck config || exit 1
+    [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     shift
     if [ "${1:-}" = init ]; then
       shift
@@ -2472,7 +2954,7 @@ main() {
     policy_operation_begin || exit 1
     policy_preflight exec
     policy_resolution_recheck exec || exit 1
-    [ "$policy_updates_check" = 1 ] && check_for_update
+    [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     cmd_exec "${policy_command_args[@]}"
     ;;
   build | rebuild)
@@ -2481,7 +2963,7 @@ main() {
     policy_operation_begin || exit 1
     policy_preflight rebuild
     policy_resolution_recheck rebuild || exit 1
-    [ "$policy_updates_check" = 1 ] && check_for_update
+    [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     require_sysbox
     policy_final_mutation_guard rebuild || exit 1
     tag="$(build_image force "$nocache")" || exit 1
@@ -2511,7 +2993,7 @@ main() {
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
   --version) echo "agentbox $AB_VERSION"; exit 0 ;;
-  *) parse_convenience_options "$@"; policy_operation_begin || exit 1; policy_preflight exec; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
+  *) parse_convenience_options "$@"; policy_operation_begin || exit 1; policy_preflight exec; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
   esac
 }
 

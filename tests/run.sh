@@ -507,16 +507,39 @@ echo "recorded policy inspection and lifecycle preflight (bin/ab)"
 # invalid rather than an implicit credential grant.
 _saved_exists_fn="$(declare -f exists 2>/dev/null || true)"
 _saved_running_fn="$(declare -f is_running 2>/dev/null || true)"
-_saved_policy_label_fn="$(declare -f policy_label 2>/dev/null || true)"
-_saved_namespace_labels_fn="$(declare -f policy_namespace_labels 2>/dev/null || true)"
-_saved_mount_dest_fn="$(declare -f container_has_mount_destination 2>/dev/null || true)"
-_saved_git_source_fn="$(declare -f container_git_mount_source 2>/dev/null || true)"
+_saved_policy_label_fn="$(declare -f policy_snapshot_label 2>/dev/null || true)"
+_saved_namespace_labels_fn="$(declare -f policy_snapshot_namespace_labels 2>/dev/null || true)"
+_saved_mount_dest_fn="$(declare -f policy_snapshot_has_mount_destination 2>/dev/null || true)"
+_saved_git_source_fn="$(declare -f policy_snapshot_git_mount_source 2>/dev/null || true)"
+_saved_container_snapshot_fn="$(declare -f policy_container_snapshot 2>/dev/null || true)"
 mock_version=""; mock_git=""; mock_gh=""; mock_ssh=""; mock_digest=""
-mock_git_mount=0; mock_git_source=""; mock_gh_mount=0; mock_ssh_mount=0
+mock_git_mount=0; mock_git_source=""; mock_gitconfig_mount=0; mock_xdg_gitconfig_mount=0
+mock_gh_mount=0; mock_ssh_mount=0; mock_known_hosts_mount=0
+mock_container_exists=1; mock_container_running=1; mock_snapshot_calls=0
 exists() { return 0; }
 is_running() { return 0; }
-policy_namespace_labels() { :; }
-policy_label() {
+policy_container_snapshot() {
+  mock_snapshot_calls=$((mock_snapshot_calls + 1))
+  policy_container_snapshot_reset
+  [ "$mock_container_exists" = 1 ] || return 1
+  if [ "$mock_container_running" = 1 ]; then policy_container_snapshot_lifecycle=running; else policy_container_snapshot_lifecycle=stopped; fi
+  [ -n "$mock_version" ] && policy_container_snapshot_labels[org.agentbox.policy.version]="$mock_version"
+  [ -n "$mock_git" ] && policy_container_snapshot_labels[org.agentbox.policy.git_enabled]="$mock_git"
+  [ -n "$mock_gh" ] && policy_container_snapshot_labels[org.agentbox.policy.github_grant]="$mock_gh"
+  [ -n "$mock_ssh" ] && policy_container_snapshot_labels[org.agentbox.policy.ssh_grant_all]="$mock_ssh"
+  [ -n "$mock_digest" ] && policy_container_snapshot_labels[org.agentbox.policy.digest]="$mock_digest"
+  [ -n "${mock_old_gh-}" ] && policy_container_snapshot_labels[agentbox.grant-gh]="$mock_old_gh"
+  [ -n "${mock_old_ssh-}" ] && policy_container_snapshot_labels[agentbox.grant-all-of-dot-ssh]="$mock_old_ssh"
+  [ "$mock_git_mount" = 1 ] && policy_container_snapshot_mount_sources[/usr/bin/git]="$mock_git_source"
+  [ "$mock_gitconfig_mount" = 1 ] && policy_container_snapshot_mount_sources[/home/agentbox/.gitconfig]=legacy
+  [ "$mock_xdg_gitconfig_mount" = 1 ] && policy_container_snapshot_mount_sources[/home/agentbox/.config/git/config]=legacy
+  [ "$mock_gh_mount" = 1 ] && policy_container_snapshot_mount_sources[/home/agentbox/.config/gh]=legacy
+  [ "$mock_ssh_mount" = 1 ] && policy_container_snapshot_mount_sources[/home/agentbox/.ssh]=legacy
+  [ "$mock_known_hosts_mount" = 1 ] && policy_container_snapshot_mount_sources[/home/agentbox/.ssh/known_hosts]=legacy
+  policy_container_snapshot_ready=1
+}
+policy_snapshot_namespace_labels() { :; }
+policy_snapshot_label() {
   case "$1" in
     org.agentbox.policy.version) printf '%s' "$mock_version" ;;
     org.agentbox.policy.git_enabled) printf '%s' "$mock_git" ;;
@@ -527,15 +550,18 @@ policy_label() {
     agentbox.grant-all-of-dot-ssh) printf '%s' "${mock_old_ssh-}" ;;
   esac
 }
-container_has_mount_destination() {
+policy_snapshot_has_mount_destination() {
   case "$1" in
     /usr/bin/git) [ "$mock_git_mount" = 1 ] ;;
+    /home/agentbox/.gitconfig) [ "$mock_gitconfig_mount" = 1 ] ;;
+    /home/agentbox/.config/git/config) [ "$mock_xdg_gitconfig_mount" = 1 ] ;;
     /home/agentbox/.config/gh) [ "$mock_gh_mount" = 1 ] ;;
     /home/agentbox/.ssh) [ "$mock_ssh_mount" = 1 ] ;;
+    /home/agentbox/.ssh/known_hosts) [ "$mock_known_hosts_mount" = 1 ] ;;
     *) return 1 ;;
   esac
 }
-container_git_mount_source() { printf '%s' "$mock_git_source"; }
+policy_snapshot_git_mount_source() { printf '%s' "$mock_git_source"; }
 mock_old_gh=""; mock_old_ssh=""
 policy_inspect_recorded
 assert_eq "plain legacy defaults Git on" "legacy" "$policy_recorded_status"
@@ -568,20 +594,83 @@ assert_eq "one GH label without mount is invalid" "invalid" "$policy_recorded_st
 mock_old_gh=bad; mock_gh_mount=0
 policy_inspect_recorded
 assert_eq "malformed old GH label is invalid" "invalid" "$policy_recorded_status"
-exists() { return 1; }
+mock_container_exists=0
 policy_inspect_recorded
 assert_eq "absent container classification" "absent" "$policy_recorded_classification"
 assert_eq "absent container lifecycle" "absent" "$policy_recorded_lifecycle_state"
-exists() { return 0; }
+mock_container_exists=1
 mock_old_gh=""; mock_old_ssh=""; mock_git_mount=0; mock_git_source=""
+mock_container_running=0
 is_running() { return 1; }
 mock_version=1; mock_git=true; mock_gh=false; mock_ssh=false
 mock_digest="sha256:$(policy_digest_for 1 0 0)"
 policy_inspect_recorded
 assert_eq "complete labels are valid" "valid" "$policy_recorded_classification"
 assert_eq "stopped container lifecycle" "stopped" "$policy_recorded_lifecycle_state"
-assert_eq "complete labels mount state unknown" "unknown" "$policy_recorded_mount_consistency"
-policy_namespace_labels() {
+assert_eq "complete labels mount state inspected" "matching" "$policy_recorded_mount_consistency"
+mock_git_mount=1; mock_git_source=/tmp/unrelated-git
+policy_inspect_recorded
+assert_eq "versioned labels with contradictory Git mount are stale" "stale" "$policy_recorded_classification"
+assert_eq "versioned mount contradiction is explained" 1 \
+  "$(printf '%s' "$policy_recorded_detail" | grep -c 'Git-enabled label contradicts')"
+mock_git_mount=0; mock_git_source=""; mock_gh_mount=1
+policy_inspect_recorded
+assert_eq "versioned false GitHub grant with mount is stale" "stale" "$policy_recorded_classification"
+assert_eq "versioned GitHub contradiction is explained" 1 \
+  "$(printf '%s' "$policy_recorded_detail" | grep -c 'GitHub-grant label is false')"
+mock_gh_mount=0; mock_ssh_mount=0; mock_known_hosts_mount=1
+policy_inspect_recorded
+assert_eq "versioned false SSH grant with known_hosts is stale" "stale" "$policy_recorded_classification"
+assert_eq "versioned SSH contradiction is explained" 1 \
+  "$(printf '%s' "$policy_recorded_detail" | grep -c 'SSH-grant label is false')"
+mock_known_hosts_mount=0
+mock_version=1; mock_git=false; mock_gh=false; mock_ssh=false
+mock_digest="sha256:$(policy_digest_for 0 0 0)"; mock_git_mount=1; mock_git_source="$GIT_BLOCKER"; mock_gitconfig_mount=1
+policy_inspect_recorded
+assert_eq "versioned no-Git config mount is stale" "stale" "$policy_recorded_classification"
+assert_eq "versioned no-Git config contradiction is explained" 1 \
+  "$(printf '%s' "$policy_recorded_detail" | grep -c 'Git-disabled label contradicts')"
+mock_git=false; mock_digest="sha256:$(policy_digest_for 0 0 0)"; mock_gitconfig_mount=0
+policy_inspect_recorded
+assert_eq "versioned no-Git matching mounts are valid" "valid" "$policy_recorded_classification"
+
+# The production seam must not combine observations from separate Docker calls. Simulate a
+# replacement immediately after the first snapshot: the replacement adds a contradictory Git
+# mount, but classification must still use the captured state and must make exactly one snapshot.
+mock_version=1; mock_git=true; mock_gh=false; mock_ssh=false
+mock_digest="sha256:$(policy_digest_for 1 0 0)"; mock_git_mount=0; mock_git_source=""
+mock_snapshot_calls=0
+policy_container_snapshot() {
+  policy_container_snapshot_fixture
+  if [ "$mock_snapshot_calls" = 1 ]; then
+    mock_git_mount=1
+    mock_git_source=/tmp/replacement-git
+  fi
+}
+policy_container_snapshot_fixture() {
+  mock_snapshot_calls=$((mock_snapshot_calls + 1))
+  policy_container_snapshot_reset
+  [ "$mock_container_exists" = 1 ] || return 1
+  if [ "$mock_container_running" = 1 ]; then policy_container_snapshot_lifecycle=running; else policy_container_snapshot_lifecycle=stopped; fi
+  [ -n "$mock_version" ] && policy_container_snapshot_labels[org.agentbox.policy.version]="$mock_version"
+  [ -n "$mock_git" ] && policy_container_snapshot_labels[org.agentbox.policy.git_enabled]="$mock_git"
+  [ -n "$mock_gh" ] && policy_container_snapshot_labels[org.agentbox.policy.github_grant]="$mock_gh"
+  [ -n "$mock_ssh" ] && policy_container_snapshot_labels[org.agentbox.policy.ssh_grant_all]="$mock_ssh"
+  [ -n "$mock_digest" ] && policy_container_snapshot_labels[org.agentbox.policy.digest]="$mock_digest"
+  [ "$mock_git_mount" = 1 ] && policy_container_snapshot_mount_sources[/usr/bin/git]="$mock_git_source"
+  policy_container_snapshot_ready=1
+}
+unset -f policy_snapshot_label policy_snapshot_namespace_labels policy_snapshot_has_mount_destination policy_snapshot_git_mount_source
+eval "$_saved_policy_label_fn"
+eval "$_saved_namespace_labels_fn"
+eval "$_saved_mount_dest_fn"
+eval "$_saved_git_source_fn"
+policy_inspect_recorded
+assert_eq "replacement after snapshot does not mix state" "valid" "$policy_recorded_classification"
+assert_eq "recorded inspection uses one Docker snapshot" 1 "$mock_snapshot_calls"
+policy_container_snapshot() { policy_container_snapshot_fixture; }
+mock_git=true; mock_digest="sha256:$(policy_digest_for 1 0 0)"; mock_git_mount=0; mock_git_source=""
+policy_snapshot_namespace_labels() {
   printf '%s\n' \
     'org.agentbox.policy.version = 1' \
     'org.agentbox.policy.git_enabled = true' \
@@ -609,17 +698,18 @@ policy_inspect_recorded contradictory
 assert_eq "legacy contradictory mounts are invalid" "invalid" "$policy_recorded_classification"
 assert_eq "legacy contradiction is not migratable" "invalid" "$policy_recorded_status"
 assert_eq "legacy contradiction is explained" 1 "$(printf '%s' "$policy_recorded_detail" | grep -c 'mount consistency is contradictory')"
-policy_namespace_labels() { printf '%s\n' 'org.agentbox.policy.extra=value'; }
+policy_snapshot_namespace_labels() { printf '%s\n' 'org.agentbox.policy.extra=value'; }
 policy_inspect_recorded
 assert_eq "extra policy label is invalid" "invalid" "$policy_recorded_classification"
 assert_eq "extra policy label is explained" 1 "$(printf '%s' "$policy_recorded_detail" | grep -c 'unsupported recorded policy label')"
-unset -f exists policy_label container_has_mount_destination container_git_mount_source
+unset -f exists policy_snapshot_label policy_snapshot_has_mount_destination policy_snapshot_git_mount_source policy_container_snapshot
 eval "$_saved_exists_fn"
 eval "$_saved_running_fn"
 eval "$_saved_policy_label_fn"
 eval "$_saved_namespace_labels_fn"
 eval "$_saved_mount_dest_fn"
 eval "$_saved_git_source_fn"
+eval "$_saved_container_snapshot_fn"
 
 # The state matrix exercises the lifecycle gate without requiring a Docker daemon: mismatches on
 # running containers refuse normally, explicit apply permits them, and stopped containers are
@@ -1141,10 +1231,12 @@ assert_eq "rebuild captures CLI SSH unset" unset "${policy_input[cli_grant_ssh]}
 parse_exec_options exec --no-git --grant-gh echo hello
 assert_eq "exec captures policy prefix" "false true unset" \
   "${policy_input[cli_git_enabled]} ${policy_input[cli_grant_gh]} ${policy_input[cli_grant_ssh]}"
+assert_eq "explicit exec records command authority" 1 "$policy_explicit_exec_command"
 assert_eq "exec preserves command arguments" "echo hello" "${policy_command_args[*]}"
 parse_convenience_options claude --grant-gh --no-git --resume
 assert_eq "claude captures policy flags" "true false unset" \
   "${policy_input[cli_grant_gh]} ${policy_input[cli_git_enabled]} ${policy_input[cli_grant_ssh]}"
+assert_eq "convenience execution is not explicit exec" 0 "$policy_explicit_exec_command"
 assert_eq "claude preserves command arguments" "claude --resume" "${policy_command_args[*]}"
 parse_convenience_options codex --grant-all-of-dot-ssh --model o3
 assert_eq "codex captures SSH grant" true "${policy_input[cli_grant_ssh]}"
@@ -1336,6 +1428,408 @@ assert_eq "unknown file name not created" "0" \
 
 rm -rf "$(dirname "$_icfg")"
 AB_CFG_ROOT="$_saved_cfg_root" MACHINE="$_saved_machine" PROJECT_DIR="$_saved_project"
+
+echo
+echo "Task 6 policy decisions (bin/ab)"
+# The decision layer is pure: fixtures below set the Task 5 recorded-state handoff and the
+# Task 7 overlay directly, then inspect its fixed output without invoking Docker or lifecycle
+# helpers. This keeps every matrix/overlay assertion independent of the host daemon.
+decision_fixture() {
+  policy_operation_status=none
+  policy_readiness_result=not-applicable
+  policy_apply=0
+  policy_git_source=default
+  policy_git_enabled=1
+  policy_grant_gh=0
+  policy_grant_all_of_dot_ssh=0
+  policy_recorded_status=none
+  policy_recorded_classification=absent
+  policy_recorded_lifecycle_state=absent
+  policy_recorded_git_enabled=""
+  policy_recorded_grant_gh=""
+  policy_recorded_grant_all_of_dot_ssh=""
+  policy_recorded_digest=""
+}
+decision_fixture
+policy_decide start
+assert_eq "absent creates" create "$policy_decision_kind"
+assert_eq "absent permits mutation" 1 "$policy_decision_mutation_allowed"
+assert_eq "absent permits execution" 1 "$policy_decision_execution_allowed"
+
+decision_fixture
+policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=stopped
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+policy_decide start
+assert_eq "stopped matching starts in place" start-in-place "$policy_decision_kind"
+assert_eq "stopped matching may mutate" 1 "$policy_decision_mutation_allowed"
+
+policy_grant_gh=1
+policy_decide start
+assert_eq "stopped difference reconciles" reconcile-stopped "$policy_decision_kind"
+assert_eq "stopped difference needs no apply" 0 "$policy_decision_explicit_apply_required"
+
+decision_fixture
+policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"; policy_grant_gh=1
+policy_decide exec
+assert_eq "running mismatch refuses" refuse "$policy_decision_kind"
+assert_eq "running mismatch cannot mutate" 0 "$policy_decision_mutation_allowed"
+assert_eq "running mismatch requires apply" 1 "$policy_decision_explicit_apply_required"
+
+policy_apply=1
+policy_decide start
+assert_eq "running apply reconciles" reconcile-running "$policy_decision_kind"
+assert_eq "running apply mutates" 1 "$policy_decision_mutation_allowed"
+
+decision_fixture
+policy_recorded_status=legacy; policy_recorded_classification=legacy; policy_recorded_lifecycle_state=running
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_decide exec
+assert_eq "running matching legacy proceeds" start-in-place "$policy_decision_kind"
+assert_eq "running matching legacy does not recreate" 0 "$policy_decision_mutation_allowed"
+
+decision_fixture
+policy_recorded_status=stale; policy_recorded_classification=stale; policy_recorded_lifecycle_state=stopped
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_decide rebuild
+assert_eq "stale rebuild requires Git input" refuse "$policy_decision_kind"
+assert_eq "stale rebuild requires reconciliation" 1 "$policy_decision_explicit_apply_required"
+policy_git_source=cli
+policy_decide rebuild
+assert_eq "explicit Git input rebuilds" build-recreate "$policy_decision_kind"
+assert_eq "explicit Git input permits mutation" 1 "$policy_decision_mutation_allowed"
+policy_decision build
+assert_eq "build alias uses shared decision" build-recreate "$policy_decision_kind"
+
+decision_fixture
+policy_recorded_status=invalid; policy_recorded_classification=invalid; policy_recorded_lifecycle_state=stopped
+policy_decide config
+assert_eq "invalid config reports only" report-only "$policy_decision_kind"
+assert_eq "invalid config blocks update" 0 "$policy_decision_update_allowed"
+
+# Every command family consumes the same base decision, and every non-ready operation overlay
+# must suppress mutation/update consistently. Keep this matrix explicit so a new command cannot
+# accidentally bypass the shared gate while tests cover only `exec`.
+for _mode in start exec rebuild; do
+  decision_fixture
+  policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+  policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+  policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+  policy_decide "$_mode"
+  if [ "$_mode" = rebuild ]; then _expected_kind=build-recreate; else _expected_kind=start-in-place; fi
+  assert_eq "$_mode complete-ready base decision" "$_expected_kind" "$policy_decision_kind"
+  assert_eq "$_mode complete-ready allows execution or build" 1 "$([ "$_mode" = rebuild ] && echo "$policy_decision_mutation_allowed" || echo "$policy_decision_execution_allowed")"
+done
+decision_fixture
+policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+policy_decide config
+assert_eq "config complete-ready remains report-only" report-only "$policy_decision_kind"
+
+for _overlay in in-progress removal-failed absent-after-failure network-degraded readiness-failed; do
+  for _mode in start exec rebuild; do
+    decision_fixture
+    policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+    policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+    policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+    policy_operation_status="$_overlay"
+    policy_decide "$_mode"
+    assert_eq "$_overlay blocks $_mode" refuse "$policy_decision_kind"
+    assert_eq "$_overlay blocks $_mode mutation" 0 "$policy_decision_mutation_allowed"
+    assert_eq "$_overlay blocks $_mode update" 0 "$policy_decision_update_allowed"
+  done
+  decision_fixture
+  policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+  policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+  policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+  policy_operation_status="$_overlay"
+  policy_decide config
+  assert_eq "$_overlay config remains report-only" report-only "$policy_decision_kind"
+  assert_eq "$_overlay config blocks update" 0 "$policy_decision_update_allowed"
+done
+
+decision_fixture
+policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+policy_decide exec
+policy_operation_status=in-progress
+policy_decide exec
+assert_eq "in-progress overlay refuses" refuse "$policy_decision_kind"
+assert_eq "in-progress blocks explicit exec" blocked "$policy_decision_explicit_exec_mode"
+assert_eq "in-progress blocks update" 0 "$policy_decision_update_allowed"
+
+for _operation_status in removal-failed absent-after-failure; do
+  policy_operation_status="$_operation_status"
+  policy_decide exec
+  assert_eq "$_operation_status overlay refuses" refuse "$policy_decision_kind"
+  assert_eq "$_operation_status blocks mutation" 0 "$policy_decision_mutation_allowed"
+  assert_eq "$_operation_status blocks update" 0 "$policy_decision_update_allowed"
+done
+
+policy_operation_status=complete; policy_readiness_result=ready
+policy_decide exec
+assert_eq "complete ready overlay uses base decision" start-in-place "$policy_decision_kind"
+assert_eq "complete ready overlay permits exec" allowed "$policy_decision_explicit_exec_mode"
+
+decision_fixture
+policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"; policy_operation_status=network-degraded
+policy_decide exec
+assert_eq "degraded overlay refuses ordinary exec" refuse "$policy_decision_kind"
+assert_eq "degraded overlay permits diagnostics" diagnostic-only "$policy_decision_explicit_exec_mode"
+
+policy_recorded_lifecycle_state=stopped; policy_readiness_result=failed-but-running
+policy_decide exec
+assert_eq "failed readiness blocks stopped diagnostics" blocked "$policy_decision_explicit_exec_mode"
+assert_eq "failed readiness blocks mutation" 0 "$policy_decision_mutation_allowed"
+
+# Exercise the complete base-state matrix, including both lifecycle states and the explicit
+# start-apply column. These cases intentionally call only the shared decision function: Docker,
+# update, network, and execution helpers are not available to this layer.
+decision_matrix_case() {
+  local name="$1" classification="$2" lifecycle="$3" mode="$4" apply="$5" expected="$6"
+  decision_fixture
+  policy_recorded_classification="$classification"
+  policy_recorded_status="$classification"
+  policy_recorded_lifecycle_state="$lifecycle"
+  policy_apply="$apply"
+  if [ "$classification" = valid ] || [ "$classification" = legacy ]; then
+    policy_recorded_git_enabled=1
+    policy_recorded_grant_gh=0
+    policy_recorded_grant_all_of_dot_ssh=0
+    policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+  fi
+  if [[ "$name" = *mismatch* ]]; then
+    policy_grant_gh=1
+    if [ "$classification" = valid ]; then
+      policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+    fi
+  fi
+  policy_decide "$mode"
+  assert_eq "$name" "$expected" "$policy_decision_kind"
+}
+
+for _state in absent legacy valid stale invalid; do
+  case "$_state" in
+    absent) _lifecycle=absent ;;
+    legacy|valid) _lifecycle=stopped ;;
+    stale|invalid) _lifecycle=stopped ;;
+  esac
+  if [ "$_state" = absent ]; then
+    decision_matrix_case "$_state start" "$_state" "$_lifecycle" start 0 create
+    decision_matrix_case "$_state exec" "$_state" "$_lifecycle" exec 0 create
+    decision_matrix_case "$_state rebuild" "$_state" "$_lifecycle" rebuild 0 build-recreate
+  elif [ "$_state" = stale ] || [ "$_state" = invalid ]; then
+    decision_matrix_case "$_state start refuses" "$_state" "$_lifecycle" start 0 refuse
+    decision_matrix_case "$_state exec refuses" "$_state" "$_lifecycle" exec 0 refuse
+    decision_matrix_case "$_state rebuild requires Git input" "$_state" "$_lifecycle" rebuild 0 refuse
+  else
+    if [ "$_state" = legacy ]; then
+      decision_matrix_case "$_state stopped start" "$_state" "$_lifecycle" start 0 reconcile-stopped
+      decision_matrix_case "$_state stopped exec" "$_state" "$_lifecycle" exec 0 reconcile-stopped
+    else
+      decision_matrix_case "$_state stopped start" "$_state" "$_lifecycle" start 0 start-in-place
+      decision_matrix_case "$_state stopped exec" "$_state" "$_lifecycle" exec 0 start-in-place
+    fi
+    decision_matrix_case "$_state stopped rebuild" "$_state" "$_lifecycle" rebuild 0 build-recreate
+  fi
+  decision_matrix_case "$_state config" "$_state" "$_lifecycle" config 0 report-only
+done
+decision_matrix_case "valid stopped mismatch" valid stopped start 0 reconcile-stopped
+decision_matrix_case "valid stopped mismatch apply" valid stopped start 1 reconcile-stopped
+decision_matrix_case "valid running matching" valid running start 0 start-in-place
+decision_matrix_case "valid running matching exec" valid running exec 0 start-in-place
+decision_matrix_case "valid running mismatch refuses" valid running start 0 refuse
+decision_matrix_case "valid running mismatch apply" valid running start 1 reconcile-running
+decision_matrix_case "valid running mismatch exec refuses" valid running exec 0 refuse
+decision_matrix_case "legacy running matching" legacy running exec 0 start-in-place
+decision_matrix_case "legacy running mismatch refuses" legacy running start 0 refuse
+decision_matrix_case "legacy running mismatch apply" legacy running start 1 reconcile-running
+
+# Readiness is independently meaningful from the operation status. Pin both explicit-exec modes
+# and the refusal reason for each failed readiness outcome, including a usable running outer
+# container and an unavailable stopped one.
+for _readiness in failed-but-running failed-and-exited; do
+  decision_fixture
+  policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+  policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+  policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+  policy_readiness_result="$_readiness"
+  policy_decide exec
+  assert_eq "$_readiness readiness refuses" refuse "$policy_decision_kind"
+  assert_eq "$_readiness running diagnostics" diagnostic-only "$policy_decision_explicit_exec_mode"
+  assert_eq "$_readiness reason" "readiness-$_readiness" "$policy_decision_reason_code"
+  policy_recorded_lifecycle_state=stopped
+  policy_decide exec
+  assert_eq "$_readiness stopped diagnostics blocked" blocked "$policy_decision_explicit_exec_mode"
+done
+
+# An ordinary/convenience refusal must stop before the Docker mount check, lifecycle start, or
+# final execution boundary. This is the command-side proof for the overlay gate, complementing
+# the pure matrix above.
+_saved_gate_mount_fn="$(declare -f require_jj_state_mount)"
+_saved_gate_running_fn="$(declare -f is_running)"
+_saved_gate_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_gate_grants_recheck_fn="$(declare -f grant_sources_recheck)"
+_saved_gate_grants_validate_fn="$(declare -f grant_sources_validate_snapshot)"
+# These helpers terminate the isolated command with a sentinel if the refusal gate is bypassed.
+# The expected status remains policy refusal (1), so any attempted lifecycle or Docker boundary
+# is an immediate test failure without relying on state mutated inside a command substitution.
+require_jj_state_mount() { exit 77; }
+is_running() { exit 77; }
+policy_resolution_recheck() { return 0; }
+grant_sources_recheck() { return 0; }
+grant_sources_validate_snapshot() { return 0; }
+policy_operation_requested=1; policy_explicit_exec_command=0
+decision_fixture
+policy_recorded_status=valid; policy_recorded_classification=valid; policy_recorded_lifecycle_state=running
+policy_recorded_git_enabled=1; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+policy_operation_status=in-progress; policy_readiness_result=not-applicable
+policy_decide exec
+(_out="$(cmd_exec convenience 2>&1)"; _rc=$?; [ "$_rc" = 1 ])
+assert_eq "refused convenience command exits" 0 "$?"
+unset -f require_jj_state_mount is_running policy_resolution_recheck grant_sources_recheck grant_sources_validate_snapshot
+eval "$_saved_gate_mount_fn"; eval "$_saved_gate_running_fn"; eval "$_saved_gate_recheck_fn"
+eval "$_saved_gate_grants_recheck_fn"; eval "$_saved_gate_grants_validate_fn"
+policy_operation_requested=0
+
+# Explicit `ab exec` may reach Docker for diagnostics when the outer container is still running;
+# convenience commands must not inherit that exception. Override only the final shell exec so
+# this proves the command handoff without starting Docker or replacing the test process.
+_saved_exec_builtin_fn="$(declare -f exec 2>/dev/null || true)"
+_saved_diag_require_fn="$(declare -f require_jj_state_mount)"
+_saved_diag_running_fn="$(declare -f is_running)"
+_saved_diag_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_diag_grants_recheck_fn="$(declare -f grant_sources_recheck)"
+_saved_diag_grants_validate_fn="$(declare -f grant_sources_validate_snapshot)"
+mock_exec_args=()
+exec() { mock_exec_args=("$@"); return 0; }
+require_jj_state_mount() { :; }
+is_running() { return 0; }
+policy_resolution_recheck() { return 0; }
+grant_sources_recheck() { return 0; }
+grant_sources_validate_snapshot() { return 0; }
+policy_operation_requested=1
+policy_explicit_exec_command=1
+policy_operation_status=network-degraded
+policy_readiness_result=not-applicable
+policy_recorded_lifecycle_state=running
+policy_decide exec
+cmd_exec diagnostics >/dev/null 2>&1
+assert_eq "diagnostic explicit exec reaches Docker boundary" docker "${mock_exec_args[0]}"
+assert_eq "diagnostic explicit exec reaches requested command" 1 \
+  "$(printf '%s\n' "${mock_exec_args[@]}" | grep -c 'diagnostics')"
+policy_explicit_exec_command=0
+(_out="$(cmd_exec blocked 2>&1)"; _rc=$?; [ "$_rc" = 1 ])
+assert_eq "convenience path stays blocked during degradation" 0 "$?"
+unset -f exec require_jj_state_mount is_running policy_resolution_recheck grant_sources_recheck grant_sources_validate_snapshot
+[ -n "$_saved_exec_builtin_fn" ] && eval "$_saved_exec_builtin_fn"
+eval "$_saved_diag_require_fn"
+eval "$_saved_diag_running_fn"
+eval "$_saved_diag_recheck_fn"
+eval "$_saved_diag_grants_recheck_fn"
+eval "$_saved_diag_grants_validate_fn"
+policy_operation_requested=0
+
+# Invoke every required launcher entry point through `main`, rather than only testing the shared
+# decision function. The mocked preflight represents an in-progress Task 7 operation and refuses
+# before any post-gate helper can run; the sentinel helpers make a bypass observable.
+_saved_entry_parse_runtime_fn="$(declare -f parse_runtime_options)"
+_saved_entry_parse_exec_fn="$(declare -f parse_exec_options)"
+_saved_entry_parse_convenience_fn="$(declare -f parse_convenience_options)"
+_saved_entry_operation_begin_fn="$(declare -f policy_operation_begin)"
+_saved_entry_preflight_fn="$(declare -f policy_preflight)"
+_saved_entry_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_entry_update_fn="$(declare -f check_for_update)"
+_saved_entry_start_fn="$(declare -f cmd_start)"
+_saved_entry_exec_fn="$(declare -f cmd_exec)"
+_saved_entry_require_sysbox_fn="$(declare -f require_sysbox)"
+_saved_entry_build_fn="$(declare -f build_image)"
+_saved_entry_docker_fn="$(declare -f docker)"
+_saved_entry_network_fn="$(declare -f connect_networks)"
+_entry_log="$(mktemp)"
+entry_overlay=in-progress
+parse_runtime_options() { printf 'parse-runtime:%s\n' "$1" >>"$_entry_log"; }
+parse_exec_options() {
+  printf 'parse-exec\n' >>"$_entry_log"
+  policy_explicit_exec_command=1
+  policy_command_args=(diagnostics)
+}
+parse_convenience_options() {
+  printf 'parse-convenience:%s\n' "$1" >>"$_entry_log"
+  policy_explicit_exec_command=0
+  policy_command_args=("$1")
+}
+policy_operation_begin() { printf 'operation-begin\n' >>"$_entry_log"; return 0; }
+policy_preflight() {
+  printf 'preflight:%s\n' "$1" >>"$_entry_log"
+  policy_decision_update_allowed=0
+  if [ "$entry_overlay" = network-degraded ] && [ "$policy_explicit_exec_command" = 1 ]; then
+    policy_decision_kind=refuse
+    policy_decision_explicit_exec_mode=diagnostic-only
+    return 0
+  fi
+  return 1
+}
+policy_resolution_recheck() { printf 'resolution-recheck:%s\n' "$1" >>"$_entry_log"; return 0; }
+check_for_update() { printf 'update\n' >>"$_entry_log"; return 0; }
+cmd_start() { printf 'post-start\n' >>"$_entry_log"; return 0; }
+cmd_exec() { printf 'post-exec:%s\n' "$*" >>"$_entry_log"; return 0; }
+require_sysbox() { printf 'post-sysbox\n' >>"$_entry_log"; return 0; }
+build_image() { printf 'post-build\n' >>"$_entry_log"; return 1; }
+docker() { printf 'post-docker:%s\n' "$*" >>"$_entry_log"; return 1; }
+connect_networks() { printf 'post-network\n' >>"$_entry_log"; return 0; }
+
+entry_run() {
+  : >"$_entry_log"
+  ( set -e; main "$@" ) >/dev/null 2>&1
+}
+
+for _entry_spec in "start:start" "build:rebuild" "rebuild:rebuild" \
+                   "claude:exec" "codex:exec" "bash:exec" "exec:exec"; do
+  IFS=: read -r _entry_command _entry_mode <<<"$_entry_spec"
+  entry_overlay=in-progress
+  entry_run "$_entry_command"
+  _entry_rc=$?
+  assert_eq "main $_entry_command refuses in-progress operation" 1 "$_entry_rc"
+  assert_eq "main $_entry_command invokes $_entry_mode preflight" 1 \
+    "$(grep -c "^preflight:$_entry_mode$" "$_entry_log")"
+  assert_eq "main $_entry_command has no post-gate side effect" 0 \
+    "$(grep -Ec '^post-|^update$' "$_entry_log")"
+done
+
+# The explicit `exec` entry point is the one permitted exception: a degraded running outer
+# container reaches the diagnostic command boundary, while the ordinary matrix above remains
+# refused. This also proves the main-dispatch path preserves explicit-exec authority.
+entry_overlay=network-degraded
+entry_run exec
+_entry_rc=$?
+assert_eq "main exec allows diagnostic overlay" 0 "$_entry_rc"
+assert_eq "main exec diagnostic reaches command boundary" 1 \
+  "$(grep -c '^post-exec:diagnostics$' "$_entry_log")"
+assert_eq "main exec diagnostic skips update" 0 "$(grep -c '^update$' "$_entry_log")"
+
+rm -f "$_entry_log"
+unset -f parse_runtime_options parse_exec_options parse_convenience_options policy_operation_begin
+unset -f policy_preflight policy_resolution_recheck check_for_update cmd_start cmd_exec
+unset -f require_sysbox build_image docker connect_networks
+eval "$_saved_entry_parse_runtime_fn"; eval "$_saved_entry_parse_exec_fn"
+eval "$_saved_entry_parse_convenience_fn"; eval "$_saved_entry_operation_begin_fn"
+eval "$_saved_entry_preflight_fn"; eval "$_saved_entry_recheck_fn"; eval "$_saved_entry_update_fn"
+eval "$_saved_entry_start_fn"; eval "$_saved_entry_exec_fn"
+eval "$_saved_entry_require_sysbox_fn"; eval "$_saved_entry_build_fn"
+eval "$_saved_entry_docker_fn"; eval "$_saved_entry_network_fn"
+policy_operation_requested=0
+
+_decision_record="$(policy_decision_record)"
+assert_eq "decision record has one kind" 1 "$(printf '%s\n' "$_decision_record" | grep -c '^kind=')"
+assert_eq "decision record has reason" 1 "$(printf '%s\n' "$_decision_record" | grep -c '^reason_code=')"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
