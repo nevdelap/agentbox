@@ -812,6 +812,8 @@ mounts=()
 jj_config_paths=()
 add_host_config_mounts
 policy_git_enabled=1
+policy_grant_gh=0
+policy_grant_all_of_dot_ssh=0
 add_policy_mounts
 assert_eq "mounts git config" "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro" \
   "$(ab_mount_dest_owner /home/agentbox/.gitconfig)"
@@ -831,8 +833,8 @@ if [ -n "$_saved_xdg" ]; then XDG_CONFIG_HOME="$_saved_xdg"; else unset XDG_CONF
 mounts=("${_saved_mounts[@]}")
 rm -rf "$_cfg_home"
 
-# A clean host has no tool state directories. Preparation must create them as the invoking
-# user, and the newly-created gh directory must be added to the default mount set.
+# A clean host has no tool state directories. Preparation must create only the launcher-owned
+# state directories as the invoking user; a granted GitHub source must already exist.
 _state_home="$(mktemp -d)"
 _saved_home="$HOME"
 _saved_mounts=("${mounts[@]}")
@@ -849,6 +851,12 @@ assert_eq "creates Codex state dir"  "1" "$([ -d "$HOME/.codex" ] && echo 1 || e
 assert_eq "does not create gh state dir by default" "0" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
 grant_gh=1
 policy_grant_gh=1
+prepare_host_state >/dev/null 2>&1
+_missing_gh_rc=$?
+assert_eq "missing gh source rejects grant" 1 "$_missing_gh_rc"
+assert_eq "missing gh source is not created" "0" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
+assert_eq "missing gh source is not mounted" "" "$(ab_mount_dest_owner /home/agentbox/.config/gh)"
+mkdir -p "$HOME/.config/gh"
 prepare_host_state
 assert_eq "creates gh state dir with grant" "1" "$([ -d "$HOME/.config/gh" ] && echo 1 || echo 0)"
 assert_eq "mounts gh state dir with grant" "$HOME/.config/gh:/home/agentbox/.config/gh" \
@@ -866,6 +874,134 @@ assert_eq "gh grant label enabled" "--label agentbox.grant-gh=1" "${grant_labels
 HOME="$_saved_home"
 mounts=("${_saved_mounts[@]}")
 rm -rf "$_state_home"
+
+echo
+echo "Task 4 mount specification (bin/ab)"
+_mount_spec_home="$(mktemp -d)"
+_mount_spec_blocker="$(mktemp)"
+_mount_spec_cfg="$(mktemp)"
+_saved_mount_spec_home="$HOME"
+_saved_mount_spec_git_blocker="$GIT_BLOCKER"
+_saved_mount_spec_cfg_mounts="$cfg_mounts"
+_saved_mount_spec_git="$policy_git_enabled"
+_saved_mount_spec_gh="$policy_grant_gh"
+_saved_mount_spec_ssh="$policy_grant_all_of_dot_ssh"
+HOME="$_mount_spec_home"
+GIT_BLOCKER="$_mount_spec_blocker"
+cfg_mounts=""
+mkdir -p "$HOME/.config/git" "$HOME/.config/gh" "$HOME/.ssh"
+: >"$HOME/.gitconfig"
+: >"$HOME/.config/git/config"
+: >"$HOME/.ssh/known_hosts"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$GIT_BLOCKER"
+chmod 755 "$GIT_BLOCKER"
+
+_mount_spec_lines="$(mount_spec_record)"
+assert_eq "mount spec has six fixed entries" "6" "$(printf '%s\n' "$_mount_spec_lines" | wc -l)"
+assert_eq "mount spec key order" \
+  "git_blocker git_config github_config ssh_dir known_hosts custom_conflicts" \
+  "$(printf '%s\n' "$_mount_spec_lines" | cut -f1 | paste -sd' ' -)"
+
+for _git_enabled in 0 1; do
+  for _grant_gh in 0 1; do
+    for _grant_ssh in 0 1; do
+      policy_git_enabled="$_git_enabled"
+      policy_grant_gh="$_grant_gh"
+      policy_grant_all_of_dot_ssh="$_grant_ssh"
+      mount_spec_build >/dev/null 2>&1
+      _mount_spec_rc=$?
+      assert_eq "mount matrix $_git_enabled/$_grant_gh/$_grant_ssh builds" 0 "$_mount_spec_rc"
+      _git_state="${mount_spec_state[git_blocker]}"
+      _git_config_state="${mount_spec_state[git_config]}"
+      _gh_state="${mount_spec_state[github_config]}"
+      _ssh_state="${mount_spec_state[ssh_dir]}"
+      _known_state="${mount_spec_state[known_hosts]}"
+      assert_eq "matrix blocker state $_git_enabled/$_grant_gh/$_grant_ssh" \
+        "$([ "$_git_enabled" = 0 ] && echo ro || echo absent)" "$_git_state"
+      assert_eq "matrix git config state $_git_enabled/$_grant_gh/$_grant_ssh" \
+        "$([ "$_git_enabled" = 1 ] && echo ro || echo absent)" "$_git_config_state"
+      assert_eq "matrix GitHub state $_git_enabled/$_grant_gh/$_grant_ssh" \
+        "$([ "$_grant_gh" = 1 ] && echo rw || echo absent)" "$_gh_state"
+      assert_eq "matrix SSH state $_git_enabled/$_grant_gh/$_grant_ssh" \
+        "$([ "$_grant_ssh" = 1 ] && echo ro || echo absent)" "$_ssh_state"
+      assert_eq "matrix known_hosts state $_git_enabled/$_grant_gh/$_grant_ssh" \
+        "$([ "$_grant_ssh" = 1 ] && echo rw || echo absent)" "$_known_state"
+    done
+  done
+done
+
+rm -f "$HOME/.ssh/known_hosts"
+policy_git_enabled=1
+policy_grant_gh=0
+policy_grant_all_of_dot_ssh=1
+mount_spec_build >/dev/null 2>&1
+assert_eq "missing known_hosts stays absent" absent "${mount_spec_state[known_hosts]}"
+assert_eq "SSH dir remains read-only without known_hosts" ro "${mount_spec_state[ssh_dir]}"
+
+_saved_mount_spec_mounts=("${mounts[@]-}")
+mounts=()
+policy_grant_all_of_dot_ssh=0
+policy_grant_gh=0
+policy_git_enabled=1
+add_policy_mounts
+assert_eq "Git-enabled config argument" "$HOME/.gitconfig:/home/agentbox/.gitconfig:ro" \
+  "$(ab_mount_dest_owner /home/agentbox/.gitconfig)"
+assert_eq "Git-enabled has no blocker argument" "" "$(ab_mount_dest_owner /usr/bin/git)"
+mounts=()
+policy_git_enabled=0
+add_policy_mounts
+assert_eq "no-Git blocker argument" \
+  "type=bind,src=$GIT_BLOCKER,dst=/usr/bin/git,readonly" "$(ab_mount_dest_owner /usr/bin/git)"
+assert_eq "no-Git omits gitconfig argument" "" "$(ab_mount_dest_owner /home/agentbox/.gitconfig)"
+assert_eq "no-Git omits XDG gitconfig argument" "" "$(ab_mount_dest_owner /home/agentbox/.config/git/config)"
+mounts=("${_saved_mount_spec_mounts[@]}")
+
+rm -f "$HOME/.gitconfig"
+policy_git_enabled=1
+mount_spec_build >/dev/null 2>&1
+assert_eq "Git config falls back to XDG source" "$HOME/.config/git/config" "${mount_spec_source[git_config]}"
+assert_eq "Git config falls back to XDG destination" /home/agentbox/.config/git/config "${mount_spec_destination[git_config]}"
+: >"$HOME/.gitconfig"
+
+_mount_spec_protected=0
+for _protected_destination in "${protected_mount_destinations[@]}"; do
+  printf '%s\n' "$_mount_spec_blocker $_protected_destination" >"$_mount_spec_cfg"
+  cfg_mounts="$_mount_spec_cfg"
+  assert_eq "custom conflict $_protected_destination" 1 \
+    "$(mount_spec_validate >/dev/null 2>&1; echo $?)"
+  _mount_spec_protected=$((_mount_spec_protected + 1))
+done
+assert_eq "all protected destinations covered" "${#protected_mount_destinations[@]}" "$_mount_spec_protected"
+cfg_mounts="$_mount_spec_cfg"
+printf '%s\n' "$_mount_spec_blocker /workspace2" >"$_mount_spec_cfg"
+assert_eq "similar custom destination remains valid" 0 \
+  "$(mount_spec_validate >/dev/null 2>&1; echo $?)"
+
+for _blocker_case in missing unreadable nonexec symlink world-writable wrong-mode; do
+  rm -f "$GIT_BLOCKER"
+  case "$_blocker_case" in
+    missing) : ;;
+    unreadable) printf '#!/usr/bin/env bash\nexit 1\n' >"$GIT_BLOCKER"; chmod 000 "$GIT_BLOCKER" ;;
+    nonexec) printf '#!/usr/bin/env bash\nexit 1\n' >"$GIT_BLOCKER"; chmod 644 "$GIT_BLOCKER" ;;
+    symlink) printf '#!/usr/bin/env bash\nexit 1\n' >"$_mount_spec_home/real-blocker"; chmod 755 "$_mount_spec_home/real-blocker"; ln -s "$_mount_spec_home/real-blocker" "$GIT_BLOCKER" ;;
+    world-writable) printf '#!/usr/bin/env bash\nexit 1\n' >"$GIT_BLOCKER"; chmod 757 "$GIT_BLOCKER" ;;
+    wrong-mode) printf '#!/usr/bin/env bash\nexit 1\n' >"$GIT_BLOCKER"; chmod 754 "$GIT_BLOCKER" ;;
+  esac
+  policy_git_enabled=0
+  policy_grant_gh=0
+  policy_grant_all_of_dot_ssh=0
+  assert_eq "blocker $_blocker_case rejected" 1 "$(mount_spec_build >/dev/null 2>&1; echo $?)"
+done
+
+rm -f "$GIT_BLOCKER" "$_mount_spec_home/real-blocker" "$_mount_spec_cfg" 2>/dev/null || true
+HOME="$_saved_mount_spec_home"
+GIT_BLOCKER="$_saved_mount_spec_git_blocker"
+cfg_mounts="$_saved_mount_spec_cfg_mounts"
+policy_git_enabled="$_saved_mount_spec_git"
+policy_grant_gh="$_saved_mount_spec_gh"
+policy_grant_all_of_dot_ssh="$_saved_mount_spec_ssh"
+rm -rf "$_mount_spec_home"
+rm -f "$_mount_spec_blocker" "$_mount_spec_cfg"
 
 echo
 echo "raw policy input capture (bin/ab)"
