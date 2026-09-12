@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218,SC2032,SC2329 # test mocks are intentionally indirect/forward-declared
 # Unit tests for agentbox host-side logic:
 #   - bin/ab                :: compute_names, ab_config_candidates, ab_config_file,
 #                              ab_config_container_path, ab_parse_mounts_line, ab_mount_dest_owner,
