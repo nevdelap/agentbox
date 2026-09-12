@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Task 1</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f4f6f8, #101318);
+      --panel: light-dark(#fff, #181c23);
+      --soft: light-dark(#f7f9fc, #1d222b);
+      --text: light-dark(#20252d, #edf1f7);
+      --muted: light-dark(#5e6877, #aeb8c7);
+      --line: light-dark(#dce2e9, #303844);
+      --accent: light-dark(#315fba, #9bb9ff);
+      --good: light-dark(#18734b, #79d4a6);
+      --good-soft: light-dark(#eaf8f0, #183326);
+      --warn: light-dark(#93600b, #f4c96c);
+      --warn-soft: light-dark(#fff6df, #3a2d16);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1000px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, .callout, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--good); }
+    .hero strong { color: var(--good); font-size: 1.08rem; }
+    .callout { padding: 15px 18px; }
+    .callout.warn { background: var(--warn-soft); border-color: var(--warn); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS IMPLEMENTATION REVIEW</div>
+      <h1>Task 1 review</h1>
+      <p class="meta">jj Task 1 working-copy change with CI follow-ups · latest reviewed change <code>9861760c</code> · re-reviewed 2026-09-12</p>
+    </header>
+
+    <section class="hero">
+      <strong>Disposition: accepted.</strong>
+      <p>The Task 1 change adds the required implementation-baseline inventory and does not introduce production behavior. The earlier broad review of the parent change is outside this Task 1-only scope.</p>
+      <p><strong>Quality grade: A+</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Reviewed change</h2>
+    <p>The substantive Task 1 file is <a href="../design_docs/git_disablement_and_config_enhancements_implementation_baseline.html"><code>design_docs/git_disablement_and_config_enhancements_implementation_baseline.html</code></a>. The reviewer-generated <code>review_docs/task1.html</code> is not treated as Igor’s implementation change.</p>
+
+    <h2>CI follow-up re-review</h2>
+    <table>
+      <thead><tr><th>jj change</th><th>Scope</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>5e64e0c3</code></td><td>Adds file-level ShellCheck suppressions for intentional forward-declared test mocks in <code>tests/run.sh</code>.</td><td>Accepted. No Task 1 artifact or production behavior changed.</td></tr>
+        <tr><td><code>7f026cf6</code></td><td>Adds the intentional <code>SC2015</code> suppression in <code>bin/ab</code> and extends the test-mock suppression list.</td><td>Accepted for this CI follow-up. No Task 1 artifact or Task 1 scope changed.</td></tr>
+        <tr><td><code>9861760c</code></td><td>Moves the existing shell syntax, ShellCheck, unit-test, and Nix-parse commands into <code>justfile</code>; CI installs/executes <code>just</code> for the shell job and invokes the Nix recipe through <code>nix run</code>.</td><td>Accepted. The recipe preserves the prior check set, and the change touches only CI configuration and a check runner; no Task 1 artifact or production behavior changed.</td></tr>
+      </tbody>
+    </table>
+    <p>These CI changes are downstream of the Task 2 work in the jj history, so they are not attributed to Task 1. They do not invalidate the Task 1 inventory or its parent-change separation. The latest change is the jj working-copy commit <code>9861760c</code> (change ID <code>klwmlyvq</code>).</p>
+
+    <h2>Acceptance review</h2>
+    <table>
+      <thead><tr><th>Task 1 requirement</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>Required baseline artifact exists</td><td>Pass</td><td>The named HTML artifact is present in the Task 1 working-copy change.</td></tr>
+        <tr><td>Exactly eight required sections</td><td>Pass</td><td>Repository files; Launcher entry points; Policy/mount/label seams; Test fixtures; Test seams; Baseline commands/results; Pre-existing changes; Task ownership.</td></tr>
+        <tr><td>Complete repository/function/entry-point inventory</td><td>Pass</td><td>The artifact inventories the launcher, entrypoint, tests, runtime asset, Dockerfile, README, design/review documents, functions, command dispatch, and helper seams.</td></tr>
+        <tr><td>Required fixtures and test seams named</td><td>Pass</td><td>Four-tier policy files, policy states, label states, credential sources, protected/custom mount targets, Docker mocks, pure functions, filesystem checks, and entry-point boundaries are recorded.</td></tr>
+        <tr><td>Pre-existing changes separated</td><td>Pass</td><td>The artifact has a dedicated Pre-existing changes section and attributes the parent implementation files to the parent change.</td></tr>
+        <tr><td>Baseline commands and results recorded</td><td>Pass</td><td>jj status/log, shell syntax checks, unit tests, blocker attributes, and missing requested guidance paths are recorded with results.</td></tr>
+        <tr><td>No Task 2–7 behavior added</td><td>Pass</td><td>The jj change adds only the inventory artifact; production files and tests remain in the parent change.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code></td><td>Pass, exit status 0.</td></tr>
+        <tr><td><code>bash tests/run.sh</code></td><td>With the fixture-safe <code>umask 077</code>, all 180 tests pass. Under the review environment’s default <code>umask 000</code>, the known 4 policy-fixture failures remain; the CI follow-ups do not change this behavior.</td></tr>
+        <tr><td>CI follow-up syntax check</td><td>Pass: <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>.</td></tr>
+        <tr><td>Latest <code>justfile</code> recipe review</td><td>Pass: dry-run confirms <code>shell-check</code> runs the six prior syntax targets, the prior ShellCheck target set, and <code>bash tests/run.sh</code>; <code>nix-parse</code> retains <code>nix-instantiate --parse sysbox.nix</code>.</td></tr>
+        <tr><td>Latest CI workflow review</td><td>Pass: the shell job installs <code>just</code> and <code>shellcheck</code>; the Nix job obtains <code>just</code> with <code>nix run</code>. The local environment lacks ShellCheck and Nix, so those two runner-specific commands were not executed locally.</td></tr>
+        <tr><td>ShellCheck</td><td>Not available in the local environment; the reviewed follow-ups only add the suppressions required by the GitHub CI run.</td></tr>
+        <tr><td>jj scope check</td><td>Pass: Task 1 remains the baseline artifact; the latest descendant adds only CI/check-runner files, while the parent’s production changes remain explicitly separated.</td></tr>
+      </tbody>
+    </table>
+
+    <section class="callout warn">
+      <strong>Repository guidance note:</strong> <code>.claude/rules/</code> and <code>docs/roles.md</code> are absent. The baseline records this setup issue accurately; it is not a Task 1 implementation defect.</section>
+
+    <footer>Rufus Task 1 review. Task 1 is accepted; later tasks remain subject to independent review against their own contracts.</footer>
+  </main>
+</body>
+</html>

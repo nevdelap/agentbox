@@ -30,23 +30,102 @@ SETUP_LOG=/var/log/agentbox-setup.log
 AB_PORTS_FILE="${AGENTBOX_PORTS_FILE:-$AB_CFG/ports}"
 AB_SETUP_FILE="${AGENTBOX_SETUP_FILE:-$AB_CFG/setup.sh}"
 
+docker_daemon_pid_alive() {
+  local pid comm
+  [ -r /var/run/docker.pid ] || return 1
+  read -r pid < /var/run/docker.pid || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+  [ "$comm" = dockerd ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+docker_daemon_process_alive() {
+  local pid comm stat
+  while read -r pid comm stat; do
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    [ "$comm" = dockerd ] || continue
+    case "$stat" in Z*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null && return 0
+  done < <(ps -eo pid=,comm=,stat= 2>/dev/null || true)
+  return 1
+}
+
+docker_daemon_alive() {
+  docker_daemon_pid_alive || docker_daemon_process_alive
+}
+
+wait_for_dockerd() {
+  for _ in $(seq 1 60); do
+    if [ -S "$DOCKER_SOCK" ] && docker info >/dev/null 2>&1; then
+      chown agentbox:agentbox "$DOCKER_SOCK" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+start_dockerd_once() {
+  echo "agentbox: starting inner dockerd..." >&2
+  dockerd >"$DOCKERD_LOG" 2>&1 &
+  if wait_for_dockerd; then
+    echo "agentbox: inner dockerd ready." >&2
+    return 0
+  fi
+  if docker_daemon_alive; then
+    echo "agentbox: WARNING — inner dockerd stayed alive but did not become ready; see $DOCKERD_LOG" >&2
+    return 1
+  fi
+  return 2
+}
+
 ensure_dockerd() {
+  local start_rc
   if docker info >/dev/null 2>&1; then
     # Already up — make sure agentbox can reach the socket.
     chown agentbox:agentbox "$DOCKER_SOCK" 2>/dev/null || true
     return 0
   fi
-  echo "agentbox: starting inner dockerd..." >&2
-  dockerd >"$DOCKERD_LOG" 2>&1 &
-  for _ in $(seq 1 60); do
-    if [ -S "$DOCKER_SOCK" ] && docker info >/dev/null 2>&1; then
-      chown agentbox:agentbox "$DOCKER_SOCK" 2>/dev/null || true
+
+  # An outer-container stop can leave Docker's Unix socket and PID file behind even
+  # though the nested daemon was killed. Do not start a second daemon while a real
+  # dockerd is still coming up; otherwise only remove the stale runtime markers before
+  # starting a fresh daemon. This preserves the /var/lib/docker volume across restart.
+  if docker_daemon_alive; then
+    if wait_for_dockerd; then
       echo "agentbox: inner dockerd ready." >&2
       return 0
     fi
-    sleep 0.5
-  done
-  echo "agentbox: WARNING — inner dockerd did not start; see $DOCKERD_LOG" >&2
+    if docker_daemon_alive; then
+      echo "agentbox: WARNING — inner dockerd stayed alive but did not become ready; see $DOCKERD_LOG" >&2
+      return 1
+    fi
+  fi
+
+  # The daemon may have exited during readiness. Re-checking liveness above makes it safe
+  # to clean its stale markers and make one controlled replacement attempt, without ever
+  # starting a second daemon while the original is still alive.
+  rm -f "$DOCKER_SOCK" /var/run/docker.pid
+
+  if start_dockerd_once; then
+    return 0
+  else
+    start_rc=$?
+  fi
+
+  [ "$start_rc" -eq 2 ] || return 1
+  if docker_daemon_alive; then
+    echo "agentbox: WARNING — inner dockerd state changed during recovery; refusing a duplicate start; see $DOCKERD_LOG" >&2
+    return 1
+  fi
+
+  rm -f "$DOCKER_SOCK" /var/run/docker.pid
+  echo "agentbox: retrying inner dockerd once after it exited during readiness..." >&2
+  if start_dockerd_once; then
+    return 0
+  fi
+  echo "agentbox: WARNING — inner dockerd did not start after one recovery retry; see $DOCKERD_LOG" >&2
   return 1
 }
 
