@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2015 # intentional short-circuit cleanup/validation idioms
+# shellcheck disable=SC2015,SC2034 # intentional short-circuit idioms and exported context fields
 #
 # ab — Claude Code / Codex in a long-lived, **Sysbox-confined** agentbox container.
 #
@@ -38,6 +38,11 @@
 #
 set -euo pipefail
 
+policy_fail() {
+  echo "agentbox: policy: $*" >&2
+  return 1
+}
+
 # Host credential mounts are per-invocation grants, deliberately disabled by default.
 grant_gh=0
 grant_all_of_dot_ssh=0
@@ -62,6 +67,103 @@ policy_cli_git_enabled=""
 policy_cli_grant_gh=""
 policy_cli_grant_all_of_dot_ssh=""
 policy_apply=0
+policy_command_args=()
+policy_input_env_captured=0
+policy_operation_requested=0
+policy_snapshot_retry_count=0
+
+# Task 2's raw host-policy record. Keep capture separate from the resolved policy below so later
+# policy work consumes one validated snapshot instead of reparsing CLI arguments or environment.
+# Every field is always present and is exactly one of unset, true, or false.
+declare -A policy_input=()
+policy_input_reset() {
+  policy_input_env_captured=0
+  policy_input=(
+    [cli_git_enabled]=unset
+    [cli_grant_gh]=unset
+    [cli_grant_ssh]=unset
+    [env_git_enabled]=unset
+    [env_grant_gh]=unset
+    [env_grant_ssh]=unset
+  )
+}
+
+policy_input_reset
+
+policy_input_record() {
+  local field
+  for field in cli_git_enabled cli_grant_gh cli_grant_ssh \
+               env_git_enabled env_grant_gh env_grant_ssh; do
+    printf '%s=%s\n' "$field" "${policy_input[$field]}"
+  done
+}
+
+# Parse one host boolean without consulting container env files. The caller supplies the
+# environment variable name for stable diagnostics and the value so this function is pure.
+policy_input_bool() {
+  local name="$1" value="${2,,}"
+  case "$value" in
+    1|true|yes|on) POLICY_INPUT_BOOL=true ;;
+    0|false|no|off) POLICY_INPUT_BOOL=false ;;
+    *) policy_fail "$name must be a boolean (1/0, true/false, yes/no, or on/off)"; return 1 ;;
+  esac
+}
+
+policy_input_capture_env() {
+  local value
+  [ "$policy_input_env_captured" = 0 ] || return 0
+  policy_input[env_git_enabled]="unset"
+  policy_input[env_grant_gh]="unset"
+  policy_input[env_grant_ssh]="unset"
+
+  if [[ -v AGENTBOX_NO_GIT ]]; then
+    policy_input_bool AGENTBOX_NO_GIT "$AGENTBOX_NO_GIT" || return 1
+    value="$POLICY_INPUT_BOOL"
+    if [ "$value" = true ]; then value=false; else value=true; fi
+    policy_input[env_git_enabled]="$value"
+  fi
+  if [[ -v AGENTBOX_GRANT_GH ]]; then
+    policy_input_bool AGENTBOX_GRANT_GH "$AGENTBOX_GRANT_GH" || return 1
+    policy_input[env_grant_gh]="$POLICY_INPUT_BOOL"
+  fi
+  if [[ -v AGENTBOX_GRANT_ALL_OF_DOT_SSH ]]; then
+    policy_input_bool AGENTBOX_GRANT_ALL_OF_DOT_SSH "$AGENTBOX_GRANT_ALL_OF_DOT_SSH" || return 1
+    policy_input[env_grant_ssh]="$POLICY_INPUT_BOOL"
+  fi
+  policy_input_env_captured=1
+}
+
+policy_input_begin() {
+  policy_input_reset
+  policy_input_capture_env
+}
+
+policy_input_apply_cli() {
+  policy_cli_git_enabled=""
+  policy_cli_grant_gh=""
+  policy_cli_grant_all_of_dot_ssh=""
+  case "${policy_input[cli_git_enabled]}" in
+    true) policy_cli_git_enabled=1 ;;
+    false) policy_cli_git_enabled=0 ;;
+  esac
+  case "${policy_input[cli_grant_gh]}" in
+    true) policy_cli_grant_gh=1 ;;
+    false) policy_cli_grant_gh=0 ;;
+  esac
+  case "${policy_input[cli_grant_ssh]}" in
+    true) policy_cli_grant_all_of_dot_ssh=1 ;;
+    false) policy_cli_grant_all_of_dot_ssh=0 ;;
+  esac
+}
+
+policy_input_set_cli() {
+  case "$1" in
+    --no-git) policy_input[cli_git_enabled]=false; policy_cli_git_enabled=0 ;;
+    --grant-gh) policy_input[cli_grant_gh]=true; policy_cli_grant_gh=1 ;;
+    --grant-all-of-dot-ssh) policy_input[cli_grant_ssh]=true; policy_cli_grant_all_of_dot_ssh=1 ;;
+    *) return 1 ;;
+  esac
+}
 
 IMAGE_NAME="agentbox"
 # Public but unreleased; bump PATCH only until there's a real release / second user.
@@ -77,9 +179,30 @@ LAUNCHER_ROOT="$(cd "$(dirname "$_self")/.." && pwd)"
 GIT_BLOCKER="$LAUNCHER_ROOT/runtime/git-disabled"
 
 PROJECT_DIR="${AGENTBOX_DIR:-$PWD}"
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)" || {
+PROJECT_DIR="$(cd -- "$PROJECT_DIR" && pwd -P)" || {
   echo "agentbox: project dir not found: ${AGENTBOX_DIR:-$PWD}" >&2
   exit 1
+}
+
+# Task 3 canonical identity helpers. These deliberately return the canonical value rather than
+# mutating global state, so tests and later policy tasks can use the same functions at every seam.
+canonical_machine_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$ ]] || {
+    policy_fail "machine name must be 1-64 ASCII letters, digits, '.', '_' or '-' and may not start/end with punctuation: $name"
+    return 1
+  }
+  printf '%s' "$name"
+}
+
+canonical_project_path() {
+  local path="$1" physical
+  physical="$(cd -- "$path" 2>/dev/null && pwd -P)" || {
+    policy_fail "project directory does not exist or is not accessible: $path"
+    return 1
+  }
+  [ -d "$physical" ] || { policy_fail "project path is not a directory: $path"; return 1; }
+  printf '%s' "$physical"
 }
 
 # Names unique to the FULL project path (not just the dir name): the same basename in
@@ -110,7 +233,7 @@ JJ_STATE_CONTAINER=/home/agentbox/.config/jj
 # The machine name keying the search. Defaults to the host's name (the same value ab gives the
 # container via --hostname); AGENTBOX_MACHINE overrides it, so a machine can be renamed — or a
 # rename rehearsed — without moving directories. It deliberately does NOT change --hostname.
-MACHINE="${AGENTBOX_MACHINE:-$(hostname)}"
+MACHINE="$(canonical_machine_name "${AGENTBOX_MACHINE:-$(hostname)}")" || exit 1
 
 # The four candidate paths for one config file <name>, most specific first: this project on this
 # machine, this machine (any project), this project (any machine), then the plain top-level file
@@ -157,6 +280,25 @@ ab_policy_candidates() {
     "$root/machines/$machine/projects/$proj/agentbox.toml"
 }
 
+# Reject a symlink anywhere below the policy root. `test -f` follows symlinked parent
+# directories, which would otherwise let a policy source move outside the configured tree.
+policy_path_has_symlink() {
+  local path="$1" root="$2" rest part current
+  case "$path" in
+    "$root") rest="" ;;
+    "$root"/*) rest="${path#"$root"/}" ;;
+    *) return 1 ;;
+  esac
+  [ ! -L "$root" ] || return 0
+  current="$root"
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    if [ "$rest" = "$part" ]; then rest=""; else rest="${rest#*/}"; fi
+    current="$current/$part"
+    [ ! -L "$current" ] || return 0
+  done
+  return 1
+}
 policy_file_safe() {
   local file="$1" mode last
   [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
@@ -167,21 +309,221 @@ policy_file_safe() {
   return 0
 }
 
-policy_fail() {
-  echo "agentbox: policy: $*" >&2
-  return 1
+
+# Immutable policy-source snapshot. Absent paths are recorded as well, so a file created during
+# resolution is detected before Docker mutation.
+declare -A policy_snapshot_state=() policy_snapshot_size=() policy_snapshot_identity=()
+declare -A policy_snapshot_hash=() policy_snapshot_content=()
+policy_snapshot_paths=()
+policy_snapshot_ready=0
+policy_snapshot_changed_path=""
+
+policy_source_identity() {
+  stat -c '%F|%d|%i|%a|%s|%Y' -- "$1" 2>/dev/null
+}
+
+policy_snapshot_reset() {
+  policy_snapshot_state=()
+  policy_snapshot_size=()
+  policy_snapshot_identity=()
+  policy_snapshot_hash=()
+  policy_snapshot_content=()
+  policy_snapshot_paths=()
+  policy_snapshot_ready=0
+  policy_snapshot_changed_path=""
+}
+
+policy_snapshot_take() {
+  local file content size identity hash
+  policy_snapshot_reset
+  while IFS= read -r file; do
+    policy_snapshot_paths+=("$file")
+    policy_snapshot_state["$file"]=absent
+    if policy_path_has_symlink "$file" "$AB_CFG_ROOT"; then
+      policy_snapshot_state["$file"]=invalid
+      policy_fail "$file uses a symlinked policy tier or file"
+      return 1
+    fi
+    if [ -L "$file" ] || [ -e "$file" ]; then
+      policy_file_safe "$file" || {
+        policy_snapshot_state["$file"]=invalid
+        policy_fail "$file must be a readable, non-world-writable regular file"
+        return 1
+      }
+      content="$(<"$file")"
+      size="$(wc -c <"$file")"; size="${size//[[:space:]]/}"
+      identity="$(policy_source_identity "$file")" || return 1
+      hash="$(sha256sum -- "$file" | cut -d' ' -f1)"
+      policy_snapshot_state["$file"]=regular
+      policy_snapshot_size["$file"]="$size"
+      policy_snapshot_identity["$file"]="$identity"
+      policy_snapshot_hash["$file"]="$hash"
+      policy_snapshot_content["$file"]="$content"
+    fi
+  done < <(ab_policy_candidates "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR")
+  policy_snapshot_ready=1
+}
+
+policy_snapshot_recheck() {
+  local file state content size identity hash
+  [ "$policy_snapshot_ready" = 1 ] || return 0
+  policy_snapshot_changed_path=""
+  for file in "${policy_snapshot_paths[@]}"; do
+    state="${policy_snapshot_state[$file]}"
+    if policy_path_has_symlink "$file" "$AB_CFG_ROOT" || [ -L "$file" ]; then
+      policy_snapshot_changed_path="$file"; return 1
+    fi
+    if [ ! -e "$file" ]; then
+      if [ "$state" != absent ]; then policy_snapshot_changed_path="$file"; return 1; fi
+      continue
+    fi
+    if [ "$state" != regular ]; then policy_snapshot_changed_path="$file"; return 1; fi
+    if ! policy_file_safe "$file"; then policy_snapshot_changed_path="$file"; return 1; fi
+    content="$(<"$file")"
+    size="$(wc -c <"$file")"; size="${size//[[:space:]]/}"
+    identity="$(policy_source_identity "$file")" || { policy_snapshot_changed_path="$file"; return 1; }
+    hash="$(sha256sum -- "$file" | cut -d' ' -f1)"
+    if [ "$size" != "${policy_snapshot_size[$file]}" ] ||
+       [ "$identity" != "${policy_snapshot_identity[$file]}" ] ||
+       [ "$hash" != "${policy_snapshot_hash[$file]}" ]; then
+      policy_snapshot_changed_path="$file"; return 1
+    fi
+  done
+}
+
+# The resolved mounts file is a second policy source: unlike agentbox.toml it is first-match
+# configuration, but its destinations still decide which host paths enter the container. Keep a
+# content/identity snapshot alongside the TOML snapshot so a replacement or edit cannot slip
+# between preflight and the final docker run.
+custom_mounts_snapshot_path=""
+custom_mounts_snapshot_identity=""
+custom_mounts_snapshot_hash=""
+custom_mounts_snapshot_ready=0
+
+custom_mounts_snapshot_reset() {
+  custom_mounts_snapshot_path=""
+  custom_mounts_snapshot_identity=""
+  custom_mounts_snapshot_hash=""
+  custom_mounts_snapshot_ready=0
+}
+
+custom_mounts_snapshot_take() {
+  custom_mounts_snapshot_reset
+  custom_mounts_snapshot_path="$cfg_mounts"
+  custom_mounts_snapshot_ready=1
+  [ -n "$cfg_mounts" ] || return 0
+  [ -f "$cfg_mounts" ] && [ ! -L "$cfg_mounts" ] && [ -r "$cfg_mounts" ] || {
+    policy_snapshot_changed_path="$cfg_mounts"
+    policy_fail "mounts source must be a readable, non-symlink regular file: $cfg_mounts"
+    return 1
+  }
+  custom_mounts_snapshot_identity="$(policy_source_identity "$cfg_mounts")" || return 1
+  custom_mounts_snapshot_hash="$(sha256sum -- "$cfg_mounts" | cut -d' ' -f1)"
+}
+
+custom_mounts_snapshot_recheck() {
+  local identity hash
+  [ "$custom_mounts_snapshot_ready" = 1 ] || return 0
+  [ "$cfg_mounts" = "$custom_mounts_snapshot_path" ] || {
+    policy_snapshot_changed_path="${custom_mounts_snapshot_path:-mounts}"
+    return 1
+  }
+  [ -n "$custom_mounts_snapshot_path" ] || return 0
+  [ -f "$custom_mounts_snapshot_path" ] && [ ! -L "$custom_mounts_snapshot_path" ] && [ -r "$custom_mounts_snapshot_path" ] || {
+    policy_snapshot_changed_path="$custom_mounts_snapshot_path"
+    return 1
+  }
+  identity="$(policy_source_identity "$custom_mounts_snapshot_path")" || {
+    policy_snapshot_changed_path="$custom_mounts_snapshot_path"
+    return 1
+  }
+  hash="$(sha256sum -- "$custom_mounts_snapshot_path" | cut -d' ' -f1)"
+  if [ "$identity" != "$custom_mounts_snapshot_identity" ] ||
+     [ "$hash" != "$custom_mounts_snapshot_hash" ]; then
+    policy_snapshot_changed_path="$custom_mounts_snapshot_path"
+    return 1
+  fi
+}
+
+# One advisory lock per canonical project/machine identity. The descriptor remains open in this
+# launcher process (and is inherited by docker exec), so the lock spans inspection, mutation, and
+# the final command report. A lock cannot be silently bypassed when the preferred directory is
+# unavailable: the documented cache fallbacks are tried in order instead.
+lock_timeout_seconds=30
+lock_identity=""
+lock_path=""
+lock_result=""
+agentbox_lock_fd=""
+
+policy_lock_identity() {
+  printf '%s\0%s' "$PROJECT_DIR" "$MACHINE" | sha256sum | cut -d' ' -f1
+}
+
+policy_lock_acquire() {
+  [ -n "$agentbox_lock_fd" ] && return 0
+  local identity base dir path fd deadline acquired=0
+  identity="$(policy_lock_identity)"
+  lock_identity="$identity"
+  lock_result=failed
+  local -a bases=()
+  [ -n "${XDG_RUNTIME_DIR:-}" ] && bases+=("$XDG_RUNTIME_DIR")
+  [ -n "${XDG_CACHE_HOME:-}" ] && bases+=("$XDG_CACHE_HOME")
+  bases+=("$HOME/.cache")
+  for base in "${bases[@]}"; do
+    dir="$base/agentbox/locks"
+    if ! mkdir -p -- "$dir" 2>/dev/null || ! chmod 700 -- "$dir" 2>/dev/null; then
+      continue
+    fi
+    path="$dir/$identity.lock"
+    if ! ( : >>"$path" ) 2>/dev/null || ! chmod 600 -- "$path" 2>/dev/null; then
+      continue
+    fi
+    lock_path="$path"
+    if ! command -v flock >/dev/null 2>&1; then
+      lock_result=failed
+      policy_fail "lock failed for $PROJECT_DIR: flock is unavailable"
+      return 1
+    fi
+    exec {fd}>"$path" || continue
+    # The file is created/truncated above only to establish its required mode; flock owns the
+    # actual advisory exclusion and the descriptor is intentionally not closed until exit.
+    deadline=$((SECONDS + lock_timeout_seconds))
+    while ! flock -n "$fd"; do
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        exec {fd}>&-
+        lock_result=busy
+        policy_fail "project busy: $PROJECT_DIR ($cname); retry after the current operation finishes"
+        return 1
+      fi
+      sleep 0.1
+    done
+    agentbox_lock_fd="$fd"
+    lock_result=acquired
+    acquired=1
+    break
+  done
+  [ "$acquired" = 1 ] || {
+    lock_result=failed
+    policy_fail "lock failed for $PROJECT_DIR: unable to create or open a lock path"
+    return 1
+  }
 }
 
 # Parse the intentionally small, strict TOML policy schema. This accepts TOML table headers,
 # boolean assignments, whitespace, and trailing comments; all other syntax is rejected before
 # Docker or the update check is reached.
 policy_parse_file() {
-  local file="$1" line t table key value
+  local file="$1" line t table key value input
   local -A seen=()
   policy_parsed_git_enabled=""
   policy_parsed_grant_gh=""
   policy_parsed_grant_all_of_dot_ssh=""
   policy_parsed_updates_check=""
+  if [ "${policy_snapshot_state[$file]:-}" = regular ]; then
+    input="${policy_snapshot_content[$file]}"
+  else
+    input="$(<"$file")"
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     t="${line#"${line%%[![:space:]]*}"}"
     t="${t%"${t##*[![:space:]]}"}"
@@ -211,7 +553,7 @@ policy_parse_file() {
     case "$value" in true|false) ;; *) policy_fail "$file: $table.$key must be true or false"; return 1 ;; esac
     seen[$table.$key]=1
     printf -v "$var" '%s' "$value"
-  done < "$file"
+  done <<< "$input"
 }
 
 policy_load_files() {
@@ -224,15 +566,15 @@ policy_load_files() {
   policy_grant_all_of_dot_ssh_source="default"
   policy_updates_source="default"
   local file
-  while IFS= read -r file; do
-    [ -f "$file" ] || [ -L "$file" ] || continue
-    policy_file_safe "$file" || { policy_fail "$file must be a readable, non-world-writable regular file"; return 1; }
+  policy_snapshot_take || return 1
+  for file in "${policy_snapshot_paths[@]}"; do
+    [ "${policy_snapshot_state[$file]}" = regular ] || continue
     policy_parse_file "$file" || return 1
     if [ -n "$policy_parsed_git_enabled" ]; then policy_file_git_enabled="$policy_parsed_git_enabled"; policy_git_source="$file"; fi
     if [ -n "$policy_parsed_grant_gh" ]; then policy_file_grant_gh="$policy_parsed_grant_gh"; policy_grant_gh_source="$file"; fi
     if [ -n "$policy_parsed_grant_all_of_dot_ssh" ]; then policy_file_grant_all_of_dot_ssh="$policy_parsed_grant_all_of_dot_ssh"; policy_grant_all_of_dot_ssh_source="$file"; fi
     if [ -n "$policy_parsed_updates_check" ]; then policy_file_updates_check="$policy_parsed_updates_check"; policy_updates_source="$file"; fi
-  done < <(ab_policy_candidates "$AB_CFG_ROOT" "$MACHINE" "$PROJECT_DIR")
+  done
 }
 
 policy_parse_env_bool() {
@@ -251,14 +593,26 @@ policy_bool01() { [ "$1" = true ] && printf '1' || printf '0'; }
 policy_bool_text() { [ "$1" = 1 ] && printf 'true' || printf 'false'; }
 
 policy_load_host() {
+  MACHINE="$(canonical_machine_name "$MACHINE")" || return 1
+  policy_input_capture_env || return 1
+  policy_input_apply_cli
   policy_load_files || return 1
   policy_git_enabled="$(policy_bool01 "${policy_file_git_enabled:-true}")"
   policy_grant_gh="$(policy_bool01 "${policy_file_grant_gh:-false}")"
   policy_grant_all_of_dot_ssh="$(policy_bool01 "${policy_file_grant_all_of_dot_ssh:-false}")"
   policy_updates_check="$(policy_bool01 "${policy_file_updates_check:-true}")"
-  if [[ -v AGENTBOX_NO_GIT ]]; then policy_parse_env_bool AGENTBOX_NO_GIT || return 1; policy_git_enabled=$((1-POLICY_BOOL)); policy_git_source=environment; fi
-  if [[ -v AGENTBOX_GRANT_GH ]]; then policy_parse_env_bool AGENTBOX_GRANT_GH || return 1; policy_grant_gh="$POLICY_BOOL"; policy_grant_gh_source=environment; fi
-  if [[ -v AGENTBOX_GRANT_ALL_OF_DOT_SSH ]]; then policy_parse_env_bool AGENTBOX_GRANT_ALL_OF_DOT_SSH || return 1; policy_grant_all_of_dot_ssh="$POLICY_BOOL"; policy_grant_all_of_dot_ssh_source=environment; fi
+  case "${policy_input[env_git_enabled]}" in
+    true) policy_git_enabled=1; policy_git_source=environment ;;
+    false) policy_git_enabled=0; policy_git_source=environment ;;
+  esac
+  case "${policy_input[env_grant_gh]}" in
+    true) policy_grant_gh=1; policy_grant_gh_source=environment ;;
+    false) policy_grant_gh=0; policy_grant_gh_source=environment ;;
+  esac
+  case "${policy_input[env_grant_ssh]}" in
+    true) policy_grant_all_of_dot_ssh=1; policy_grant_all_of_dot_ssh_source=environment ;;
+    false) policy_grant_all_of_dot_ssh=0; policy_grant_all_of_dot_ssh_source=environment ;;
+  esac
   if [[ -v AGENTBOX_NO_UPDATE_CHECK ]]; then policy_parse_env_bool AGENTBOX_NO_UPDATE_CHECK || return 1; policy_updates_check=$((1-POLICY_BOOL)); policy_updates_source=environment; fi
   [ -n "$policy_cli_git_enabled" ] && policy_git_enabled="$policy_cli_git_enabled" && policy_git_source=cli
   [ -n "$policy_cli_grant_gh" ] && policy_grant_gh="$policy_cli_grant_gh" && policy_grant_gh_source=cli
@@ -517,7 +871,7 @@ prune_images() {
 }
 
 build_image() {
-  local force="${1:-}" nocache="${2:-}" files=() f digest tag log child build_flags
+  local force="${1:-}" nocache="${2:-}" mode="${3:-rebuild}" files=() f digest tag log child build_flags
   [ -f "$CONTEXT/Dockerfile" ] || {
     echo "agentbox: Dockerfile not found at $CONTEXT/Dockerfile" >&2
     exit 1
@@ -546,6 +900,7 @@ build_image() {
     # forever (same instruction text = cache hit), so CLAUDE_CHANNEL=stable/CODEX_RELEASE=latest
     # silently freeze at whatever they resolved to on the very first build on this machine.
     [ "$nocache" = --no-cache ] && build_flags+=(--no-cache)
+    policy_final_mutation_guard "$mode" || return 1
     if ! log="$(docker build "${build_flags[@]}" \
         --build-arg "HOST_UID=$uid" --build-arg "HOST_GID=$(id -g)" \
         --build-arg "AGENTBOX_VERSION=$AB_VERSION" \
@@ -560,7 +915,7 @@ build_image() {
     prune_images "${IMAGE_NAME}:${uid}-" "${IMAGE_NAME}:${uid}-custom-" "$tag"
   fi
   if [ -n "$cfg_dockerfile" ] && ab_dockerfile_has_content "$cfg_dockerfile"; then
-    child="$(build_user_image "$tag" "$force" "$nocache")" || return 1
+    child="$(build_user_image "$tag" "$force" "$nocache" "$mode")" || return 1
     printf '%s' "$child"
   else
     printf '%s' "$tag"
@@ -579,7 +934,7 @@ build_image() {
 # COPY'd sibling edited WITHOUT touching the Dockerfile text leaves this digest unchanged — run
 # `ab rebuild` to re-bake (documented in the README).
 build_user_image() {
-  local base_tag="$1" force="${2:-}" nocache="${3:-}" ctx digest child_tag log build_flags
+  local base_tag="$1" force="${2:-}" nocache="${3:-}" mode="${4:-rebuild}" ctx digest child_tag log build_flags
   # The Dockerfile (or a dir on its path) may be a symlink whose target falls outside the build
   # context; BuildKit won't follow such a symlink, so building from the resolved path fails with
   # "failed to read dockerfile: open Dockerfile: no such file or directory". Resolve to the
@@ -600,6 +955,7 @@ build_user_image() {
     # there (the resolved file is always <dir>/Dockerfile). Mirrors how build_image builds base.
     build_flags=(--progress=plain)
     [ "$nocache" = --no-cache ] && build_flags+=(--no-cache)
+    policy_final_mutation_guard "$mode" || return 1
     if ! log="$(cd "$ctx" && docker build "${build_flags[@]}" -t "$child_tag" . 2>&1)"; then
       printf '%s\n' "$log" >&2
       echo "agentbox: child image build failed (see above)" >&2
@@ -718,6 +1074,83 @@ ab_parse_network_line() {
   esac
 }
 
+protected_mount_destinations=(
+  /workspace
+  /workspace/.git
+  /usr/bin/git
+  /home/agentbox/.gitconfig
+  /home/agentbox/.config/git/config
+  /home/agentbox/.config/gh
+  /home/agentbox/.ssh
+  /home/agentbox/.ssh/known_hosts
+  /home/agentbox/.config/jj
+  /home/agentbox/.jjconfig.toml
+  /home/agentbox/.config/jj-host-config.toml
+  /home/agentbox/.config/jj-host-conf.d
+)
+
+# Normalize a container destination lexically without touching the host filesystem. A leading
+# `..` would escape the container root and is rejected instead of being silently clamped to `/`.
+canonical_mount_destination() {
+  local path="$1" part result="" joined
+  [[ "$path" == /* ]] || { policy_fail "mount destination must be absolute: $path"; return 1; }
+  local -a components=()
+  IFS='/' read -r -a components <<<"$path"
+  local -a stack=()
+  for part in "${components[@]}"; do
+    case "$part" in
+      ''|.) continue ;;
+      ..)
+        [ "${#stack[@]}" -gt 0 ] || { policy_fail "mount destination escapes the container root: $path"; return 1; }
+        local last_index=$(( ${#stack[@]} - 1 ))
+        unset "stack[$last_index]"
+        ;;
+      *) stack+=("$part") ;;
+    esac
+  done
+  if [ "${#stack[@]}" -gt 0 ]; then
+    joined="$(IFS=/; printf '%s' "${stack[*]}")"
+    result="/$joined"
+  else
+    result=/
+  fi
+  printf '%s' "$result"
+}
+
+mount_destination_obscures_protected() {
+  local destination="$1" protected
+  [ "$destination" = / ] && { printf '%s' "${protected_mount_destinations[0]}"; return 0; }
+  for protected in "${protected_mount_destinations[@]}"; do
+    if [ "$destination" = "$protected" ] || [[ "$protected" == "$destination/"* ]]; then
+      printf '%s' "$protected"
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_custom_mounts() {
+  local list="$cfg_mounts" line parsed src dst mode lead protected
+  [ -n "$list" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    parsed="$(ab_parse_mounts_line "$line")" || true
+    [ -n "$parsed" ] || {
+      lead="${line#"${line%%[![:space:]]*}"}"
+      case "$lead" in ''|'#'*) ;; *) policy_fail "mounts: malformed line: $line"; return 1 ;; esac
+      continue
+    }
+    src="${parsed%%$'\t'*}"
+    dst="${parsed#*$'\t'}"; dst="${dst%%$'\t'*}"
+    dst="${dst/#\~//home/agentbox}"
+    MOUNT_DESTINATION="$(canonical_mount_destination "$dst")" || return 1
+    protected="$(mount_destination_obscures_protected "$MOUNT_DESTINATION" || true)"
+    [ -z "$protected" ] || {
+      policy_fail "custom mount destination $MOUNT_DESTINATION obscures protected destination $protected"
+      return 1
+    }
+  done < "$list"
+}
+
 # Which of ab's own mounts already claims <dst>, if any (printed as the offending spec). A user
 # mount onto an occupied destination makes `docker run` fail outright with "Duplicate mount
 # point", taking the whole container with it — so build_user_mounts drops that one line instead.
@@ -754,7 +1187,8 @@ ab_mount_dest_owner() {
 build_user_mounts() {
   local list="$cfg_mounts"
   [ -n "$list" ] || return 0
-  local line parsed rest src dst mode lead owner n=0 ok=0
+  custom_mounts_snapshot_recheck || return 1
+  local line parsed rest src dst mode lead owner protected n=0 ok=0
   while IFS= read -r line || [ -n "$line" ]; do
     parsed="$(ab_parse_mounts_line "$line")" || true
     if [ -z "$parsed" ]; then
@@ -773,6 +1207,12 @@ build_user_mounts() {
     mode="${rest##*$'\t'}"
     src="${src/#\~/$HOME}"            # ~ -> host home
     dst="${dst/#\~//home/agentbox}"   # ~ -> container home
+    dst="$(canonical_mount_destination "$dst")" || continue
+    protected="$(mount_destination_obscures_protected "$dst" || true)"
+    [ -z "$protected" ] || {
+      policy_fail "custom mount destination $dst obscures protected destination $protected"
+      return 1
+    }
     n=$((n+1))
     case "$src$dst" in
       *,*) echo "agentbox: mounts: path contains a comma (unsupported by --mount), skipping: $src" >&2
@@ -864,6 +1304,99 @@ connect_networks() {
     echo "agentbox: networks: $ok/$n network(s) attached for $cname" >&2
   fi
   return 0
+}
+
+declare -A grant_source_snapshot=()
+
+grant_source_identity() {
+  stat -c '%F|%d|%i|%a|%s|%Y' -- "$1" 2>/dev/null
+}
+
+grant_source_dir_safe() {
+  local path="$1" label="$2"
+  [ -d "$path" ] && [ -r "$path" ] && [ -x "$path" ] && [ ! -L "$path" ] || {
+    policy_fail "$label grant source must be a readable, searchable, non-symlink directory: $path"
+    return 1
+  }
+}
+
+grant_source_file_safe() {
+  local path="$1"
+  [ -f "$path" ] && [ -r "$path" ] && [ -w "$path" ] && [ ! -L "$path" ] || {
+    policy_fail "SSH known_hosts must be a readable, host-user-writable, non-symlink regular file: $path"
+    return 1
+  }
+}
+
+grant_source_capture_dir() {
+  local key="$1" path="$2"
+  if [ -L "$path" ]; then grant_source_snapshot["$key"]=symlink
+  elif [ ! -e "$path" ]; then grant_source_snapshot["$key"]=absent
+  elif [ ! -d "$path" ] || [ ! -r "$path" ] || [ ! -x "$path" ]; then grant_source_snapshot["$key"]=invalid
+  else grant_source_snapshot["$key"]="$(grant_source_identity "$path")"; fi
+}
+
+grant_source_capture_file() {
+  local key="$1" path="$2"
+  if [ -L "$path" ]; then grant_source_snapshot["$key"]=symlink
+  elif [ ! -e "$path" ]; then grant_source_snapshot["$key"]=absent
+  elif [ ! -f "$path" ] || [ ! -r "$path" ] || [ ! -w "$path" ]; then grant_source_snapshot["$key"]=invalid
+  else grant_source_snapshot["$key"]="$(grant_source_identity "$path")"; fi
+}
+
+grant_sources_validate_snapshot() {
+  local value
+  if [ "$policy_grant_gh" = 1 ]; then
+    value="${grant_source_snapshot[gh]:-invalid}"
+    [[ "$value" == directory\|* ]] || {
+      policy_fail "GitHub grant source is invalid or changed: $HOME/.config/gh"; return 1;
+    }
+  fi
+  if [ "$policy_grant_all_of_dot_ssh" = 1 ]; then
+    value="${grant_source_snapshot[ssh]:-invalid}"
+    [[ "$value" == directory\|* ]] || {
+      policy_fail "SSH grant source is invalid or changed: $HOME/.ssh"; return 1;
+    }
+    value="${grant_source_snapshot[known_hosts]:-invalid}"
+    if [ "$value" != absent ]; then
+      [[ "$value" == regular*\|* ]] || {
+        policy_fail "SSH known_hosts source is invalid or changed: $HOME/.ssh/known_hosts"; return 1;
+      }
+    fi
+  fi
+}
+
+grant_sources_snapshot() {
+  local gh="$HOME/.config/gh" ssh="$HOME/.ssh" known="$HOME/.ssh/known_hosts"
+  grant_source_snapshot=()
+  grant_source_capture_dir gh "$gh"
+  grant_source_capture_dir ssh "$ssh"
+  grant_source_capture_file known_hosts "$known"
+  grant_sources_validate_snapshot
+}
+
+grant_sources_recheck() {
+  local path current expected
+  [ "${#grant_source_snapshot[@]}" -gt 0 ] || return 0
+  [ "$policy_grant_gh" = 1 ] && {
+    path="$HOME/.config/gh"; grant_source_dir_safe "$path" "GitHub" || return 1
+    current="$(grant_source_identity "$path")"; expected="${grant_source_snapshot[gh]:-}"
+    [ "$current" = "$expected" ] || { policy_fail "credential source changed during resolution: $path"; return 1; }
+  }
+  [ "$policy_grant_all_of_dot_ssh" = 1 ] && {
+    path="$HOME/.ssh"; grant_source_dir_safe "$path" "SSH" || return 1
+    current="$(grant_source_identity "$path")"; expected="${grant_source_snapshot[ssh]:-}"
+    [ "$current" = "$expected" ] || { policy_fail "credential source changed during resolution: $path"; return 1; }
+    path="$HOME/.ssh/known_hosts"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      grant_source_file_safe "$path" || return 1
+      current="$(grant_source_identity "$path")"
+    else
+      current=absent
+    fi
+    expected="${grant_source_snapshot[known_hosts]:-}"
+    [ "$current" = "$expected" ] || { policy_fail "credential source changed during resolution: $path"; return 1; }
+  }
 }
 
 prepare_host_state() {
@@ -1025,7 +1558,16 @@ validate_git_blocker() {
 
 policy_preflight() {
   local mode="$1"
+  if [ "${policy_operation_requested:-0}" = 1 ] && [ -z "$agentbox_lock_fd" ]; then
+    policy_lock_acquire || return 1
+  fi
   policy_load_host || return 1
+  # Capture grant source type/identity before any Docker inspection. Recorded grant state may
+  # refine the effective value below, so the snapshot includes all three top-level sources.
+  if [ "${policy_operation_requested:-0}" = 1 ]; then
+    grant_sources_snapshot || return 1
+    custom_mounts_snapshot_take || return 1
+  fi
   policy_inspect_recorded
   case "$policy_recorded_status" in
     invalid)
@@ -1064,7 +1606,13 @@ policy_preflight() {
       policy_grant_all_of_dot_ssh_source=rebuild-default
     fi
   fi
+  if [ "${policy_operation_requested:-0}" = 1 ]; then
+    grant_sources_validate_snapshot || return 1
+  fi
   [ "$policy_git_enabled" = 1 ] || validate_git_blocker || return 1
+  if [ "${policy_operation_requested:-0}" = 1 ]; then
+    validate_custom_mounts || return 1
+  fi
   policy_needs_recreate=0
   if exists; then
     [ "$policy_recorded_status" = valid ] || policy_needs_recreate=1
@@ -1080,6 +1628,65 @@ policy_preflight() {
       return 1
     fi
   fi
+}
+
+policy_operation_begin() {
+  policy_operation_requested=1
+  policy_snapshot_retry_count=0
+  policy_lock_acquire
+}
+
+policy_resolution_recheck() {
+  local mode="$1"
+  if policy_snapshot_recheck && grant_sources_recheck && custom_mounts_snapshot_recheck; then return 0; fi
+  if [ "${policy_snapshot_retry_count:-0}" = 0 ]; then
+    policy_snapshot_retry_count=1
+    echo "agentbox: policy source changed during resolution; resnapshotting once" >&2
+    grant_source_snapshot=()
+    policy_preflight "$mode" || return 1
+    policy_snapshot_recheck || {
+      policy_fail "policy-changed-during-resolution: ${policy_snapshot_changed_path:-unknown}; retry the operation"
+      return 1
+    }
+    grant_sources_validate_snapshot || return 1
+    grant_sources_recheck || return 1
+    custom_mounts_snapshot_recheck || {
+      policy_fail "policy-changed-during-resolution: ${policy_snapshot_changed_path:-unknown}; retry the operation"
+      return 1
+    }
+    return 0
+  fi
+  policy_fail "policy-changed-during-resolution: ${policy_snapshot_changed_path:-unknown}; retry the operation"
+  return 1
+}
+
+policy_final_mutation_guard() {
+  local mode="$1"
+  [ "${policy_operation_requested:-0}" = 1 ] || return 0
+  policy_resolution_recheck "$mode" || return 1
+  grant_sources_validate_snapshot || return 1
+  grant_sources_recheck || return 1
+}
+
+# Check the already-assembled policy mounts without starting another snapshot retry. A retry can
+# replace the resolved policy after mounts/labels were built, so the final Docker boundary must
+# reject a changed source rather than accept a new snapshot that the existing mount array does not
+# represent. Call this immediately before each Docker mutation that consumes those mounts.
+policy_final_mount_guard() {
+  [ "${policy_operation_requested:-0}" = 1 ] || return 0
+  policy_snapshot_recheck || {
+    policy_fail "policy-changed-during-resolution: ${policy_snapshot_changed_path:-unknown}; retry the operation"
+    return 1
+  }
+  grant_sources_validate_snapshot || return 1
+  grant_sources_recheck || {
+    policy_fail "policy-changed-during-resolution: credential source; retry the operation"
+    return 1
+  }
+  custom_mounts_snapshot_recheck || {
+    policy_fail "policy-changed-during-resolution: ${policy_snapshot_changed_path:-mounts}; retry the operation"
+    return 1
+  }
 }
 
 check_existing_grants() {
@@ -1100,19 +1707,17 @@ check_existing_grants() {
 parse_runtime_options() {
   local mode="$1" arg
   shift
+  policy_input_begin || return 1
   nocache=""
-  policy_cli_git_enabled=""
-  policy_cli_grant_gh=""
-  policy_cli_grant_all_of_dot_ssh=""
   policy_apply=0
   grant_gh=0
   grant_all_of_dot_ssh=0
   while [ "$#" -gt 0 ]; do
     arg="$1"
     case "$arg" in
-      --no-git) policy_cli_git_enabled=0 ;;
-      --grant-gh) policy_cli_grant_gh=1; grant_gh=1 ;;
-      --grant-all-of-dot-ssh) policy_cli_grant_all_of_dot_ssh=1; grant_all_of_dot_ssh=1 ;;
+      --no-git) policy_input_set_cli "$arg" ;;
+      --grant-gh) policy_input_set_cli "$arg"; grant_gh=1 ;;
+      --grant-all-of-dot-ssh) policy_input_set_cli "$arg"; grant_all_of_dot_ssh=1 ;;
       --apply)
         if [ "$mode" != start ]; then
           echo "agentbox: $mode: --apply is only valid with start" >&2
@@ -1133,10 +1738,69 @@ parse_runtime_options() {
   done
 }
 
+# Capture policy flags for `ab exec` while preserving the command and its arguments. Policy flags
+# are launcher options only when they occur before the command; `--` explicitly ends that prefix.
+parse_exec_options() {
+  local arg
+  shift
+  policy_input_begin || return 1
+  policy_command_args=()
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --no-git|--grant-gh|--grant-all-of-dot-ssh)
+        policy_input_set_cli "$arg"
+        shift
+        ;;
+      --)
+        shift
+        policy_command_args=("$@")
+        return 0
+        ;;
+      *)
+        policy_command_args=("$@")
+        return 0
+        ;;
+    esac
+  done
+}
+
+# Convenience commands have a fixed first command word (`claude`, `codex`, or `bash`). Capture
+# policy flags immediately after it, then preserve the remaining agent arguments verbatim.
+parse_convenience_options() {
+  local arg
+  policy_input_begin || return 1
+  policy_command_args=()
+  [ "$#" -gt 0 ] || return 0
+  policy_command_args+=("$1")
+  shift
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --no-git|--grant-gh|--grant-all-of-dot-ssh)
+        policy_input_set_cli "$arg"
+        shift
+        ;;
+      --)
+        shift
+        policy_command_args+=("$@")
+        return 0
+        ;;
+      *)
+        policy_command_args+=("$@")
+        return 0
+        ;;
+    esac
+  done
+}
+
 cmd_start() {
+  if [ "${policy_operation_requested:-0}" = 1 ]; then
+    policy_resolution_recheck start || exit 1
+    grant_sources_validate_snapshot || exit 1
+    grant_sources_recheck || exit 1
+  fi
   require_sysbox
-  prepare_host_state
-  add_policy_mounts
   require_jj_state_mount
   warn_legacy_files
   if is_running; then
@@ -1146,9 +1810,12 @@ cmd_start() {
       # already selected by the running container; applying policy must not trigger a tool-image
       # refresh or spend time in a build.
       local tag
+      policy_final_mutation_guard start || exit 1
       tag="$(docker inspect -f '{{.Config.Image}}' "$cname" 2>/dev/null || true)"
       [ -n "$tag" ] || { echo "agentbox: cannot apply policy: existing container image is unavailable" >&2; exit 1; }
-      docker rm -f "$cname" >/dev/null
+      # The inspection is read-only, but a source may change between it and mount assembly. Keep
+      # the retry-capable check before constructing the replacement's policy mounts.
+      policy_final_mutation_guard start || exit 1
     else
       echo "agentbox: $cname is already running."
       wait_jj_state
@@ -1156,17 +1823,29 @@ cmd_start() {
     fi
   else
     local tag
-    tag="$(build_image)" || exit 1
+    policy_final_mutation_guard start || exit 1
+    tag="$(build_image "" "" start)" || exit 1
+    # The image helper has its own pre-build guard; this second check covers a source change after
+    # the build returns and before policy mounts/labels are assembled.
+    policy_final_mutation_guard start || exit 1
   fi
   if exists && [ "$policy_needs_recreate" = 0 ]; then
     # An existing container keeps the bind mounts it was created with — `mounts` edits only take
     # effect on a fresh `docker run`, hence the `ab destroy && ab start` in the README.
     echo "agentbox: starting $cname ..." >&2
+    policy_final_mutation_guard start || exit 1
     docker start "$cname" >/dev/null
   else
+    # Build policy mounts only after the last retry-capable image check. If a source changed during
+    # the build, policy_final_mutation_guard refreshed the snapshot and these arrays must reflect
+    # that refreshed policy rather than the values from the earlier preflight.
+    prepare_host_state
+    add_policy_mounts
+    build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
+    policy_final_mount_guard
     exists && docker rm -f "$cname" >/dev/null 2>&1 || true
     echo "agentbox: creating + starting $cname ..." >&2
-    build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
+    policy_final_mount_guard
     docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
   fi
   connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
@@ -1180,6 +1859,7 @@ cmd_start() {
 # that produced them. With four tiers per file, "why is THAT setup.sh running?" is otherwise a
 # manual walk of the tree — this answers it in one command, without starting a container.
 cmd_config() {
+  policy_resolution_recheck config || return 1
   policy_inspect_recorded
   local config_git_enabled="$policy_git_enabled"
   local config_grant_gh="$policy_grant_gh"
@@ -1357,6 +2037,11 @@ ab_append_current_env() {
 }
 
 cmd_exec() {
+  if [ "${policy_operation_requested:-0}" = 1 ]; then
+    policy_resolution_recheck exec || exit 1
+    grant_sources_validate_snapshot || exit 1
+    grant_sources_recheck || exit 1
+  fi
   require_jj_state_mount
   is_running || cmd_start
   # Covers a concurrent `ab start`, or a container started directly with `docker start`, where
@@ -1405,15 +2090,20 @@ main() {
   # update check, so invalid policy/options never trigger network access.
   case "${1:-}" in
   start)
-    shift; parse_runtime_options start "$@"; policy_preflight start
+    shift; parse_runtime_options start "$@"
+    policy_operation_begin || exit 1
+    policy_preflight start
+    policy_resolution_recheck start || exit 1
     [ "$policy_updates_check" = 1 ] && check_for_update
     cmd_start
     ;;
   stop)
+    policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi
     ;;
   destroy)
+    policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     # Attempt BOTH removals independently and report every failure: a failed container rm
     # must not skip the volume rm (or vice versa). Exit non-zero if either failed so a
@@ -1449,11 +2139,13 @@ main() {
     fi
     ;;
   status)
+    policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     is_running && echo "running: $cname" || echo "not running: $cname"
     ;;
   config)
-    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
+    policy_operation_begin || exit 1
+    policy_load_host; grant_sources_snapshot || exit 1; [ "$policy_updates_check" = 1 ] && check_for_update
     shift
     if [ "${1:-}" = init ]; then
       shift
@@ -1463,28 +2155,38 @@ main() {
     fi
     ;;
   logs)
+    policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     docker logs --tail 80 "$cname" 2>&1 | tail -80
     ;;
   exec)
     shift
+    parse_exec_options exec "$@"
+    policy_operation_begin || exit 1
     policy_preflight exec
+    policy_resolution_recheck exec || exit 1
     [ "$policy_updates_check" = 1 ] && check_for_update
-    cmd_exec "$@"
+    cmd_exec "${policy_command_args[@]}"
     ;;
   build | rebuild)
     shift
     parse_runtime_options rebuild "$@"
+    policy_operation_begin || exit 1
     policy_preflight rebuild
+    policy_resolution_recheck rebuild || exit 1
     [ "$policy_updates_check" = 1 ] && check_for_update
     require_sysbox
+    policy_final_mutation_guard rebuild || exit 1
     tag="$(build_image force "$nocache")" || exit 1
+    policy_final_mutation_guard rebuild || exit 1
     prepare_host_state
     add_policy_mounts
+    build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
     warn_legacy_files
     echo "agentbox: recreating $cname with $tag ..." >&2
+    policy_final_mount_guard
     docker rm -f "$cname" >/dev/null 2>&1 || true
-    build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
+    policy_final_mount_guard
     docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
     connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
     wait_ready
@@ -1502,7 +2204,7 @@ main() {
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
   --version) echo "agentbox $AB_VERSION"; exit 0 ;;
-  *) policy_preflight exec; [ "$policy_updates_check" = 1 ] && check_for_update; cmd_exec "$@" ;;
+  *) parse_convenience_options "$@"; policy_operation_begin || exit 1; policy_preflight exec; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
   esac
 }
 
