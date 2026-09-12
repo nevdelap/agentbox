@@ -793,6 +793,15 @@ policy_needs_recreate=1; policy_apply=1; mounts=(); run_args=(); grant_labels=()
 cmd_start >/dev/null 2>&1
 assert_eq "policy apply skips image build" "0" "$mock_build_called"
 assert_eq "policy apply reuses existing image" "agentbox:test-image" "$mock_run_image"
+# A stopped policy mismatch follows the same image-reuse rule. It must inspect the stopped
+# container's image and must not refresh the base/child image before replacing the container.
+mock_run_image=""; mock_build_called=0
+is_running() { return 1; }
+exists() { return 0; }
+policy_needs_recreate=1; policy_apply=1; policy_operation_requested=0
+cmd_start >/dev/null 2>&1
+assert_eq "stopped policy apply skips image build" "0" "$mock_build_called"
+assert_eq "stopped policy apply reuses existing image" "agentbox:test-image" "$mock_run_image"
 mounts=("${_saved_start_mounts[@]}"); run_args=("${_saved_start_args[@]}"); grant_labels=("${_saved_start_labels[@]}")
 unset -f require_sysbox prepare_host_state add_policy_mounts require_jj_state_mount warn_legacy_files
 unset -f is_running exists build_image wait_jj_state connect_networks build_user_mounts docker
@@ -1772,7 +1781,7 @@ policy_preflight() {
   policy_decision_update_allowed=0
   if [ "$entry_overlay" = network-degraded ] && [ "$policy_explicit_exec_command" = 1 ]; then
     policy_decision_kind=refuse
-    policy_decision_explicit_exec_mode=diagnostic-only
+    policy_decision_explicit_exec_mode="diagnostic-only"
     return 0
   fi
   return 1
@@ -1826,6 +1835,275 @@ eval "$_saved_entry_start_fn"; eval "$_saved_entry_exec_fn"
 eval "$_saved_entry_require_sysbox_fn"; eval "$_saved_entry_build_fn"
 eval "$_saved_entry_docker_fn"; eval "$_saved_entry_network_fn"
 policy_operation_requested=0
+
+echo
+echo "Task 7 durable operation records and lifecycle handoff (bin/ab)"
+_task7_state="$(mktemp -d)"
+_saved_task7_xdg="${XDG_STATE_HOME:-}"
+_saved_task7_identity="${lock_identity:-}"
+_saved_task7_cname="$cname"; _saved_task7_dvol="$dvol"; _saved_task7_jvol="$jvol"
+XDG_STATE_HOME="$_task7_state"
+lock_identity="$(printf task7 | sha256sum | cut -d' ' -f1)"
+cname=agentbox-task7; dvol=agentbox-docker-task7; jvol=agentbox-jj-task7
+policy_resolved_effective[digest]=sha256:task7digest
+operation_record_begin
+_task7_record="$operation_record_path"
+assert_eq "record directory mode" 700 "$(stat -c '%a' "$(dirname "$_task7_record")")"
+assert_eq "record file mode" 600 "$(stat -c '%a' "$_task7_record")"
+assert_eq "record starts before lifecycle" in-progress "$(sed -n 's/^status = "\(.*\)"$/\1/p' "$_task7_record")"
+assert_eq "record has no policy path or token" 0 "$(grep -Ec 'policy-file|credential|token|secret' "$_task7_record")"
+assert_eq "record uses stable identity path" "$_task7_state/agentbox/operations/$lock_identity.toml" "$_task7_record"
+operation_phase=removal
+operation_old_container_id=old-id
+operation_record_failure removal-failed "docker rm failed" >/dev/null 2>&1
+if [ -f "$_task7_record" ]; then _task7_file_rc=0; else _task7_file_rc=1; fi
+assert_eq "removal failure leaves record" 0 "$_task7_file_rc"
+assert_eq "removal failure is terminal" removal-failed "$(sed -n 's/^status = "\(.*\)"$/\1/p' "$_task7_record")"
+operation_record_load
+assert_eq "failed record feeds decision overlay" removal-failed "$policy_operation_status"
+operation_record_terminal complete pass ""
+if [ -f "$_task7_record" ]; then _task7_file_rc=0; else _task7_file_rc=1; fi
+assert_eq "complete record is cleaned up" 1 "$_task7_file_rc"
+
+operation_old_container_id=old-id; operation_new_container_id=new-id
+assert_eq "result includes old container id" 1 "$(operation_result_record | grep -c '^old_container_id=old-id$')"
+assert_eq "result includes new container id" 1 "$(operation_result_record | grep -c '^new_container_id=new-id$')"
+
+# Pre-removal failures use only the contract's terminal statuses: removal-failed when the old
+# container remains, absent-after-failure when no old container exists. All such failures block
+# both execution authorities and forbid cleanup.
+_saved_task7_failure_exists_fn="$(declare -f exists 2>/dev/null || true)"
+task7_old_present=1
+exists() { [ "$task7_old_present" = 1 ]; }
+operation_record_begin
+operation_phase=creation
+operation_record_failure "$(operation_failure_status_before_removal)" "image build failed" >/dev/null 2>&1
+assert_eq "old-container failure status" removal-failed "$(sed -n 's/^status = \"\(.*\)\"$/\1/p' "$_task7_record")"
+assert_eq "old-container failure blocks agent" blocked "$(sed -n 's/^agent_execution = \"\(.*\)\"$/\1/p' "$_task7_record")"
+assert_eq "old-container failure blocks explicit" blocked "$(sed -n 's/^explicit_exec = \"\(.*\)\"$/\1/p' "$_task7_record")"
+assert_eq "old-container failure forbids cleanup" forbidden "$(sed -n 's/^record_cleanup = \"\(.*\)\"$/\1/p' "$_task7_record")"
+task7_old_present=0
+operation_record_begin
+operation_phase=creation
+operation_record_failure "$(operation_failure_status_before_removal)" "container creation failed" >/dev/null 2>&1
+assert_eq "absent-container failure status" absent-after-failure "$(sed -n 's/^status = \"\(.*\)\"$/\1/p' "$_task7_record")"
+assert_eq "absent-container failure blocks agent" blocked "$(sed -n 's/^agent_execution = \"\(.*\)\"$/\1/p' "$_task7_record")"
+assert_eq "absent-container failure forbids cleanup" forbidden "$(sed -n 's/^record_cleanup = \"\(.*\)\"$/\1/p' "$_task7_record")"
+unset -f exists
+[ -n "$_saved_task7_failure_exists_fn" ] && eval "$_saved_task7_failure_exists_fn"
+rm -f "$_task7_record"
+
+# Post-create verification must validate the complete Task 4 specification and the three
+# lifecycle-preserved mounts, not just policy labels. Exercise a valid snapshot, then force mode,
+# project-source, and named-volume mismatches and confirm they cannot reach completion.
+_saved_task7_inspect_fn="$(declare -f policy_inspect_recorded)"
+_saved_task7_mount_source_decl="$(declare -p mount_spec_source)"
+_saved_task7_mount_destination_decl="$(declare -p mount_spec_destination)"
+_saved_task7_mount_state_decl="$(declare -p mount_spec_state)"
+_saved_task7_git_enabled="$policy_git_enabled"
+_saved_task7_grant_gh="$policy_grant_gh"
+_saved_task7_grant_ssh="$policy_grant_all_of_dot_ssh"
+_saved_task7_mount_consistency="$policy_mount_consistency"
+_saved_task7_project="$PROJECT_DIR"
+policy_git_enabled=0; policy_grant_gh=0; policy_grant_all_of_dot_ssh=0
+mount_spec_reset
+mount_spec_set git_blocker /tmp/git-disabled /usr/bin/git ro
+task7_verify_blocker_mode=ro; task7_verify_project_source=/srv/project; task7_verify_jj_name="$jvol"
+policy_inspect_recorded() {
+  policy_container_snapshot_reset
+  policy_container_snapshot_ready=1
+  policy_recorded_status=valid; policy_recorded_classification=valid
+  policy_recorded_lifecycle_state=running; policy_recorded_mount_consistency=matching
+  policy_recorded_git_enabled=0; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+  policy_recorded_digest="sha256:$(policy_digest_for 0 0 0)"
+  policy_container_snapshot_mount_sources[/usr/bin/git]=/tmp/git-disabled
+  policy_container_snapshot_mount_modes[/usr/bin/git]="$task7_verify_blocker_mode"
+  policy_container_snapshot_mount_types[/usr/bin/git]=bind
+  policy_container_snapshot_mount_sources[/workspace]="$task7_verify_project_source"
+  policy_container_snapshot_mount_modes[/workspace]=rw
+  policy_container_snapshot_mount_types[/workspace]=bind
+  policy_container_snapshot_mount_sources[/var/lib/docker]=/var/lib/docker/volumes/agentbox-docker-task7/_data
+  policy_container_snapshot_mount_modes[/var/lib/docker]=rw
+  policy_container_snapshot_mount_names[/var/lib/docker]="$dvol"
+  policy_container_snapshot_mount_types[/var/lib/docker]=volume
+  policy_container_snapshot_mount_sources[/home/agentbox/.config/jj]=/var/lib/docker/volumes/agentbox-jj-task7/_data
+  policy_container_snapshot_mount_modes[/home/agentbox/.config/jj]=rw
+  policy_container_snapshot_mount_names[/home/agentbox/.config/jj]="$task7_verify_jj_name"
+  policy_container_snapshot_mount_types[/home/agentbox/.config/jj]=volume
+}
+PROJECT_DIR=/srv/project
+policy_verify_applied_state >/dev/null 2>&1; _task7_verify_rc=$?
+assert_eq "complete mount snapshot verifies" 0 "$_task7_verify_rc"
+task7_verify_blocker_mode=rw
+policy_verify_applied_state >/dev/null 2>&1; _task7_verify_rc=$?
+assert_eq "mount mode mismatch rejects completion" 1 "$_task7_verify_rc"
+task7_verify_blocker_mode=ro; task7_verify_project_source=/srv/other-project
+policy_verify_applied_state >/dev/null 2>&1; _task7_verify_rc=$?
+assert_eq "project source mismatch rejects completion" 1 "$_task7_verify_rc"
+task7_verify_project_source=/srv/project; task7_verify_jj_name=wrong-jj-volume
+operation_record_begin; operation_phase=completion
+if policy_verify_applied_state >/dev/null 2>&1; then
+  _task7_verify_rc=0
+else
+  operation_record_failure absent-after-failure "post-create mount verification failed" >/dev/null 2>&1
+  _task7_verify_rc=1
+fi
+assert_eq "named-volume mismatch blocks completion" 1 "$_task7_verify_rc"
+assert_eq "mount mismatch leaves terminal record" absent-after-failure "$(sed -n 's/^status = \"\(.*\)\"$/\1/p' "$_task7_record")"
+
+# Use the production policy inspection and snapshot parser rather than the unit mock. The
+# verifier must retain that one Docker snapshot long enough to compare mounts, then clear it.
+eval "$_saved_task7_inspect_fn"
+_saved_task7_verifier_docker_fn="$(declare -f docker 2>/dev/null || true)"
+mount_spec_reset
+mount_spec_set git_blocker "$GIT_BLOCKER" /usr/bin/git ro
+docker() {
+  case "$1" in
+    inspect)
+      printf 'lifecycle=running\n'
+      printf 'label=org.agentbox.policy.version=1\n'
+      printf 'label=org.agentbox.policy.git_enabled=false\n'
+      printf 'label=org.agentbox.policy.github_grant=false\n'
+      printf 'label=org.agentbox.policy.ssh_grant_all=false\n'
+      printf 'label=org.agentbox.policy.digest=sha256:%s\n' "$(policy_digest_for 0 0 0)"
+      printf 'mount=/usr/bin/git\t%s\t\tbind\tfalse\n' "$GIT_BLOCKER"
+      printf 'mount=/workspace\t/srv/project\t\tbind\ttrue\n'
+      printf 'mount=/var/lib/docker\t/var/lib/docker/volumes/%s/_data\t%s\tvolume\ttrue\n' "$dvol" "$dvol"
+      printf 'mount=/home/agentbox/.config/jj\t/var/lib/docker/volumes/%s/_data\t%s\tvolume\ttrue\n' "$jvol" "$jvol"
+      ;;
+  esac
+  return 0
+}
+policy_mount_consistency=unknown
+policy_verify_applied_state >/dev/null 2>&1; _task7_verify_rc=$?
+assert_eq "production snapshot reaches completion verification" 0 "$_task7_verify_rc"
+assert_eq "production snapshot is cleared after verification" 0 "$policy_container_snapshot_ready"
+unset -f docker
+[ -n "$_saved_task7_verifier_docker_fn" ] && eval "$_saved_task7_verifier_docker_fn"
+eval "$_saved_task7_inspect_fn"
+eval "$_saved_task7_mount_source_decl"
+eval "$_saved_task7_mount_destination_decl"
+eval "$_saved_task7_mount_state_decl"
+policy_git_enabled="$_saved_task7_git_enabled"; policy_grant_gh="$_saved_task7_grant_gh"
+policy_grant_all_of_dot_ssh="$_saved_task7_grant_ssh"; policy_mount_consistency="$_saved_task7_mount_consistency"
+PROJECT_DIR="$_saved_task7_project"
+rm -f "$_task7_record"
+
+_saved_task7_wait_ready_fn="$(declare -f wait_ready)"
+_saved_task7_running_fn="$(declare -f is_running)"
+wait_ready() { return 1; }
+is_running() { return 0; }
+readiness_adapter >/dev/null 2>&1; _task7_ready_rc=$?
+assert_eq "readiness reports running timeout" 1 "$_task7_ready_rc"
+assert_eq "readiness running outcome" failed-but-running "$operation_readiness_result"
+is_running() { return 1; }
+readiness_adapter >/dev/null 2>&1; _task7_ready_rc=$?
+assert_eq "readiness reports exited timeout" 2 "$_task7_ready_rc"
+assert_eq "readiness exited outcome" failed-and-exited "$operation_readiness_result"
+unset -f wait_ready is_running
+eval "$_saved_task7_wait_ready_fn"; eval "$_saved_task7_running_fn"
+
+_task7_networks="$(mktemp)"
+printf '%s\n' optional-net >"$_task7_networks"
+_saved_task7_cfg_networks="$cfg_networks"
+_saved_task7_network_docker_fn="$(declare -f docker)"
+cfg_networks="$_task7_networks"
+docker() {
+  case "$1" in
+    network)
+      case "$2" in
+        inspect) return 1 ;;
+        connect) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
+}
+connect_networks >/dev/null 2>&1
+assert_eq "optional network failure is degraded" degraded "$operation_connect_network_status"
+assert_eq "network failure is recorded" optional-net=failed "$operation_network_outcomes"
+cfg_networks="$_saved_task7_cfg_networks"
+unset -f docker
+eval "$_saved_task7_network_docker_fn"
+rm -f "$_task7_networks"
+
+# A replacement writes its in-progress record before docker run and removes it only after every
+# verification/readiness phase succeeds. This uses the real cmd_start sequencing with only Docker
+# and unrelated host/runtime boundaries mocked.
+_saved_task7_require_fn="$(declare -f require_sysbox)"
+_saved_task7_jj_mount_fn="$(declare -f require_jj_state_mount)"
+_saved_task7_warn_fn="$(declare -f warn_legacy_files)"
+_saved_task7_running_fn="$(declare -f is_running)"
+_saved_task7_exists_fn="$(declare -f exists)"
+_saved_task7_build_fn="$(declare -f build_image)"
+_saved_task7_prepare_fn="$(declare -f prepare_host_state)"
+_saved_task7_policy_mount_fn="$(declare -f add_policy_mounts)"
+_saved_task7_user_mount_fn="$(declare -f build_user_mounts)"
+_saved_task7_wait_jj_fn="$(declare -f wait_jj_state)"
+_saved_task7_ready_fn="$(declare -f readiness_adapter)"
+_saved_task7_verify_fn="$(declare -f policy_verify_applied_state)"
+_saved_task7_connect_fn="$(declare -f connect_networks)"
+_saved_task7_final_fn="$(declare -f policy_final_mutation_guard)"
+_saved_task7_mount_guard_fn="$(declare -f policy_final_mount_guard)"
+_saved_task7_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task7_grant_validate_fn="$(declare -f grant_sources_validate_snapshot)"
+_saved_task7_grant_recheck_fn="$(declare -f grant_sources_recheck)"
+_saved_task7_docker_fn="$(declare -f docker)"
+_task7_events="$(mktemp)"
+require_sysbox() { :; }; require_jj_state_mount() { :; }; warn_legacy_files() { :; }
+task7_running=0; task7_exists=0
+is_running() { [ "$task7_running" = 1 ]; }; exists() { [ "$task7_exists" = 1 ]; }
+build_image() { printf '%s' agentbox:task7-image; }
+prepare_host_state() { :; }; add_policy_mounts() { :; }; build_user_mounts() { :; }
+wait_jj_state() { :; }; readiness_adapter() { operation_readiness_result=ready; return 0; }
+policy_verify_applied_state() { :; }; connect_networks() { operation_connect_network_status=ok; return 0; }
+policy_final_mutation_guard() { :; }; policy_final_mount_guard() { :; }
+policy_resolution_recheck() { :; }; grant_sources_validate_snapshot() { :; }; grant_sources_recheck() { :; }
+docker() {
+  case "$1" in
+    run)
+      test -f "$operation_record_path" && printf 'record-before-run\n' >>"$_task7_events"
+      printf 'run\n' >>"$_task7_events"
+      ;;
+    stop|rm)
+      test -f "$operation_record_path" && printf 'record-before-%s\n' "$1" >>"$_task7_events"
+      printf '%s\n' "$1" >>"$_task7_events"
+      ;;
+    inspect) printf 'new-id\n' ;;
+  esac
+  return 0
+}
+XDG_STATE_HOME="$_task7_state"; lock_identity="$(printf task7-lifecycle | sha256sum | cut -d' ' -f1)"
+operation_record_active=0; policy_operation_requested=1; policy_decision_kind=create
+policy_decision_execution_allowed=1; policy_needs_recreate=0; operation_record_path=""
+cmd_start >/dev/null 2>&1; _task7_start_rc=$?
+assert_eq "successful replacement returns" 0 "$_task7_start_rc"
+assert_eq "record precedes docker run" "record-before-run" "$(sed -n '1p' "$_task7_events")"
+if [ -f "$operation_record_path" ]; then _task7_file_rc=0; else _task7_file_rc=1; fi
+assert_eq "successful replacement removes record" 1 "$_task7_file_rc"
+task7_running=1; task7_exists=1; policy_needs_recreate=1; operation_record_active=0
+: >"$_task7_events"
+cmd_start >/dev/null 2>&1; _task7_apply_rc=$?
+assert_eq "running apply returns" 0 "$_task7_apply_rc"
+assert_eq "running apply stops before remove" $'record-before-stop\nstop\nrecord-before-rm\nrm\nrecord-before-run\nrun' "$(sed -n '1,6p' "$_task7_events")"
+if [ -f "$operation_record_path" ]; then _task7_file_rc=0; else _task7_file_rc=1; fi
+assert_eq "running apply removes completed record" 1 "$_task7_file_rc"
+unset -f require_sysbox require_jj_state_mount warn_legacy_files is_running exists build_image
+unset -f prepare_host_state add_policy_mounts build_user_mounts wait_jj_state readiness_adapter
+unset -f policy_verify_applied_state connect_networks policy_final_mutation_guard policy_final_mount_guard
+unset -f policy_resolution_recheck grant_sources_validate_snapshot grant_sources_recheck docker
+eval "$_saved_task7_require_fn"; eval "$_saved_task7_jj_mount_fn"; eval "$_saved_task7_warn_fn"
+eval "$_saved_task7_running_fn"; eval "$_saved_task7_exists_fn"; eval "$_saved_task7_build_fn"
+eval "$_saved_task7_prepare_fn"; eval "$_saved_task7_policy_mount_fn"; eval "$_saved_task7_user_mount_fn"
+eval "$_saved_task7_wait_jj_fn"; eval "$_saved_task7_ready_fn"; eval "$_saved_task7_verify_fn"
+eval "$_saved_task7_connect_fn"; eval "$_saved_task7_final_fn"; eval "$_saved_task7_mount_guard_fn"
+eval "$_saved_task7_recheck_fn"; eval "$_saved_task7_grant_validate_fn"; eval "$_saved_task7_grant_recheck_fn"
+eval "$_saved_task7_docker_fn"
+rm -f "$_task7_events"
+XDG_STATE_HOME="$_saved_task7_xdg"; lock_identity="$_saved_task7_identity"
+cname="$_saved_task7_cname"; dvol="$_saved_task7_dvol"; jvol="$_saved_task7_jvol"
+policy_operation_requested=0; operation_record_active=0
+rm -rf "$_task7_state"
 
 _decision_record="$(policy_decision_record)"
 assert_eq "decision record has one kind" 1 "$(printf '%s\n' "$_decision_record" | grep -c '^kind=')"

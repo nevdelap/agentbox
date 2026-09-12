@@ -77,8 +77,11 @@ declare -A policy_resolved_labels=()
 # A recorded-state decision must be derived from one Docker inspect result. These maps are a
 # short-lived cache used only while policy_inspect_recorded classifies that result.
 declare -A policy_container_snapshot_labels=() policy_container_snapshot_mount_sources=()
+declare -A policy_container_snapshot_mount_modes=() policy_container_snapshot_mount_names=()
+declare -A policy_container_snapshot_mount_types=()
 policy_container_snapshot_lifecycle=absent
 policy_container_snapshot_ready=0
+policy_container_snapshot_retain=0
 policy_needs_recreate=0
 policy_cli_git_enabled=""
 policy_cli_grant_gh=""
@@ -89,6 +92,33 @@ policy_explicit_exec_command=0
 policy_input_env_captured=0
 policy_operation_requested=0
 policy_snapshot_retry_count=0
+policy_operation_mode=""
+policy_operation_retry=0
+policy_retry_reconcile=0
+
+# Task 7 durable lifecycle handoff. The record is deliberately host-side and privacy-preserving:
+# it contains identifiers, outcomes, and digests, never policy-file contents or credential paths.
+operation_record_path=""
+operation_record_dir=""
+operation_id=""
+operation_phase=""
+operation_status=""
+operation_started_at=""
+operation_completed_at=""
+operation_old_container_id=""
+operation_new_container_id=""
+operation_image_reference=""
+operation_network_outcomes=""
+operation_diagnostic=""
+operation_readiness_result="not-applicable"
+operation_task_status="fail"
+operation_agent_execution="blocked"
+operation_explicit_exec="blocked"
+operation_retry_command="ab start --apply"
+operation_record_cleanup="forbidden"
+operation_failed_phase=""
+operation_connect_network_status=ok
+operation_record_active=0
 
 # Task 6's decision record is the only command-facing policy gate.  Task 7 may populate the
 # operation/readiness overlay before calling policy_decide; the defaults deliberately mean that
@@ -538,6 +568,209 @@ policy_lock_acquire() {
     policy_fail "lock failed for $PROJECT_DIR: unable to create or open a lock path"
     return 1
   }
+}
+
+operation_record_reset_result() {
+  operation_record_path=""
+  operation_record_dir=""
+  operation_id=""
+  operation_phase=""
+  operation_status=""
+  operation_started_at=""
+  operation_completed_at=""
+  operation_old_container_id=""
+  operation_new_container_id=""
+  operation_image_reference=""
+  operation_network_outcomes=""
+  operation_diagnostic=""
+  operation_readiness_result=not-applicable
+  operation_task_status=fail
+  operation_agent_execution=blocked
+  operation_explicit_exec=blocked
+  operation_retry_command="ab start --apply"
+  operation_record_cleanup=forbidden
+  operation_failed_phase=""
+  operation_connect_network_status=ok
+  operation_record_active=0
+}
+
+operation_record_prepare_path() {
+  local root identity
+  root="${XDG_STATE_HOME:-$HOME/.local/state}/agentbox/operations"
+  mkdir -p -- "$root" || {
+    policy_fail "cannot create operation record directory: $root"
+    return 1
+  }
+  chmod 700 -- "$root" || {
+    policy_fail "cannot secure operation record directory: $root"
+    return 1
+  }
+  identity="${lock_identity:-$(policy_lock_identity)}"
+  operation_record_dir="$root"
+  operation_record_path="$root/$identity.toml"
+}
+
+operation_record_safe_value() {
+  local value="$1"
+  value="${value//$'\n'/ }"
+  value="${value//$'\r'/ }"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+operation_record_write() {
+  local tmp
+  [ -n "$operation_record_path" ] || operation_record_prepare_path || return 1
+  tmp="$(mktemp "$operation_record_dir/.operation.XXXXXX")" || return 1
+  chmod 600 -- "$tmp" || { rm -f -- "$tmp"; return 1; }
+  {
+    printf 'operation_id = "%s"\n' "$(operation_record_safe_value "$operation_id")"
+    printf 'started_at = "%s"\n' "$(operation_record_safe_value "$operation_started_at")"
+    [ -n "$operation_completed_at" ] && printf 'completed_at = "%s"\n' "$(operation_record_safe_value "$operation_completed_at")"
+    printf 'phase = "%s"\n' "$(operation_record_safe_value "$operation_phase")"
+    printf 'status = "%s"\n' "$(operation_record_safe_value "$operation_status")"
+    printf 'container_name = "%s"\n' "$(operation_record_safe_value "$cname")"
+    [ -n "$operation_old_container_id" ] && printf 'old_container_id = "%s"\n' "$(operation_record_safe_value "$operation_old_container_id")"
+    [ -n "$operation_new_container_id" ] && printf 'new_container_id = "%s"\n' "$(operation_record_safe_value "$operation_new_container_id")"
+    printf 'policy_digest = "%s"\n' "$(operation_record_safe_value "${policy_resolved_effective[digest]:-sha256:unknown}")"
+    printf 'image_reference = "%s"\n' "$(operation_record_safe_value "$operation_image_reference")"
+    printf 'inner_docker_volume = "%s"\n' "$(operation_record_safe_value "$dvol")"
+    printf 'jj_volume = "%s"\n' "$(operation_record_safe_value "$jvol")"
+    printf 'network_outcomes = "%s"\n' "$(operation_record_safe_value "$operation_network_outcomes")"
+    printf 'diagnostic = "%s"\n' "$(operation_record_safe_value "$operation_diagnostic")"
+    printf 'readiness_result = "%s"\n' "$(operation_record_safe_value "$operation_readiness_result")"
+    printf 'task_status = "%s"\n' "$(operation_record_safe_value "$operation_task_status")"
+    printf 'agent_execution = "%s"\n' "$(operation_record_safe_value "$operation_agent_execution")"
+    printf 'explicit_exec = "%s"\n' "$(operation_record_safe_value "$operation_explicit_exec")"
+    printf 'retry_command = "%s"\n' "$(operation_record_safe_value "$operation_retry_command")"
+    printf 'record_cleanup = "%s"\n' "$(operation_record_safe_value "$operation_record_cleanup")"
+    [ -n "$operation_failed_phase" ] && printf 'failed_phase = "%s"\n' "$(operation_record_safe_value "$operation_failed_phase")"
+    true
+  } >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$operation_record_path"
+}
+
+operation_record_begin() {
+  operation_record_reset_result
+  operation_record_prepare_path || return 1
+  operation_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  operation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  operation_phase=preflight
+  operation_status=in-progress
+  if [ "${policy_operation_mode:-start}" = rebuild ]; then
+    operation_retry_command="ab rebuild"
+  else
+    operation_retry_command="ab start --apply"
+  fi
+  operation_record_active=1
+  operation_record_write
+}
+
+operation_record_begin_if_needed() {
+  [ "${policy_operation_requested:-0}" = 1 ] || return 0
+  [ "${operation_record_active:-0}" = 1 ] || operation_record_begin
+}
+
+operation_record_update() {
+  [ "${policy_operation_requested:-0}" = 1 ] && [ "${operation_record_active:-0}" = 1 ] || return 0
+  operation_phase="$1"
+  operation_status="$2"
+  operation_diagnostic="${3:-}"
+  operation_record_write
+}
+
+operation_record_terminal() {
+  local status="$1" task_status="$2" diagnostic="${3:-}"
+  operation_status="$status"
+  operation_task_status="$task_status"
+  operation_diagnostic="$diagnostic"
+  operation_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  case "$status" in
+    complete)
+      operation_agent_execution=allowed
+      operation_explicit_exec=allowed
+      operation_record_cleanup=permitted
+      ;;
+    network-degraded|readiness-failed)
+      operation_agent_execution=blocked
+      if is_running; then operation_explicit_exec="diagnostic-only"; else operation_explicit_exec=blocked; fi
+      operation_record_cleanup=forbidden
+      ;;
+    *)
+      operation_agent_execution=blocked
+      operation_explicit_exec=blocked
+      operation_record_cleanup=forbidden
+      ;;
+  esac
+  operation_record_write || return 1
+  if [ "$status" = complete ]; then
+    rm -f -- "$operation_record_path"
+  fi
+}
+
+operation_record_load() {
+  local key value
+  operation_record_reset_result
+  operation_record_prepare_path || return 1
+  [ -f "$operation_record_path" ] || {
+    policy_operation_status=none
+    policy_readiness_result=not-applicable
+    return 0
+  }
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    key="${key//[[:space:]]/}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"
+    value="${value%\"}"
+    case "$key" in
+      status) operation_status="$value"; policy_operation_status="$value" ;;
+      readiness_result) operation_readiness_result="$value"; policy_readiness_result="$value" ;;
+      operation_id) operation_id="$value" ;;
+      started_at) operation_started_at="$value" ;;
+      completed_at) operation_completed_at="$value" ;;
+      phase) operation_phase="$value" ;;
+      container_name) : ;;
+      old_container_id) operation_old_container_id="$value" ;;
+      new_container_id) operation_new_container_id="$value" ;;
+      image_reference) operation_image_reference="$value" ;;
+      network_outcomes) operation_network_outcomes="$value" ;;
+      diagnostic) operation_diagnostic="$value" ;;
+      retry_command) operation_retry_command="$value" ;;
+      record_cleanup) operation_record_cleanup="$value" ;;
+      failed_phase) operation_failed_phase="$value" ;;
+    esac
+  done <"$operation_record_path"
+  case "$policy_operation_status" in
+    none|in-progress|removal-failed|absent-after-failure|network-degraded|readiness-failed|complete) ;;
+    *) policy_operation_status=none; policy_readiness_result=not-applicable ;;
+  esac
+  case "$policy_readiness_result" in
+    not-applicable|ready|failed-but-running|failed-and-exited) ;;
+    *) policy_readiness_result=not-applicable ;;
+  esac
+}
+
+operation_result_record() {
+  printf 'record_path=%s\n' "$operation_record_path"
+  printf 'operation_id=%s\n' "$operation_id"
+  printf 'status=%s\n' "$operation_status"
+  printf 'task_status=%s\n' "$operation_task_status"
+  printf 'agent_execution=%s\n' "$operation_agent_execution"
+  printf 'explicit_exec=%s\n' "$operation_explicit_exec"
+  printf 'retry_command=%s\n' "$operation_retry_command"
+  printf 'record_cleanup=%s\n' "$operation_record_cleanup"
+  printf 'container_name=%s\n' "$cname"
+  printf 'old_container_id=%s\n' "$operation_old_container_id"
+  printf 'new_container_id=%s\n' "$operation_new_container_id"
+  printf 'readiness_result=%s\n' "$operation_readiness_result"
+  printf 'network_outcomes=%s\n' "$operation_network_outcomes"
+  printf 'image_reference=%s\n' "$operation_image_reference"
+  printf 'inner_docker_volume=%s\n' "$dvol"
+  printf 'jj_volume=%s\n' "$jvol"
+  printf 'failed_phase=%s\n' "$operation_failed_phase"
+  printf 'diagnostic=%s\n' "$operation_diagnostic"
 }
 
 # Reset and populate the deterministic Task 5 record. The source tier entries retain every tier,
@@ -1124,6 +1357,22 @@ wait_ready() {
   return 1
 }
 
+# Adapt the bounded nested-Docker hook to the Task 7 operation result. A readiness timeout is
+# classified after the wait, so a daemon that exited during the wait cannot be reported as merely
+# non-ready. The outer container remains available for logs/config/status diagnostics.
+readiness_adapter() {
+  if wait_ready; then
+    operation_readiness_result=ready
+    return 0
+  fi
+  if is_running; then
+    operation_readiness_result=failed-but-running
+    return 1
+  fi
+  operation_readiness_result=failed-and-exited
+  return 2
+}
+
 # The entrypoint repairs the ownership of the jj state volume as root, but `docker run -d`
 # reports the container running before that startup step completes. Wait until the actual
 # runtime user can write the mounted directory so an immediate `ab jj ...`/`ab exec ...` cannot
@@ -1416,6 +1665,8 @@ warn_legacy_files() {
 # `ab stop && ab start` (a plain `docker start` reuses the prior network set). No-op without the file.
 connect_networks() {
   local list="$cfg_networks"
+  operation_connect_network_status=ok
+  operation_network_outcomes=""
   [ -n "$list" ] || return 0
   local line net members lead n=0 ok=0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -1425,19 +1676,27 @@ connect_networks() {
       case "$lead" in '' | '#'*) ;; *)
         echo "agentbox: networks: ignoring malformed line: $line (expected one network name)" >&2 ;;
       esac
+      operation_connect_network_status=degraded
       continue
     fi
     n=$((n+1))
     members="$(docker network inspect "$net" -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)" || {
-      echo "agentbox: networks: no such docker network, skipping: $net" >&2; continue; }
+      echo "agentbox: networks: no such docker network, skipping: $net" >&2
+      operation_connect_network_status=degraded
+      operation_network_outcomes="${operation_network_outcomes:+$operation_network_outcomes,}$net=failed"
+      continue; }
     if printf '%s' "$members" | tr ' ' '\n' | grep -qxF "$cname"; then
       ok=$((ok+1))   # already attached — idempotent, stay quiet
+      operation_network_outcomes="${operation_network_outcomes:+$operation_network_outcomes,}$net=attached"
       continue
     fi
     if docker network connect "$net" "$cname" 2>/dev/null; then
       ok=$((ok+1))
+      operation_network_outcomes="${operation_network_outcomes:+$operation_network_outcomes,}$net=attached"
       echo "agentbox: networks: attached $cname to $net" >&2
     else
+      operation_connect_network_status=degraded
+      operation_network_outcomes="${operation_network_outcomes:+$operation_network_outcomes,}$net=failed"
       echo "agentbox: networks: failed to attach $cname to $net (see: docker network connect $net $cname)" >&2
     fi
   done < "$list"
@@ -1714,6 +1973,21 @@ policy_snapshot_git_mount_source() {
   printf '%s' "${policy_container_snapshot_mount_sources[/usr/bin/git]-}"
 }
 
+policy_snapshot_mount_mode() {
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  printf '%s' "${policy_container_snapshot_mount_modes[$1]-}"
+}
+
+policy_snapshot_mount_name() {
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  printf '%s' "${policy_container_snapshot_mount_names[$1]-}"
+}
+
+policy_snapshot_mount_type() {
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  printf '%s' "${policy_container_snapshot_mount_types[$1]-}"
+}
+
 policy_snapshot_namespace_labels() {
   local key
   [ "$policy_container_snapshot_ready" = 1 ] || return 1
@@ -1733,14 +2007,17 @@ policy_snapshot_label() {
 policy_container_snapshot_reset() {
   policy_container_snapshot_labels=()
   policy_container_snapshot_mount_sources=()
+  policy_container_snapshot_mount_modes=()
+  policy_container_snapshot_mount_names=()
+  policy_container_snapshot_mount_types=()
   policy_container_snapshot_lifecycle=absent
   policy_container_snapshot_ready=0
 }
 
 policy_container_snapshot() {
-  local raw line rest key value destination source
+  local raw line rest key value destination source mode name type
   policy_container_snapshot_reset
-  raw="$(docker inspect -f '{{if .State.Running}}lifecycle=running{{else}}lifecycle=stopped{{end}}{{range $key, $value := .Config.Labels}}{{printf "\nlabel=%s=%s" $key $value}}{{end}}{{range .Mounts}}{{printf "\nmount=%s=%s" .Destination .Source}}{{end}}' "$cname" 2>/dev/null)" || return 1
+  raw="$(docker inspect -f '{{if .State.Running}}lifecycle=running{{else}}lifecycle=stopped{{end}}{{range $key, $value := .Config.Labels}}{{printf "\nlabel=%s=%s" $key $value}}{{end}}{{range .Mounts}}{{printf "\nmount=%s\t%s\t%s\t%s\t%t" .Destination .Source .Name .Type .RW}}{{end}}' "$cname" 2>/dev/null)" || return 1
   while IFS= read -r line; do
     case "$line" in
       lifecycle=running) policy_container_snapshot_lifecycle=running ;;
@@ -1753,9 +2030,22 @@ policy_container_snapshot() {
         ;;
       mount=*)
         rest="${line#mount=}"
-        destination="${rest%%=*}"
-        source="${rest#*=}"
+        destination="${rest%%$'\t'*}"
+        rest="${rest#*$'\t'}"
+        source="${rest%%$'\t'*}"
+        rest="${rest#*$'\t'}"
+        name="${rest%%$'\t'*}"
+        rest="${rest#*$'\t'}"
+        type="${rest%%$'\t'*}"
+        mode="${rest#*$'\t'}"
         policy_container_snapshot_mount_sources["$destination"]="$source"
+        policy_container_snapshot_mount_names["$destination"]="$name"
+        policy_container_snapshot_mount_types["$destination"]="$type"
+        case "$mode" in
+          true) policy_container_snapshot_mount_modes["$destination"]=rw ;;
+          false) policy_container_snapshot_mount_modes["$destination"]=ro ;;
+          *) policy_container_snapshot_mount_modes["$destination"]="$mode" ;;
+        esac
         ;;
     esac
   done <<< "$raw"
@@ -2044,7 +2334,7 @@ policy_inspect_recorded() {
   fi
   policy_inspect_recorded_from_snapshot "$consistency"
   rc=$?
-  policy_container_snapshot_reset
+  [ "${policy_container_snapshot_retain:-0}" = 1 ] || policy_container_snapshot_reset
   return "$rc"
 }
 
@@ -2135,7 +2425,7 @@ policy_decision_apply_overlay() {
           policy_decision_reason_code="readiness-$readiness"
           policy_decision_mutation_allowed=0
           policy_decision_execution_allowed=0
-          policy_decision_explicit_exec_mode=diagnostic-only
+          policy_decision_explicit_exec_mode="diagnostic-only"
           [ "$policy_recorded_lifecycle_state" = running ] || policy_decision_explicit_exec_mode=blocked
           policy_decision_update_allowed=0
           policy_decision_explicit_apply_required=1
@@ -2158,7 +2448,7 @@ policy_decision_apply_overlay() {
       policy_decision_reason_code=operation-network-degraded
       policy_decision_mutation_allowed=0
       policy_decision_execution_allowed=0
-      policy_decision_explicit_exec_mode=diagnostic-only
+      policy_decision_explicit_exec_mode="diagnostic-only"
       [ "$policy_recorded_lifecycle_state" = running ] || policy_decision_explicit_exec_mode=blocked
       policy_decision_update_allowed=0
       policy_decision_explicit_apply_required=1
@@ -2169,7 +2459,7 @@ policy_decision_apply_overlay() {
       policy_decision_reason_code="readiness-${readiness:-not-applicable}"
       policy_decision_mutation_allowed=0
       policy_decision_execution_allowed=0
-      policy_decision_explicit_exec_mode=diagnostic-only
+      policy_decision_explicit_exec_mode="diagnostic-only"
       [ "$policy_recorded_lifecycle_state" = running ] || policy_decision_explicit_exec_mode=blocked
       policy_decision_update_allowed=0
       policy_decision_explicit_apply_required=1
@@ -2241,7 +2531,7 @@ policy_decide() {
           policy_decision_execution_allowed=1
           policy_decision_update_allowed=1
         elif [ "$lifecycle" = running ] && [ "$policy_apply" != 1 ]; then
-          policy_decision_reason_code=running-legacy-mismatch
+          policy_decision_reason_code="running-legacy-mismatch"
           policy_decision_explicit_apply_required=1
         elif [ "$lifecycle" = running ]; then
           policy_decision_kind=reconcile-running
@@ -2281,7 +2571,7 @@ policy_decide() {
           policy_decision_execution_allowed=1
           policy_decision_update_allowed=1
         else
-          policy_decision_reason_code=running-policy-mismatch
+          policy_decision_reason_code="running-policy-mismatch"
           policy_decision_explicit_apply_required=1
         fi
       else
@@ -2387,6 +2677,12 @@ policy_preflight() {
       policy_needs_recreate=1
     fi
   fi
+  # An explicit retry of a terminal operation starts a fresh lifecycle attempt even when the
+  # current inspect now appears policy-matching; this is what retries a degraded network or
+  # readiness phase instead of silently returning an already-running container.
+  if [ "${policy_retry_reconcile:-0}" = 1 ] && [ "$mode" = start ]; then
+    policy_needs_recreate=1
+  fi
   policy_decide "$mode" || return 1
   if [ "$policy_decision_kind" = refuse ]; then
     if [ "$mode" = exec ] && [ "$policy_explicit_exec_command" = 1 ] &&
@@ -2401,7 +2697,21 @@ policy_preflight() {
 policy_operation_begin() {
   policy_operation_requested=1
   policy_snapshot_retry_count=0
+  policy_operation_status=none
+  policy_readiness_result=not-applicable
   policy_lock_acquire
+  operation_record_load || return 1
+  policy_retry_reconcile=0
+  # A fresh explicit reconciliation is the only retry path. Ordinary starts and execs must
+  # consume a non-complete record rather than assuming the old container is usable.
+  if [ "${policy_operation_retry:-0}" = 1 ]; then
+    case "$policy_operation_status" in
+      none|complete) ;;
+      *) policy_retry_reconcile=1 ;;
+    esac
+    policy_operation_status=none
+    policy_readiness_result=not-applicable
+  fi
 }
 
 policy_resolution_recheck() {
@@ -2455,6 +2765,156 @@ policy_final_mount_guard() {
     policy_fail "policy-changed-during-resolution: ${policy_snapshot_changed_path:-mounts}; retry the operation"
     return 1
   }
+}
+
+policy_verify_task4_mounts() {
+  local key expected_state expected_source expected_destination destination actual_source actual_mode
+  local -a destinations=()
+  for key in "${mount_spec_keys[@]}"; do
+    [ "$key" = custom_conflicts ] && continue
+    expected_state="${mount_spec_state[$key]:-absent}"
+    expected_source="${mount_spec_source[$key]:-none}"
+    expected_destination="${mount_spec_destination[$key]:-none}"
+    IFS='|' read -r -a destinations <<<"$expected_destination"
+    case "$expected_state" in
+      absent)
+        for destination in "${destinations[@]}"; do
+          [ "${policy_container_snapshot_mount_sources[$destination]+present}" = present ] || continue
+          policy_fail "created container has unexpected Task 4 mount at $destination"
+          return 1
+        done
+        ;;
+      ro|rw)
+        [ "${#destinations[@]}" -eq 1 ] || {
+          policy_fail "Task 4 mount specification has ambiguous destination for $key"
+          return 1
+        }
+        destination="${destinations[0]}"
+        [ "${policy_container_snapshot_mount_sources[$destination]+present}" = present ] || {
+          policy_fail "created container is missing Task 4 mount $key at $destination"
+          return 1
+        }
+        actual_source="$(policy_snapshot_mount_source "$destination")"
+        [ "$actual_source" = "$expected_source" ] || {
+          policy_fail "created container Task 4 mount $key has source $actual_source, expected $expected_source"
+          return 1
+        }
+        actual_mode="$(policy_snapshot_mount_mode "$destination")"
+        [ "$actual_mode" = "$expected_state" ] || {
+          policy_fail "created container Task 4 mount $key has mode $actual_mode, expected $expected_state"
+          return 1
+        }
+        ;;
+      *)
+        policy_fail "Task 4 mount specification has invalid state $expected_state for $key"
+        return 1
+        ;;
+    esac
+  done
+}
+
+policy_snapshot_mount_source() {
+  [ "$policy_container_snapshot_ready" = 1 ] || return 1
+  printf '%s' "${policy_container_snapshot_mount_sources[$1]-}"
+}
+
+policy_verify_required_mounts() {
+  local destination actual_source actual_mode actual_name actual_type
+  for destination in /workspace /var/lib/docker /home/agentbox/.config/jj; do
+    [ "${policy_container_snapshot_mount_sources[$destination]+present}" = present ] || {
+      policy_fail "created container is missing required mount at $destination"
+      return 1
+    }
+    actual_mode="$(policy_snapshot_mount_mode "$destination")"
+    [ "$actual_mode" = rw ] || {
+      policy_fail "created container required mount at $destination is $actual_mode, expected rw"
+      return 1
+    }
+    actual_type="$(policy_snapshot_mount_type "$destination")"
+    actual_source="$(policy_snapshot_mount_source "$destination")"
+    actual_name="$(policy_snapshot_mount_name "$destination")"
+    case "$destination" in
+      /workspace)
+        [ "$actual_type" = bind ] && [ "$actual_source" = "$PROJECT_DIR" ] || {
+          policy_fail "created container project mount does not use $PROJECT_DIR"
+          return 1
+        }
+        ;;
+      /var/lib/docker)
+        [ "$actual_type" = volume ] && [ "$actual_name" = "$dvol" ] || {
+          policy_fail "created container inner-Docker mount does not use named volume $dvol"
+          return 1
+        }
+        ;;
+      /home/agentbox/.config/jj)
+        [ "$actual_type" = volume ] && [ "$actual_name" = "$jvol" ] || {
+          policy_fail "created container jj mount does not use named volume $jvol"
+          return 1
+        }
+        ;;
+    esac
+  done
+}
+
+policy_verify_applied_state() {
+  local rc=0
+  policy_container_snapshot_retain=1
+  if ! policy_inspect_recorded "${policy_mount_consistency:-unknown}"; then
+    rc=1
+  elif [ "$policy_recorded_status" != valid ]; then
+    policy_fail "created container has incomplete policy labels: ${policy_recorded_detail:-unknown}"
+    rc=1
+  elif ! policy_decision_policy_matches_recorded; then
+    policy_fail "created container policy labels do not match the resolved policy"
+    rc=1
+  elif ! policy_verify_task4_mounts; then
+    rc=1
+  elif ! policy_verify_required_mounts; then
+    rc=1
+  elif [ "$policy_recorded_lifecycle_state" != running ]; then
+    policy_fail "created container is not running after the lifecycle operation"
+    rc=1
+  fi
+  policy_container_snapshot_retain=0
+  policy_container_snapshot_reset
+  return "$rc"
+}
+
+operation_record_failure() {
+  local status="$1" diagnostic="$2" task_status=fail
+  [ "$status" = network-degraded ] && task_status=degraded-fail
+  operation_failed_phase="$operation_phase"
+  operation_record_terminal "$status" "$task_status" "$diagnostic" || return 1
+  operation_result_record >&2
+  return 1
+}
+
+operation_failure_status_before_removal() {
+  if exists; then
+    printf '%s' removal-failed
+  else
+    printf '%s' absent-after-failure
+  fi
+}
+
+operation_mutation_guard() {
+  local mode="$1" failure_status="${2:-}"
+  [ -n "$failure_status" ] || failure_status="$(operation_failure_status_before_removal)"
+  if policy_final_mutation_guard "$mode"; then return 0; fi
+  if [ "${operation_record_active:-0}" = 1 ]; then
+    operation_record_failure "$failure_status" "policy changed during resolution: ${policy_snapshot_changed_path:-unknown}" || true
+  fi
+  return 1
+}
+
+operation_mount_guard() {
+  local failure_status
+  failure_status="$(operation_failure_status_before_removal)"
+  if policy_final_mount_guard; then return 0; fi
+  if [ "${operation_record_active:-0}" = 1 ]; then
+    operation_record_failure "$failure_status" "policy changed after mount assembly: ${policy_snapshot_changed_path:-unknown}" || true
+  fi
+  return 1
 }
 
 check_existing_grants() {
@@ -2574,56 +3034,126 @@ cmd_start() {
   require_sysbox
   require_jj_state_mount
   warn_legacy_files
+  local running=0 tag old_id
   if is_running; then
+    running=1
     if [ "$policy_needs_recreate" = 1 ]; then
       echo "agentbox: applying policy to running $cname; active processes and container-local filesystem state will be interrupted." >&2
-      # The policy change is expressed entirely by container mounts and labels. Reuse the image
-      # already selected by the running container; applying policy must not trigger a tool-image
-      # refresh or spend time in a build.
-      local tag
-      policy_final_mutation_guard start || exit 1
-      tag="$(docker inspect -f '{{.Config.Image}}' "$cname" 2>/dev/null || true)"
-      [ -n "$tag" ] || { echo "agentbox: cannot apply policy: existing container image is unavailable" >&2; exit 1; }
-      # The inspection is read-only, but a source may change between it and mount assembly. Keep
-      # the retry-capable check before constructing the replacement's policy mounts.
-      policy_final_mutation_guard start || exit 1
     else
       echo "agentbox: $cname is already running."
       wait_jj_state
       return $?
     fi
-  else
-    local tag
-    policy_final_mutation_guard start || exit 1
-    tag="$(build_image "" "" start)" || exit 1
-    # The image helper has its own pre-build guard; this second check covers a source change after
-    # the build returns and before policy mounts/labels are assembled.
-    policy_final_mutation_guard start || exit 1
   fi
+
+  # No Docker mutation may occur before the durable record exists. A stopped matching container
+  # is still an operation because docker start changes lifecycle state; an already-running match
+  # returned above without opening a replacement record.
+  operation_record_begin_if_needed || exit 1
+  if [ "${policy_operation_requested:-0}" = 1 ]; then
+    operation_record_update preflight in-progress "" || exit 1
+  fi
+  operation_mutation_guard start || exit 1
+
+  if [ "$running" = 1 ]; then
+    # Policy-only apply reuses the exact image selected by the old container. It must never build
+    # or refresh an image merely because mounts/labels are being reconciled.
+    tag="$(docker inspect -f '{{.Config.Image}}' "$cname" 2>/dev/null || true)"
+    [ -n "$tag" ] || operation_record_failure removal-failed "existing container image is unavailable" || exit 1
+  elif exists; then
+    tag="$(docker inspect -f '{{.Config.Image}}' "$cname" 2>/dev/null || true)"
+    [ -n "$tag" ] || operation_record_failure removal-failed "stopped container image is unavailable" || exit 1
+  else
+    tag="$(build_image "" "" start)" || {
+      operation_record_failure absent-after-failure "image build failed" || true
+      exit 1
+    }
+  fi
+  operation_image_reference="$tag"
+  operation_mutation_guard start || exit 1
+
   if exists && [ "$policy_needs_recreate" = 0 ]; then
     # An existing container keeps the bind mounts it was created with — `mounts` edits only take
     # effect on a fresh `docker run`, hence the `ab destroy && ab start` in the README.
     echo "agentbox: starting $cname ..." >&2
-    policy_final_mutation_guard start || exit 1
-    docker start "$cname" >/dev/null
+    operation_phase=creation
+    operation_record_update creation in-progress "" || exit 1
+    operation_mutation_guard start || exit 1
+    if ! docker start "$cname" >/dev/null; then
+      operation_record_failure removal-failed "docker start failed" || exit 1
+    fi
   else
     # Build policy mounts only after the last retry-capable image check. If a source changed during
     # the build, policy_final_mutation_guard refreshed the snapshot and these arrays must reflect
     # that refreshed policy rather than the values from the earlier preflight.
-    prepare_host_state
+    if ! prepare_host_state; then
+      operation_record_failure "$(operation_failure_status_before_removal)" "policy mount assembly failed" || true
+      exit 1
+    fi
     add_policy_mounts
-    build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
-    policy_final_mount_guard
-    exists && docker rm -f "$cname" >/dev/null 2>&1 || true
+    if ! build_user_mounts; then
+      operation_record_failure "$(operation_failure_status_before_removal)" "custom mount assembly failed" || true
+      exit 1
+    fi
+    operation_mount_guard
+    if exists; then
+      old_id="$(docker inspect -f '{{.Id}}' "$cname" 2>/dev/null || true)"
+      operation_old_container_id="$old_id"
+      operation_phase=removal
+      operation_record_update removal in-progress "" || exit 1
+      operation_mutation_guard start absent-after-failure || exit 1
+      if [ "$running" = 1 ] && ! docker stop "$cname" >/dev/null 2>&1; then
+        operation_record_failure removal-failed "docker stop failed; no removal or replacement was attempted" || exit 1
+      fi
+      if ! docker rm "$cname" >/dev/null 2>&1; then
+        operation_record_failure removal-failed "docker rm failed; no replacement was attempted" || exit 1
+      fi
+    fi
     echo "agentbox: creating + starting $cname ..." >&2
-    policy_final_mount_guard
-    docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
+    operation_phase=creation
+    operation_record_update creation in-progress "" || exit 1
+    operation_mount_guard
+    if ! docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null; then
+      operation_record_failure absent-after-failure "docker run failed; the named container is absent" || exit 1
+    fi
   fi
-  connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
+
+  # Keep the source-level helper useful to callers that deliberately bypass policy preflight
+  # (notably the focused unit tests). Production entry points always request the Task 7 record.
+  if [ "${policy_operation_requested:-0}" != 1 ]; then
+    connect_networks
+    wait_jj_state
+    return $?
+  fi
+
+  operation_new_container_id="$(docker inspect -f '{{.Id}}' "$cname" 2>/dev/null || true)"
+  [ -n "$operation_new_container_id" ] || operation_record_failure absent-after-failure "replacement container cannot be inspected" || exit 1
+  policy_verify_applied_state || {
+    operation_record_failure absent-after-failure "post-creation policy verification failed" || true
+    exit 1
+  }
+  operation_phase=required-network
+  operation_record_update required-network in-progress "" || exit 1
+  connect_networks   # configured networks are optional post-create attachments
+  if [ "$operation_connect_network_status" != ok ]; then
+    operation_record_failure network-degraded "one or more optional networks could not be attached" || exit 1
+  fi
   # Wait only for the jj state ownership repair. The entrypoint brings inner dockerd up in the
   # background; `ab claude`/`ab exec` do not need to wait for it, and inner-docker callers find
   # it ready shortly after.
-  wait_jj_state
+  operation_phase=nested-readiness
+  operation_record_update nested-readiness in-progress "" || exit 1
+  if ! wait_jj_state; then
+    if is_running; then operation_readiness_result=failed-but-running; else operation_readiness_result=failed-and-exited; fi
+    operation_record_failure readiness-failed "jj state is not ready" || exit 1
+  fi
+  if ! readiness_adapter; then
+    operation_record_failure readiness-failed "nested Docker readiness failed: $operation_readiness_result" || exit 1
+  fi
+  operation_phase=completion
+  operation_record_update completion in-progress "" || exit 1
+  operation_record_terminal complete pass "" || exit 1
+  operation_result_record
 }
 
 # Show which config files are in effect for this machine + project, and the search
@@ -2878,6 +3408,8 @@ main() {
   case "${1:-}" in
   start)
     shift; parse_runtime_options start "$@"
+    policy_operation_mode=start
+    policy_operation_retry="$policy_apply"
     policy_operation_begin || exit 1
     policy_preflight start
     policy_resolution_recheck start || exit 1
@@ -2885,11 +3417,15 @@ main() {
     cmd_start
     ;;
   stop)
+    policy_operation_mode=stop
+    policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi
     ;;
   destroy)
+    policy_operation_mode=destroy
+    policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     # Attempt BOTH removals independently and report every failure: a failed container rm
@@ -2926,11 +3462,15 @@ main() {
     fi
     ;;
   status)
+    policy_operation_mode=status
+    policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     is_running && echo "running: $cname" || echo "not running: $cname"
     ;;
   config)
+    policy_operation_mode=config
+    policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_preflight config || exit 1
     policy_resolution_recheck config || exit 1
@@ -2944,6 +3484,8 @@ main() {
     fi
     ;;
   logs)
+    policy_operation_mode=logs
+    policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
     docker logs --tail 80 "$cname" 2>&1 | tail -80
@@ -2951,6 +3493,8 @@ main() {
   exec)
     shift
     parse_exec_options exec "$@"
+    policy_operation_mode="exec"
+    policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_preflight exec
     policy_resolution_recheck exec || exit 1
@@ -2960,25 +3504,73 @@ main() {
   build | rebuild)
     shift
     parse_runtime_options rebuild "$@"
+    policy_operation_mode="rebuild"
+    policy_operation_retry=1
     policy_operation_begin || exit 1
     policy_preflight rebuild
     policy_resolution_recheck rebuild || exit 1
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     require_sysbox
-    policy_final_mutation_guard rebuild || exit 1
-    tag="$(build_image force "$nocache")" || exit 1
-    policy_final_mutation_guard rebuild || exit 1
-    prepare_host_state
+    operation_record_begin_if_needed || exit 1
+    operation_record_update preflight in-progress "" || exit 1
+    operation_mutation_guard rebuild || exit 1
+    if ! tag="$(build_image force "$nocache")"; then
+      operation_record_failure "$(operation_failure_status_before_removal)" "image build failed; existing container was not removed" || true
+      exit 1
+    fi
+    operation_image_reference="$tag"
+    operation_mutation_guard rebuild || exit 1
+    if ! prepare_host_state; then
+      operation_record_failure "$(operation_failure_status_before_removal)" "policy mount assembly failed" || true
+      exit 1
+    fi
     add_policy_mounts
-    build_user_mounts   # append --mount flags from the resolved `mounts` list (no-op without)
+    if ! build_user_mounts; then
+      operation_record_failure "$(operation_failure_status_before_removal)" "custom mount assembly failed" || true
+      exit 1
+    fi
     warn_legacy_files
     echo "agentbox: recreating $cname with $tag ..." >&2
-    policy_final_mount_guard
-    docker rm -f "$cname" >/dev/null 2>&1 || true
-    policy_final_mount_guard
-    docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null
-    connect_networks   # attach to resolved `networks` (outer-daemon op; no-op without the file)
-    wait_ready
+    operation_mount_guard
+    if exists; then
+      operation_old_container_id="$(docker inspect -f '{{.Id}}' "$cname" 2>/dev/null || true)"
+      operation_phase=removal
+      operation_record_update removal in-progress "" || exit 1
+      operation_mutation_guard rebuild absent-after-failure || exit 1
+      if is_running && ! docker stop "$cname" >/dev/null 2>&1; then
+        operation_record_failure removal-failed "docker stop failed; no removal or replacement was attempted" || exit 1
+      fi
+      if ! docker rm "$cname" >/dev/null 2>&1; then
+        operation_record_failure removal-failed "docker rm failed; no replacement was attempted" || exit 1
+      fi
+    fi
+    operation_phase=creation
+    operation_record_update creation in-progress "" || exit 1
+    operation_mount_guard
+    if ! docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null; then
+      operation_record_failure absent-after-failure "docker run failed; the named container is absent" || exit 1
+    fi
+    operation_new_container_id="$(docker inspect -f '{{.Id}}' "$cname" 2>/dev/null || true)"
+    [ -n "$operation_new_container_id" ] || operation_record_failure absent-after-failure "replacement container cannot be inspected" || exit 1
+    policy_verify_applied_state || {
+      operation_record_failure absent-after-failure "post-creation policy verification failed" || true
+      exit 1
+    }
+    operation_phase=required-network
+    operation_record_update required-network in-progress "" || exit 1
+    connect_networks   # configured networks are optional post-create attachments
+    if [ "$operation_connect_network_status" != ok ]; then
+      operation_record_failure network-degraded "one or more optional networks could not be attached" || exit 1
+    fi
+    operation_phase=nested-readiness
+    operation_record_update nested-readiness in-progress "" || exit 1
+    if ! readiness_adapter; then
+      operation_record_failure readiness-failed "nested Docker readiness failed: $operation_readiness_result" || exit 1
+    fi
+    operation_phase=completion
+    operation_record_update completion in-progress "" || exit 1
+    operation_record_terminal complete pass "" || exit 1
+    operation_result_record
     # Re-prune this project's child tags now that the old container (which pinned the superseded
     # one) is gone — build_user_image's own prune above ran BEFORE `docker rm -f` and so couldn't
     # remove it. Unconditional (not gated on $tag being a child tag): the ${hash} scoping means
@@ -2993,7 +3585,7 @@ main() {
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
   --version) echo "agentbox $AB_VERSION"; exit 0 ;;
-  *) parse_convenience_options "$@"; policy_operation_begin || exit 1; policy_preflight exec; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
+  *) parse_convenience_options "$@"; policy_operation_mode="exec"; policy_operation_retry=0; policy_operation_begin || exit 1; policy_preflight exec; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
   esac
 }
 
