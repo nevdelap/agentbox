@@ -72,6 +72,290 @@ compute_names "$long"
 assert_eq "slug truncated to 80" "80" "${#slug}"
 
 echo
+echo "Task 3 canonical identity and mount safety (bin/ab)"
+for _machine_case in A a1 a-1 a_1 a.1 "$(printf 'a%.0s' {1..64})"; do
+  assert_eq "valid machine $_machine_case" "$_machine_case" "$(canonical_machine_name "$_machine_case")"
+done
+for _machine_case in '' a- a_ a. a/b 'a b' "$(printf 'a%.0s' {1..65})"; do
+  assert_eq "invalid machine $_machine_case" "1" "$(canonical_machine_name "$_machine_case" >/dev/null 2>&1; echo $?)"
+done
+_identity_root="$(mktemp -d)"
+mkdir -p "$_identity_root/real/space/é/proj"
+ln -s "$_identity_root/real" "$_identity_root/link"
+assert_eq "physical project path" "$_identity_root/real/space/é/proj" \
+  "$(canonical_project_path "$_identity_root/link/space/./é/../é/proj")"
+assert_eq "missing project rejected" "1" \
+  "$(canonical_project_path "$_identity_root/missing" >/dev/null 2>&1; echo $?)"
+assert_eq "mount repeated separators" "/home/agentbox/.ssh" \
+  "$(canonical_mount_destination '//home///agentbox/./.ssh')"
+assert_eq "mount dots and parent" "/home/agentbox/.ssh/known_hosts" \
+  "$(canonical_mount_destination '/home/agentbox/.config/../.ssh/known_hosts')"
+assert_eq "mount relative rejected" "1" \
+  "$(canonical_mount_destination 'home/agentbox/.ssh' >/dev/null 2>&1; echo $?)"
+assert_eq "mount root escape rejected" "1" \
+  "$(canonical_mount_destination '/../etc' >/dev/null 2>&1; echo $?)"
+assert_eq "similar protected path allowed" "" \
+  "$(mount_destination_obscures_protected /home/agentbox/.ssh2 || true)"
+assert_eq "protected parent conflict" "/home/agentbox/.gitconfig" \
+  "$(mount_destination_obscures_protected /home/agentbox)"
+assert_eq "workspace protected" "/workspace" \
+  "$(mount_destination_obscures_protected /workspace)"
+assert_eq "collocated git metadata protected" "/workspace/.git" \
+  "$(mount_destination_obscures_protected /workspace/.git)"
+assert_eq "workspace parent conflict" "/workspace" \
+  "$(mount_destination_obscures_protected /)"
+assert_eq "workspace nested path allowed" "" \
+  "$(mount_destination_obscures_protected /workspace/project-file || true)"
+assert_eq "jj state protected" "/home/agentbox/.config/jj" \
+  "$(mount_destination_obscures_protected /home/agentbox/.config/jj)"
+assert_eq "jj state nested path allowed" "" \
+  "$(mount_destination_obscures_protected /home/agentbox/.config/jj/repo || true)"
+assert_eq "jj legacy config protected" "/home/agentbox/.jjconfig.toml" \
+  "$(mount_destination_obscures_protected /home/agentbox/.jjconfig.toml)"
+assert_eq "jj host config protected" "/home/agentbox/.config/jj-host-config.toml" \
+  "$(mount_destination_obscures_protected /home/agentbox/.config/jj-host-config.toml)"
+assert_eq "jj host conf.d protected" "/home/agentbox/.config/jj-host-conf.d" \
+  "$(mount_destination_obscures_protected /home/agentbox/.config/jj-host-conf.d)"
+for _safe_mount_case in /workspace2 /workspace/project2 /home/agentbox/.config/jj2 \
+                         /home/agentbox/.config/jj-host-config.toml.bak; do
+  assert_eq "safe similar destination $_safe_mount_case" "" \
+    "$(mount_destination_obscures_protected "$_safe_mount_case" || true)"
+done
+_protected_mount_file="$(mktemp)"
+_saved_protected_mount_cfg="$cfg_mounts"
+for _protected_mount_case in / /workspace /workspace/.git /home/agentbox/.config/jj \
+                              /home/agentbox/.jjconfig.toml \
+                              /home/agentbox/.config/jj-host-config.toml \
+                              /home/agentbox/.config/jj-host-conf.d; do
+  printf '%s\n' "/tmp/source $_protected_mount_case" >"$_protected_mount_file"
+  cfg_mounts="$_protected_mount_file"
+  assert_eq "validate protected destination $_protected_mount_case" 1 \
+    "$(validate_custom_mounts >/dev/null 2>&1; echo $?)"
+done
+cfg_mounts="$_saved_protected_mount_cfg"
+rm -f "$_protected_mount_file"
+_lock_home="$(mktemp -d)"
+_saved_project_for_lock="$PROJECT_DIR"; _saved_machine_for_lock="$MACHINE"; _saved_home_for_lock="$HOME"
+_saved_runtime_for_lock="${XDG_RUNTIME_DIR-}"; _saved_cache_for_lock="${XDG_CACHE_HOME-}"
+PROJECT_DIR="$_lock_home"; MACHINE=lockhost; HOME="$_lock_home/home"
+XDG_RUNTIME_DIR="$_lock_home/runtime"; XDG_CACHE_HOME="$_lock_home/cache"
+mkdir -p "$HOME"
+compute_names "$PROJECT_DIR"
+agentbox_lock_fd=""
+policy_lock_acquire >/dev/null 2>&1; _lock_rc=$?
+assert_eq "lock acquired" "0" "$_lock_rc"
+assert_eq "lock result" acquired "$lock_result"
+assert_eq "lock directory mode" 700 "$(stat -c '%a' "$(dirname "$lock_path")")"
+assert_eq "lock file mode" 600 "$(stat -c '%a' "$lock_path")"
+_lock_fd_before="$agentbox_lock_fd"; policy_lock_acquire >/dev/null 2>&1
+assert_eq "reentrant lock reuses handle" "$_lock_fd_before" "$agentbox_lock_fd"
+exec {agentbox_lock_fd}>&-; agentbox_lock_fd=""
+_bad_runtime="$_lock_home/runtime-file"; _bad_cache="$_lock_home/cache-file"; _fallback_cache="$_lock_home/cache-fallback"
+: >"$_bad_runtime"; : >"$_bad_cache"; mkdir -p "$_fallback_cache"
+XDG_RUNTIME_DIR="$_bad_runtime"; XDG_CACHE_HOME="$_fallback_cache"
+policy_lock_acquire >/dev/null 2>&1; _lock_rc=$?
+assert_eq "lock cache fallback" 0 "$_lock_rc"
+assert_eq "lock fallback path" "$_fallback_cache/agentbox/locks" "$(dirname "$lock_path")"
+exec {agentbox_lock_fd}>&-; agentbox_lock_fd=""
+XDG_RUNTIME_DIR="$_lock_home/runtime"; XDG_CACHE_HOME="$_lock_home/cache"
+policy_lock_acquire >/dev/null 2>&1
+exec {agentbox_lock_fd}>&-; agentbox_lock_fd=""; lock_timeout_seconds=0
+flock() { return 1; }
+policy_lock_acquire >/dev/null 2>&1; _lock_rc=$?
+assert_eq "busy lock outcome" 1 "$_lock_rc"
+assert_eq "busy lock result" busy "$lock_result"
+unset -f flock
+lock_timeout_seconds=30
+_bad_home="$_lock_home/home-file"; : >"$_bad_home"; HOME="$_bad_home"
+XDG_RUNTIME_DIR="$_bad_runtime"; XDG_CACHE_HOME="$_bad_cache"; agentbox_lock_fd=""
+policy_lock_acquire >/dev/null 2>&1; _lock_rc=$?
+assert_eq "lock failure outcome" 1 "$_lock_rc"
+assert_eq "lock failure result" failed "$lock_result"
+PROJECT_DIR="$_saved_project_for_lock"; MACHINE="$_saved_machine_for_lock"; HOME="$_saved_home_for_lock"
+if [ -n "$_saved_runtime_for_lock" ]; then XDG_RUNTIME_DIR="$_saved_runtime_for_lock"; else unset XDG_RUNTIME_DIR; fi
+if [ -n "$_saved_cache_for_lock" ]; then XDG_CACHE_HOME="$_saved_cache_for_lock"; else unset XDG_CACHE_HOME; fi
+rm -rf "$_lock_home"
+
+_source_home="$(mktemp -d)"
+_saved_home_for_sources="$HOME"; HOME="$_source_home"
+mkdir -p "$HOME/.config/gh" "$HOME/.ssh"
+: >"$HOME/.ssh/known_hosts"; chmod 600 "$HOME/.ssh/known_hosts"
+policy_grant_gh=1; policy_grant_all_of_dot_ssh=1
+grant_sources_snapshot >/dev/null 2>&1; _grant_rc=$?
+assert_eq "grant sources snapshot" 0 "$_grant_rc"
+assert_eq "grant directory identity" directory "${grant_source_snapshot[gh]%%|*}"
+mv "$HOME/.config/gh" "$HOME/.config/gh-old"; mkdir "$HOME/.config/gh"
+grant_sources_recheck >/dev/null 2>&1; _grant_rc=$?
+assert_eq "grant directory replacement detected" 1 "$_grant_rc"
+rm "$HOME/.ssh/known_hosts"; ln -s "$HOME/.ssh/missing" "$HOME/.ssh/known_hosts"
+grant_sources_snapshot >/dev/null 2>&1; _grant_rc=$?
+assert_eq "known_hosts symlink rejected" 1 "$_grant_rc"
+HOME="$_saved_home_for_sources"; rm -rf "$_source_home"
+
+_snapshot_root="$(mktemp -d)"; mkdir -p "$_snapshot_root/machines" "$_snapshot_root/projects"
+_saved_policy_root_for_snapshot="$AB_CFG_ROOT"; _saved_project_for_snapshot="$PROJECT_DIR"; _saved_machine_for_snapshot="$MACHINE"
+AB_CFG_ROOT="$_snapshot_root"; PROJECT_DIR="$_snapshot_root"; MACHINE=snapshot
+printf '%s\n' '[git]' 'enabled = true' >"$_snapshot_root/agentbox.toml"
+unset AGENTBOX_NO_GIT AGENTBOX_GRANT_GH AGENTBOX_GRANT_ALL_OF_DOT_SSH AGENTBOX_NO_UPDATE_CHECK
+policy_input_reset; policy_load_host >/dev/null 2>&1
+assert_eq "four policy sources snapshotted" 4 "${#policy_snapshot_paths[@]}"
+printf '%s\n' '[git]' 'enabled = false' >"$_snapshot_root/agentbox.toml"
+assert_eq "policy replacement detected" 1 "$(policy_snapshot_recheck >/dev/null 2>&1; echo $?)"
+mkdir "$_snapshot_root/outside"; rm -rf "$_snapshot_root/machines"; ln -s "$_snapshot_root/outside" "$_snapshot_root/machines"
+assert_eq "symlinked policy tier rejected" 1 "$(policy_load_host >/dev/null 2>&1; echo $?)"
+AB_CFG_ROOT="$_saved_policy_root_for_snapshot"; PROJECT_DIR="$_saved_project_for_snapshot"; MACHINE="$_saved_machine_for_snapshot"
+rm -rf "$_snapshot_root"
+
+_mount_test_file="$(mktemp)"; printf '%s\n' '/tmp/source /home/agentbox/.ssh' >"$_mount_test_file"
+_saved_mount_list="$cfg_mounts"; cfg_mounts="$_mount_test_file"
+_saved_policy_load_fn="$(declare -f policy_load_host)"; _saved_policy_inspect_fn="$(declare -f policy_inspect_recorded)"
+_saved_lock_fn="$(declare -f policy_lock_acquire)"; _saved_exists_fn="$(declare -f exists)"; _saved_validate_blocker_fn="$(declare -f validate_git_blocker)"
+policy_load_host() { policy_git_enabled=1; policy_grant_gh=0; policy_grant_all_of_dot_ssh=0; policy_git_source=default; policy_grant_gh_source=default; policy_grant_all_of_dot_ssh_source=default; return 0; }
+policy_inspect_recorded() { policy_recorded_status=none; return 0; }
+policy_lock_acquire() { lock_result=acquired; return 0; }
+exists() { return 1; }
+validate_git_blocker() { return 0; }
+policy_operation_requested=1
+assert_eq "custom protected mount rejected in preflight" 1 "$(policy_preflight start >/dev/null 2>&1; echo $?)"
+policy_operation_requested=0
+unset -f policy_load_host policy_inspect_recorded policy_lock_acquire exists validate_git_blocker
+eval "$_saved_policy_load_fn"; eval "$_saved_policy_inspect_fn"; eval "$_saved_lock_fn"; eval "$_saved_exists_fn"; eval "$_saved_validate_blocker_fn"
+cfg_mounts="$_saved_mount_list"; rm -f "$_mount_test_file"
+
+_saved_snapshot_recheck_fn="$(declare -f policy_snapshot_recheck)"; _saved_grant_recheck_fn="$(declare -f grant_sources_recheck)"; _saved_grant_validate_fn="$(declare -f grant_sources_validate_snapshot)"; _saved_preflight_fn="$(declare -f policy_preflight)"
+recheck_calls=0
+policy_snapshot_recheck() { recheck_calls=$((recheck_calls + 1)); [ "$recheck_calls" -gt 1 ]; }
+grant_sources_recheck() { return 0; }
+grant_sources_validate_snapshot() { return 0; }
+policy_preflight() {
+  # A start retry must preserve the recorded grant, while rebuild semantics revoke omitted grants.
+  if [ "$1" = start ]; then
+    policy_grant_gh=1; policy_grant_gh_source=recorded
+  else
+    policy_grant_gh=0; policy_grant_gh_source=rebuild-default
+  fi
+  return 0
+}
+policy_grant_gh=0; policy_grant_all_of_dot_ssh=0
+policy_snapshot_retry_count=0
+policy_resolution_recheck start >/dev/null 2>&1; _retry_rc=$?
+assert_eq "policy retry succeeds after one change" 0 "$_retry_rc"
+assert_eq "start retry preserves recorded grant" 1 "$policy_grant_gh"
+recheck_calls=0; policy_snapshot_retry_count=0
+policy_snapshot_recheck() { recheck_calls=$((recheck_calls + 1)); return 1; }
+policy_resolution_recheck start >/dev/null 2>&1; _retry_rc=$?
+assert_eq "second policy change fails" 1 "$_retry_rc"
+unset -f policy_snapshot_recheck grant_sources_recheck grant_sources_validate_snapshot policy_preflight
+eval "$_saved_snapshot_recheck_fn"; eval "$_saved_grant_recheck_fn"; eval "$_saved_grant_validate_fn"; eval "$_saved_preflight_fn"
+
+# The final build guard must sit immediately before Docker's mutating build call. This mocked
+# boundary test makes a policy change refusal observable: image inspection may happen, but no
+# `docker build` is allowed after the guard rejects the operation.
+_saved_final_guard_fn="$(declare -f policy_final_mutation_guard)"
+_saved_docker_fn="$(declare -f docker 2>/dev/null || true)"
+_saved_cfg_dockerfile="$cfg_dockerfile"
+policy_operation_requested=1
+cfg_dockerfile=""
+mock_docker_builds=0
+build_guard_mode=""
+policy_final_mutation_guard() { build_guard_mode="$1"; return 1; }
+docker() {
+  if [ "$1" = build ]; then mock_docker_builds=$((mock_docker_builds + 1)); fi
+  [ "$1" != image ]
+}
+build_image force "" start >/dev/null 2>&1; _build_guard_rc=$?
+assert_eq "build mutation guard stops docker build" 1 "$_build_guard_rc"
+assert_eq "no docker build after guard refusal" 0 "$mock_docker_builds"
+assert_eq "start mode reaches image build guard" start "$build_guard_mode"
+cfg_dockerfile="$_saved_cfg_dockerfile"
+unset -f policy_final_mutation_guard docker
+eval "$_saved_final_guard_fn"
+[ -n "$_saved_docker_fn" ] && eval "$_saved_docker_fn"
+policy_operation_requested=0
+
+# Exercise the real start call path as well as the helper: cmd_start must pass `start` through to
+# build_image, otherwise a retry from the build boundary would still use rebuild grant semantics.
+_saved_start_require_fn="$(declare -f require_sysbox 2>/dev/null || true)"
+_saved_start_prepare_fn="$(declare -f prepare_host_state 2>/dev/null || true)"
+_saved_start_policy_mounts_fn="$(declare -f add_policy_mounts 2>/dev/null || true)"
+_saved_start_jj_fn="$(declare -f require_jj_state_mount 2>/dev/null || true)"
+_saved_start_warn_fn="$(declare -f warn_legacy_files 2>/dev/null || true)"
+_saved_start_running_fn="$(declare -f is_running 2>/dev/null || true)"
+_saved_start_exists_fn="$(declare -f exists 2>/dev/null || true)"
+_saved_start_build_fn="$(declare -f build_image 2>/dev/null || true)"
+_saved_start_user_mounts_fn="$(declare -f build_user_mounts 2>/dev/null || true)"
+_saved_start_wait_fn="$(declare -f wait_jj_state 2>/dev/null || true)"
+_saved_start_connect_fn="$(declare -f connect_networks 2>/dev/null || true)"
+_saved_start_docker_fn="$(declare -f docker 2>/dev/null || true)"
+_saved_start_operation_requested="$policy_operation_requested"
+_start_mode_file="$(mktemp)"
+require_sysbox() { :; }
+prepare_host_state() { :; }
+add_policy_mounts() { :; }
+require_jj_state_mount() { :; }
+warn_legacy_files() { :; }
+is_running() { return 1; }
+exists() { return 1; }
+build_image() { printf '%s' start >"$_start_mode_file"; printf '%s' agentbox:test-image; }
+build_user_mounts() { :; }
+wait_jj_state() { :; }
+connect_networks() { :; }
+docker() { :; }
+policy_operation_requested=0; policy_needs_recreate=0
+cmd_start >/dev/null 2>&1
+assert_eq "cmd_start propagates start build mode" start "$(cat "$_start_mode_file")"
+unset -f require_sysbox prepare_host_state add_policy_mounts require_jj_state_mount warn_legacy_files
+unset -f is_running exists build_image build_user_mounts wait_jj_state connect_networks docker
+eval "$_saved_start_require_fn"; eval "$_saved_start_prepare_fn"; eval "$_saved_start_policy_mounts_fn"
+eval "$_saved_start_jj_fn"; eval "$_saved_start_warn_fn"; eval "$_saved_start_running_fn"
+eval "$_saved_start_exists_fn"; eval "$_saved_start_build_fn"; eval "$_saved_start_user_mounts_fn"
+eval "$_saved_start_wait_fn"; eval "$_saved_start_connect_fn"
+[ -n "$_saved_start_docker_fn" ] && eval "$_saved_start_docker_fn"
+policy_operation_requested="$_saved_start_operation_requested"
+rm -f "$_start_mode_file"
+
+# A mounts file replacement between preflight and final construction must stop before any custom
+# mount is appended. In particular, a newly injected /usr/bin/git destination must not shadow the
+# policy mount (or its absence) at the eventual docker run boundary.
+_mount_race_file="$(mktemp)"; _mount_race_src="$(mktemp)"
+_saved_mount_race_cfg="$cfg_mounts"; _saved_mount_race_mounts=("${mounts[@]}")
+cfg_mounts="$_mount_race_file"; mounts=()
+printf '%s\n' "$_mount_race_src /home/agentbox/safe" >"$_mount_race_file"
+custom_mounts_snapshot_take >/dev/null 2>&1
+printf '%s\n' "$_mount_race_src /usr/bin/git" >"$_mount_race_file"
+build_user_mounts >/dev/null 2>&1; _mount_race_rc=$?
+assert_eq "changed mounts file rejected before construction" 1 "$_mount_race_rc"
+assert_eq "changed protected mount is not appended" "" "$(ab_mount_dest_owner /usr/bin/git)"
+cfg_mounts="$_saved_mount_race_cfg"; mounts=("${_saved_mount_race_mounts[@]}")
+custom_mounts_snapshot_reset
+rm -f "$_mount_race_file" "$_mount_race_src"
+
+# The final mount guard must reject a source change after mount construction instead of accepting
+# a new snapshot that would leave the already-built mount array out of sync with policy.
+_saved_final_mount_snapshot_fn="$(declare -f policy_snapshot_recheck)"
+_saved_final_mount_validate_fn="$(declare -f grant_sources_validate_snapshot)"
+_saved_final_mount_grant_fn="$(declare -f grant_sources_recheck)"
+_saved_final_mount_operation_requested="$policy_operation_requested"
+policy_snapshot_recheck() { return 0; }
+grant_sources_validate_snapshot() { return 0; }
+grant_sources_recheck() { return 0; }
+policy_operation_requested=1
+_mount_final_file="$(mktemp)"; _mount_final_src="$(mktemp)"
+_saved_mount_final_cfg="$cfg_mounts"
+cfg_mounts="$_mount_final_file"
+printf '%s\n' "$_mount_final_src /home/agentbox/safe" >"$_mount_final_file"
+custom_mounts_snapshot_take >/dev/null 2>&1
+printf '%s\n' "$_mount_final_src /home/agentbox/also-safe" >"$_mount_final_file"
+assert_eq "final mount guard rejects changed source" 1 "$(policy_final_mount_guard >/dev/null 2>&1; echo $?)"
+cfg_mounts="$_saved_mount_final_cfg"
+custom_mounts_snapshot_reset
+rm -f "$_mount_final_file" "$_mount_final_src"
+policy_operation_requested="$_saved_final_mount_operation_requested"
+unset -f policy_snapshot_recheck grant_sources_validate_snapshot grant_sources_recheck
+eval "$_saved_final_mount_snapshot_fn"; eval "$_saved_final_mount_validate_fn"; eval "$_saved_final_mount_grant_fn"
+rm -rf "$_identity_root"
+
+echo
 echo "ab_config_candidates (bin/ab)"
 # Four tiers, most specific first, with `machines/` and `projects/` reserved at the root so a
 # machine named e.g. `home` can never be read as the first segment of /home/alice/myproj. Pure —
