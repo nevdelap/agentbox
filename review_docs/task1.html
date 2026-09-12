@@ -48,7 +48,7 @@
     <header>
       <div class="eyebrow">RUFUS IMPLEMENTATION REVIEW</div>
       <h1>Task 1 review</h1>
-      <p class="meta">jj Task 1 working-copy change · parent <code>40b4e6c5</code> · reviewed 2026-09-12</p>
+      <p class="meta">jj Task 1 working-copy change with CI follow-ups · parent <code>40b4e6c5</code> · re-reviewed 2026-09-12</p>
     </header>
 
     <section class="hero">
@@ -59,6 +59,16 @@
 
     <h2>Reviewed change</h2>
     <p>The substantive Task 1 file is <a href="../design_docs/git_disablement_and_config_enhancements_implementation_baseline.html"><code>design_docs/git_disablement_and_config_enhancements_implementation_baseline.html</code></a>. The reviewer-generated <code>review_docs/task1.html</code> is not treated as Igor’s implementation change.</p>
+
+    <h2>CI follow-up re-review</h2>
+    <table>
+      <thead><tr><th>jj change</th><th>Scope</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>5e64e0c3</code></td><td>Adds file-level ShellCheck suppressions for intentional forward-declared test mocks in <code>tests/run.sh</code>.</td><td>Accepted. No Task 1 artifact or production behavior changed.</td></tr>
+        <tr><td><code>7f026cf6</code></td><td>Adds the intentional <code>SC2015</code> suppression in <code>bin/ab</code> and extends the test-mock suppression list.</td><td>Accepted for this CI follow-up. No Task 1 artifact or Task 1 scope changed.</td></tr>
+      </tbody>
+    </table>
+    <p>These CI changes are downstream of the Task 2 work in the jj history, so they are not attributed to Task 1. They do not invalidate the Task 1 inventory or its parent-change separation.</p>
 
     <h2>Acceptance review</h2>
     <table>
@@ -79,7 +89,9 @@
       <thead><tr><th>Check</th><th>Result</th></tr></thead>
       <tbody>
         <tr><td><code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code></td><td>Pass, exit status 0.</td></tr>
-        <tr><td><code>bash tests/run.sh</code></td><td>Baseline result accurately recorded as 176 passed and 4 failed. Task 1 did not alter that result.</td></tr>
+        <tr><td><code>bash tests/run.sh</code></td><td>With the fixture-safe <code>umask 077</code>, all 180 tests pass. Under the review environment’s default <code>umask 000</code>, the known 4 policy-fixture failures remain; the CI follow-ups do not change this behavior.</td></tr>
+        <tr><td>CI follow-up syntax check</td><td>Pass: <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>.</td></tr>
+        <tr><td>ShellCheck</td><td>Not available in the local environment; the reviewed follow-ups only add the suppressions required by the GitHub CI run.</td></tr>
         <tr><td>jj scope check</td><td>Pass: the Task 1 implementation artifact is the only implementation file under review; the parent’s production changes are explicitly separated.</td></tr>
       </tbody>
     </table>
