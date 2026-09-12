@@ -20,28 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install just and shellcheck
+        run: sudo apt-get update && sudo apt-get install -y just shellcheck
 
-      - name: bash syntax check (bash -n)
-        run: |
-          set -e
-          for f in bin/ab agentbox-entrypoint.sh install-sysbox-ubuntu.sh \
-                   tests/run.sh tests/smoke.sh examples/agentbox-config/setup.sh; do
-            echo "bash -n $f"
-            bash -n "$f"
-          done
-
-      - name: shellcheck
-        run: |
-          set -e
-          # .bashrc is intentionally a snippet (no shebang); skip it to avoid SC2148.
-          shellcheck -x \
-            bin/ab agentbox-entrypoint.sh install-sysbox-ubuntu.sh \
-            tests/run.sh tests/smoke.sh examples/agentbox-config/setup.sh
-
-      - name: unit tests
-        run: bash tests/run.sh
+      - name: shell checks
+        run: just shell-check
 
   nix:
     name: NixOS module parses
@@ -51,8 +34,5 @@ jobs:
       - uses: cachix/install-nix-action@v27
         with:
           nix_path: nixpkgs=channel:nixpkgs-unstable
-      # Syntax-only parse (no evaluation): catches authoring errors in sysbox.nix without
-      # needing a full NixOS eval context. The module is applied on a real host via
-      # `nixos-rebuild`, which is the full check.
-      - name: parse sysbox.nix
-        run: nix-instantiate --parse sysbox.nix >/dev/null
+      - name: parse Nix module
+        run: nix run nixpkgs#just -- nix-parse
