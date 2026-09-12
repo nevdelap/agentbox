@@ -1865,6 +1865,28 @@ operation_record_terminal complete pass ""
 if [ -f "$_task7_record" ]; then _task7_file_rc=0; else _task7_file_rc=1; fi
 assert_eq "complete record is cleaned up" 1 "$_task7_file_rc"
 
+# Existing operation records are trusted only when their grammar, required fields, and outcome
+# contract are valid. A malformed or semantically corrupt record is an explicit blocking state;
+# it must identify the record and point at the repair/retry path instead of being treated as absent.
+printf 'status = "in-progress"\nnot-a-record =\n' >"$_task7_record"
+operation_record_load
+assert_eq "malformed record is invalid" invalid-record "$policy_operation_status"
+assert_eq "malformed record names path" 1 "$(printf '%s' "$operation_diagnostic" | grep -c "$_task7_record")"
+assert_eq "malformed record gives retry" 1 "$(printf '%s' "$operation_diagnostic" | grep -c 'ab start --apply')"
+policy_recorded_classification=valid; policy_recorded_lifecycle_state=stopped
+policy_decide start
+assert_eq "invalid record refuses start" refuse "$policy_decision_kind"
+assert_eq "invalid record blocks mutation" 0 "$policy_decision_mutation_allowed"
+assert_eq "invalid record blocks execution" 0 "$policy_decision_execution_allowed"
+assert_eq "invalid record blocks updates" 0 "$policy_decision_update_allowed"
+assert_eq "invalid record requires explicit apply" 1 "$policy_decision_explicit_apply_required"
+operation_record_begin
+sed -i 's/readiness_result = "not-applicable"/readiness_result = "corrupt"/' "$_task7_record"
+operation_record_load
+assert_eq "invalid readiness is invalid record" invalid-record "$policy_operation_status"
+assert_eq "invalid readiness names path" 1 "$(printf '%s' "$operation_diagnostic" | grep -c "$_task7_record")"
+rm -f "$_task7_record"
+
 operation_old_container_id=old-id; operation_new_container_id=new-id
 assert_eq "result includes old container id" 1 "$(operation_result_record | grep -c '^old_container_id=old-id$')"
 assert_eq "result includes new container id" 1 "$(operation_result_record | grep -c '^new_container_id=new-id$')"
@@ -2026,6 +2048,100 @@ cfg_networks="$_saved_task7_cfg_networks"
 unset -f docker
 eval "$_saved_task7_network_docker_fn"
 rm -f "$_task7_networks"
+
+# A stopped container whose recorded policy matches is started in place. The production command
+# path must still build the expected policy mount specification before verification; exercise all
+# persisted GitHub/SSH grant combinations with real Git-config and grant-source files.
+_saved_task7_inplace_home="$HOME"
+_saved_task7_inplace_git_enabled="$policy_git_enabled"
+_saved_task7_inplace_grant_gh="$policy_grant_gh"
+_saved_task7_inplace_grant_ssh="$policy_grant_all_of_dot_ssh"
+_saved_task7_inplace_digest="${policy_resolved_effective[digest]:-}"
+_saved_task7_inplace_require_fn="$(declare -f require_sysbox)"
+_saved_task7_inplace_jj_mount_fn="$(declare -f require_jj_state_mount)"
+_saved_task7_inplace_warn_fn="$(declare -f warn_legacy_files)"
+_saved_task7_inplace_running_fn="$(declare -f is_running)"
+_saved_task7_inplace_exists_fn="$(declare -f exists)"
+_saved_task7_inplace_build_fn="$(declare -f build_image)"
+_saved_task7_inplace_wait_jj_fn="$(declare -f wait_jj_state)"
+_saved_task7_inplace_ready_fn="$(declare -f readiness_adapter)"
+_saved_task7_inplace_verify_fn="$(declare -f policy_verify_applied_state)"
+_saved_task7_inplace_connect_fn="$(declare -f connect_networks)"
+_saved_task7_inplace_final_fn="$(declare -f policy_final_mutation_guard)"
+_saved_task7_inplace_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task7_inplace_grant_validate_fn="$(declare -f grant_sources_validate_snapshot)"
+_saved_task7_inplace_grant_recheck_fn="$(declare -f grant_sources_recheck)"
+_saved_task7_inplace_docker_fn="$(declare -f docker)"
+_task7_inplace_home="$(mktemp -d)"
+mkdir -p "$_task7_inplace_home/.config/gh" "$_task7_inplace_home/.ssh"
+printf '[user]\n\tname = Task Seven\n' >"$_task7_inplace_home/.gitconfig"
+printf 'github.example ssh-ed25519 AAAA\n' >"$_task7_inplace_home/.ssh/known_hosts"
+chmod 700 "$_task7_inplace_home/.config/gh" "$_task7_inplace_home/.ssh"
+chmod 600 "$_task7_inplace_home/.gitconfig" "$_task7_inplace_home/.ssh/known_hosts"
+HOME="$_task7_inplace_home"
+require_sysbox() { :; }; require_jj_state_mount() { :; }; warn_legacy_files() { :; }
+is_running() { return 1; }; exists() { return 0; }; build_image() { return 1; }
+wait_jj_state() { :; }; readiness_adapter() { operation_readiness_result=ready; return 0; }
+policy_verify_applied_state() {
+  [ "${mount_spec_state[git_config]}" = ro ] || return 1
+  if [ "$_task7_expected_gh" = 1 ]; then
+    [ "${mount_spec_state[github_config]}" = rw ] || return 1
+  else
+    [ "${mount_spec_state[github_config]}" = absent ] || return 1
+  fi
+  if [ "$_task7_expected_ssh" = 1 ]; then
+    [ "${mount_spec_state[ssh_dir]}" = ro ] || return 1
+    [ "${mount_spec_state[known_hosts]}" = rw ] || return 1
+  else
+    [ "${mount_spec_state[ssh_dir]}" = absent ] || return 1
+    [ "${mount_spec_state[known_hosts]}" = absent ] || return 1
+  fi
+}
+connect_networks() { operation_connect_network_status=ok; return 0; }
+policy_final_mutation_guard() { :; }; policy_resolution_recheck() { :; }
+grant_sources_validate_snapshot() { :; }; grant_sources_recheck() { :; }
+docker() {
+  case "$1" in
+    inspect)
+      case "$3" in
+        *Config.Image*) printf 'agentbox:stopped-image\n' ;;
+        *Id*) printf 'stopped-container-id\n' ;;
+      esac
+      ;;
+    start) : ;;
+  esac
+  return 0
+}
+policy_git_enabled=1
+policy_resolved_effective[digest]=sha256:task7-in-place
+policy_operation_mode=start; policy_operation_retry=0; policy_operation_requested=1
+policy_decision_kind=start-in-place; policy_decision_execution_allowed=1; policy_decision_mutation_allowed=1
+policy_needs_recreate=0; operation_record_active=0; operation_record_path=""
+for _task7_expected_gh in 0 1; do
+  for _task7_expected_ssh in 0 1; do
+    policy_grant_gh="$_task7_expected_gh"
+    policy_grant_all_of_dot_ssh="$_task7_expected_ssh"
+    mount_spec_reset
+    cmd_start >/dev/null 2>&1; _task7_inplace_rc=$?
+    assert_eq "stopped matching start $_task7_expected_gh/$_task7_expected_ssh returns" 0 "$_task7_inplace_rc"
+    if [ -f "$operation_record_path" ]; then _task7_file_rc=0; else _task7_file_rc=1; fi
+    assert_eq "stopped matching start $_task7_expected_gh/$_task7_expected_ssh cleans record" 1 "$_task7_file_rc"
+  done
+done
+unset -f require_sysbox require_jj_state_mount warn_legacy_files is_running exists build_image
+unset -f wait_jj_state readiness_adapter policy_verify_applied_state connect_networks
+unset -f policy_final_mutation_guard policy_resolution_recheck grant_sources_validate_snapshot grant_sources_recheck docker
+eval "$_saved_task7_inplace_require_fn"; eval "$_saved_task7_inplace_jj_mount_fn"; eval "$_saved_task7_inplace_warn_fn"
+eval "$_saved_task7_inplace_running_fn"; eval "$_saved_task7_inplace_exists_fn"; eval "$_saved_task7_inplace_build_fn"
+eval "$_saved_task7_inplace_wait_jj_fn"; eval "$_saved_task7_inplace_ready_fn"; eval "$_saved_task7_inplace_verify_fn"
+eval "$_saved_task7_inplace_connect_fn"; eval "$_saved_task7_inplace_final_fn"; eval "$_saved_task7_inplace_recheck_fn"
+eval "$_saved_task7_inplace_grant_validate_fn"; eval "$_saved_task7_inplace_grant_recheck_fn"; eval "$_saved_task7_inplace_docker_fn"
+HOME="$_saved_task7_inplace_home"
+policy_git_enabled="$_saved_task7_inplace_git_enabled"
+policy_grant_gh="$_saved_task7_inplace_grant_gh"
+policy_grant_all_of_dot_ssh="$_saved_task7_inplace_grant_ssh"
+policy_resolved_effective[digest]="$_saved_task7_inplace_digest"
+rm -rf "$_task7_inplace_home"
 
 # A replacement writes its in-progress record before docker run and removes it only after every
 # verification/readiness phase succeeds. This uses the real cmd_start sequencing with only Docker
