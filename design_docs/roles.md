@@ -1,5 +1,8 @@
 # Repository roles
 
+Both Igor and Rufus follow the repository’s [coding standards](coding_standards.md),
+including the 60-column commit-comment limits.
+
 ## Ownership boundary
 
 The ownership rules below are strict within the task workflow:
@@ -180,3 +183,14 @@ state through Git. To make the push and PR handoff reliable:
   `gh pr view PR_NUMBER` as needed. Do not report the task complete until every GitHub CI job has
   completed successfully. If no required checks are initially reported, inspect the workflow runs
   directly and continue waiting rather than treating that response as a pass.
+- Jujutsu pushes invoke an external Git transport and may fail before authentication when the
+  host's system SSH configuration includes an unreadable or badly owned generated file. If that
+  happens, retry the same scoped push with the user's SSH configuration explicitly selected:
+  `GIT_SSH_COMMAND="ssh -F $HOME/.ssh/config" jj git push --remote origin --bookmark BOOKMARK`.
+  Do not use `-F /dev/null` when the user's config selects the GitHub identity; that avoids the
+  system include but also skips the configured key and can produce a misleading `publickey`
+  failure. Never print or inspect private-key contents; checking SSH config paths, file modes,
+  and non-secret agent identity listings is sufficient.
+- After a successful push, verify the explicit bookmark/repository head through `gh pr list` or
+  `gh pr view`, create the PR with `--repo OWNER/REPO --head OWNER:BOOKMARK --base main`, and
+  wait for every reported GitHub check. A local `just ci` pass does not replace the remote checks.

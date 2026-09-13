@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Scope Review — Implementation Plan Tasks 1–14</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --good: light-dark(#26734d, #72d09c); --good-soft: light-dark(#e9f7ef, #1d3026); --warn: light-dark(#9a6500, #f2c66d); --warn-soft: light-dark(#fff6df, #302919); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1160px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, .callout, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--good); }
+    .hero strong { color: var(--good); font-size: 1.08rem; }
+    .callout { padding: 15px 18px; }
+    .callout.warn { background: var(--warn-soft); border-color: var(--warn); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS SCOPE REVIEW</div>
+      <h1>Tasks 1–14 scope audit</h1>
+      <p class="meta">reviewed exact jj plan revision <code>0535da6b</code> · change <code>ksopswml</code> · parent <code>d4b8fe92</code> (<code>main@origin</code>) · reviewed 2026-09-13</p>
+    </header>
+
+    <section class="hero">
+      <strong>Disposition: within scope; no Task 7–8 simplification task required.</strong>
+      <p>The plan as a whole remains about one local development-container tool: policy inputs, safe mounts, container reconciliation, failure visibility, lightweight coordination, nested-runtime readiness, verification, and documentation. Tasks 1–7 are not over-engineered relative to that problem. Their detail is mostly safety and compatibility detail that prevents destructive or misleading container behavior.</p>
+      <p><strong>Quality grade: B+</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Scope statement</h2>
+    <section class="callout">
+      <p>The implementation is limited to the existing launcher, its local host state, one project/machine identity, the existing container and named-volume lifecycle, the current command surface, and the nested Docker runtime it already starts. The goal is dependable development use and fail-closed policy handling.</p>
+      <p>This is not a public API, distributed coordination system, workflow engine, generalized orchestration layer, or exhaustive event/history platform. Reports are local command output; update checks are courtesy behavior; retry state exists only to make the existing lifecycle safe and diagnosable. Verification may be broad, but it must prove this tool’s supported paths rather than create new product capabilities.</p>
+    </section>
+
+    <h2>Task-by-task assessment</h2>
+    <table>
+      <thead><tr><th>Tasks</th><th>Scope assessment</th><th>Over-engineering assessment</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Baseline inventory and test-seam documentation for this repository.</td><td>Process-heavy but harmless; it changes no product behavior and prevents later ownership confusion.</td></tr>
+        <tr><td>2</td><td>Directly implements the six existing host policy controls.</td><td>Appropriately small. Boolean spelling and unset/false distinction are necessary input behavior.</td></tr>
+        <tr><td>3</td><td>Protects project identity, mount destinations, policy sources, grant sources, and concurrent operations.</td><td>Detailed, but justified by host-path safety and avoiding races while agents use the same project. It is not a general identity service.</td></tr>
+        <tr><td>4</td><td>Builds the no-Git blocker and credential mounts while keeping protected workspace/jj paths safe.</td><td>Direct feature work. Keeping runtime verification in Task 13 avoids unnecessary integration machinery here.</td></tr>
+        <tr><td>5</td><td>Resolves the existing four-tier configuration, labels, digest, and legacy container state.</td><td>Compatibility detail is inherent to persistent containers. The task does not add new policy capabilities.</td></tr>
+        <tr><td>6</td><td>Provides the shared decision matrix for whether current commands may proceed, reconcile, or refuse.</td><td>Core safety logic, not over-engineering. Centralizing it prevents command-specific policy bypasses.</td></tr>
+        <tr><td>7</td><td>Applies policy, preserves named state, records non-transactional replacement failure, and exposes the readiness seam.</td><td>The densest task, but still one coherent lifecycle responsibility. The durable record and readiness seam are justified because Docker replacement can leave the old container gone and the new one unusable.</td></tr>
+        <tr><td>8</td><td>Turns Task 7’s record into shared read-only state and explicit recovery/cleanup gating.</td><td>Within scope. It should consume the Task 7 record rather than invent a second lifecycle or persistence system.</td></tr>
+        <tr><td>9</td><td>Gives local commands consistent outcomes and useful status/config/log diagnostics.</td><td>Within scope when treated as internal CLI reporting, not a public protocol or long-term compatibility promise.</td></tr>
+        <tr><td>10</td><td>Reuses the project lock and coordinates the existing host-side update cache and bounded retries.</td><td>Still local and lightweight. It becomes overbuilt only if it grows beyond one cache, one host-wide coordination point, and bounded best-effort behavior.</td></tr>
+        <tr><td>11</td><td>Makes the nested daemon’s current readiness and one-replacement recovery safe and observable.</td><td>Justified by the tool’s existing nested Docker design. The process checks must remain limited to identifying the expected daemon, not general process supervision.</td></tr>
+        <tr><td>12</td><td>Consolidates focused regression coverage after local tests exist.</td><td>Normal verification work. It should consolidate and extend tests, not duplicate every task’s fixtures.</td></tr>
+        <tr><td>13</td><td>Validates supported behavior against the real Docker/Sysbox runtime.</td><td>Necessary for mount, volume, nested-runtime, and policy claims. The matrix should be risk-based and bounded, not every theoretical Cartesian combination.</td></tr>
+        <tr><td>14</td><td>Updates help, README/design status, implementation notes, and release checks.</td><td>Routine completion work; no scope concern.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Scope findings</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Finding</th><th>Required treatment</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>SCOPE-1</td><td>Medium</td>
+          <td>Task 9 is titled “Command and report protocol” and mentions machine-readable results. In this project’s limited scope, that wording could be read as a public compatibility commitment.</td>
+          <td>Keep the implementation contract explicitly internal to the <code>ab</code> CLI. Do not add version negotiation, external consumers, or a compatibility guarantee unless a current command needs it.</td>
+        </tr>
+        <tr>
+          <td>SCOPE-2</td><td>Medium</td>
+          <td>Task 13 asks for a full lifecycle matrix covering many policy, state, report, retry, and nested-runtime dimensions. An unbounded Cartesian matrix would be disproportionate to this tool.</td>
+          <td>Use representative risk-based cases: every safety branch, each failure boundary, each volume/mount invariant, and the important nested-daemon races. Do not require every combination when equivalent cases share the same decision and lifecycle seam.</td>
+        </tr>
+        <tr>
+          <td>SCOPE-3</td><td>Low</td>
+          <td>Task 1’s exact inventory artifact and Task 12’s final regression consolidation add process overhead, but neither expands the product.</td>
+          <td>Leave them in place as documentation and verification tasks; keep their deliverables short and avoid creating a second framework or test harness.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Do we need a task between 7 and 8?</h2>
+    <section class="callout">
+      <p><strong>No.</strong> Task 7 already owns the minimum durable operation record and readiness adapter needed to make policy application safe. Task 8 has a clear job: consume that record, expose it consistently, and gate recovery and cleanup. A separate simplification/refactoring task would add another dependency and risk turning a sensible boundary into a new abstraction project.</p>
+      <p>The practical control is a handoff rule: Task 7 must deliver one small record and one readiness seam; Task 8 must reuse them; neither task may introduce a second lifecycle model, lock, event store, or container supervisor. If implementation reveals duplication, simplify within the owning task and report the exact change.</p>
+    </section>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Repository type</td><td>jj repository confirmed.</td></tr>
+        <tr><td>Production scope</td><td>Tasks 1–14 remain tied to policy-safe operation of the existing local agentbox tool.</td></tr>
+        <tr><td>Existing implementation work</td><td>Tasks 1–7 are detailed but feature-proximate; no over-engineered platform layer is required or implied.</td></tr>
+        <tr><td><code>just ci</code></td><td>Pass: Shell checks, all 666 tests, and Nix syntax validation passed.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Conclusion</h2>
+    <section class="callout">
+      <strong>Proceed without inserting a Task 7.5.</strong> Keep the scope limits above visible during implementation. The only changes needed are small wording and verification guardrails: internal CLI reporting, bounded update coordination, and risk-based runtime coverage. Reassess only if an implementation proposes a new abstraction or behavior outside the existing launcher/container lifecycle.</section>
+
+    <footer>Rufus scope review for implementation-plan Tasks 1–14. This document audits product scope and implementation weight; it does not accept any unimplemented task.</footer>
+  </main>
+</body>
+</html>
