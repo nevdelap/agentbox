@@ -1587,24 +1587,95 @@ EOF
 # once an hour via a cache file's mtime, so `ab` doesn't hit the network on every
 # invocation — a stale cache is read straight from disk, no curl involved. Silent on any
 # failure (no curl, offline, GitHub unreachable/rate-limited, no releases yet): this is a
-# courtesy, never a reason to slow down or break `ab`.
+# courtesy, never a reason to slow down or break `ab`. The cache is shared by every project,
+# so its refresh decision and replacement are protected by one host-wide, non-blocking lock.
 AB_UPDATE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/agentbox/update-check"
+update_lock_fd=""
+
+update_release_tag_valid() {
+  [[ "$1" =~ ^v?[0-9]+(\.[0-9]+){0,2}([.-][0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
+}
+
+update_cache_prepare_dir() {
+  local dir
+  dir="$(dirname -- "$AB_UPDATE_CACHE")"
+  if { [ -e "$dir" ] || [ -L "$dir" ]; } && { [ ! -d "$dir" ] || [ -L "$dir" ]; }; then return 1; fi
+  mkdir -p -- "$dir" 2>/dev/null || return 1
+  chmod 700 -- "$dir" 2>/dev/null || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ]
+}
+
+update_lock_try_acquire() {
+  local lock fd
+  update_lock_fd=""
+  update_cache_prepare_dir || return 1
+  lock="$AB_UPDATE_CACHE.lock"
+  if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -f "$lock" ]; }; then return 1; fi
+  : >>"$lock" 2>/dev/null || return 1
+  chmod 600 -- "$lock" 2>/dev/null || return 1
+  command -v flock >/dev/null 2>&1 || return 1
+  exec {fd}>"$lock" || return 1
+  # Update checks are courtesy work. A concurrent project skips this invocation immediately;
+  # it must never wait behind another project's network request or fail its product command.
+  if ! flock -n "$fd"; then
+    exec {fd}>&-
+    return 1
+  fi
+  update_lock_fd="$fd"
+  return 0
+}
+
+update_lock_release() {
+  [ -n "$update_lock_fd" ] || return 0
+  flock -u "$update_lock_fd" 2>/dev/null || true
+  exec {update_lock_fd}>&-
+  update_lock_fd=""
+}
+
+update_cache_read() {
+  local value
+  [ -f "$AB_UPDATE_CACHE" ] && [ ! -L "$AB_UPDATE_CACHE" ] && [ -r "$AB_UPDATE_CACHE" ] || return 1
+  value="$(cat -- "$AB_UPDATE_CACHE" 2>/dev/null)" || return 1
+  update_release_tag_valid "$value" || return 1
+  printf '%s' "$value"
+}
+
+update_cache_write() {
+  local dir tmp value="$1"
+  update_cache_prepare_dir || return 1
+  dir="$(dirname -- "$AB_UPDATE_CACHE")"
+  tmp="$(mktemp "$dir/.update-check.XXXXXX")" || return 1
+  chmod 600 -- "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+  if ! printf '%s' "$value" >"$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -f -- "$tmp" "$AB_UPDATE_CACHE"
+}
+
 check_for_update() {
   command -v curl >/dev/null 2>&1 || return 0
-  local latest
-  if [ -f "$AB_UPDATE_CACHE" ] && [ -z "$(find "$AB_UPDATE_CACHE" -mmin +60 2>/dev/null)" ]; then
-    # Cache file's mtime is under an hour old — reuse it, no network call this run.
-    latest="$(cat "$AB_UPDATE_CACHE" 2>/dev/null)"
+  local latest=""
+  update_lock_try_acquire || return 0
+  if [ -f "$AB_UPDATE_CACHE" ] && [ ! -L "$AB_UPDATE_CACHE" ] &&
+     [ -z "$(find -- "$AB_UPDATE_CACHE" -mmin +60 -print -quit 2>/dev/null)" ]; then
+    # Cache file's mtime is under an hour old — reuse it, no network call this run. Malformed
+    # cached text is ignored until the next hourly refresh; it is never treated as a failure.
+    latest="$(update_cache_read 2>/dev/null || true)"
   else
     # Missing or stale (over an hour old, or this is the first run) — refetch and restamp.
     # An empty result (curl failed, offline, no releases yet) is cached too, so a persistent
     # failure still only retries once an hour rather than on every invocation.
     latest="$(curl -fsS --max-time 2 "https://api.github.com/repos/$AB_GITHUB_REPO/releases/latest" 2>/dev/null \
       | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\(.*\)",\{0,1\}$/\1/p')"
-    mkdir -p "$(dirname "$AB_UPDATE_CACHE")" && printf '%s' "$latest" >"$AB_UPDATE_CACHE"
+    update_release_tag_valid "$latest" || latest=""
+    update_cache_write "$latest" || true
   fi
+  update_lock_release
   [ -n "$latest" ] || return 0
+  update_release_tag_valid "$latest" || return 0
   local latest_num="${latest#v}"
+  update_release_tag_valid "$AB_VERSION" || return 0
   if [ "$latest_num" != "$AB_VERSION" ] &&
      [ "$(printf '%s\n%s\n' "$AB_VERSION" "$latest_num" | sort -V | tail -1)" = "$latest_num" ]; then
     echo "agentbox: a newer release is available: $latest (you have $AB_VERSION) — https://github.com/$AB_GITHUB_REPO/releases" >&2
@@ -3136,7 +3207,7 @@ policy_operation_begin() {
   policy_snapshot_retry_count=0
   policy_operation_status=none
   policy_readiness_result=not-applicable
-  policy_lock_acquire
+  policy_lock_acquire || return 1
   operation_record_load || return 1
   policy_retry_reconcile=0
   # A fresh explicit reconciliation is the only retry path. Ordinary starts and execs must

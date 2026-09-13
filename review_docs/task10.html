@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Task 10</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --bad: light-dark(#9b3030, #ff9f9f); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1150px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--bad); }
+    .hero strong { color: var(--bad); font-size: 1.08rem; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS IMPLEMENTATION REVIEW</div>
+      <h1>Task 10 — concurrency, updates, and retry identity</h1>
+      <p class="meta">exact jj change <code>klsnvmlmxtokrlnkywktpqoyootpxwxs</code> · parent <code>uzknknmn</code> (<code>main@origin</code>, <code>6abfec3a</code>) · review round 5 · reviewed 2026-09-14</p>
+    </header>
+
+    <section class="hero">
+      <strong>Disposition: accepted.</strong>
+      <p>The implementation is contained, the required update/cache/lock/retry behavior is covered, and the commit description now complies with the repository’s 60-column coding standard. No regression was found in the reviewed Task 10 paths.</p>
+      <p><strong>Quality grade: A-</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Review basis</h2>
+    <p>This review covers Task 10 in <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html">the implementation plan</a>, its normative references, and exact jj change <code>klsnvmlmxtokrlnkywktpqoyootpxwxs</code>. The change is based on parent <code>6abfec3a</code>; the implementation is in <a href="../bin/ab"><code>bin/ab</code></a> and the tests are in <a href="../tests/run.sh"><code>tests/run.sh</code></a>. This repository is a jj repository.</p>
+
+    <h2>Assessment</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Result</th><th>Assessment</th></tr></thead>
+      <tbody>
+        <tr><td>Host-wide update lock</td><td>Pass for reviewed paths</td><td>The shared cache and lock are independent of project identity, use a non-blocking <code>flock</code>, secure the directory/files, and hold the lock across cache read/refresh/write.</td></tr>
+        <tr><td>Atomic cache handling</td><td>Pass for reviewed paths</td><td>Refreshes write a private temporary file in the cache directory and replace the cache with <code>mv</code>; malformed, offline, and unsupported responses remain non-fatal.</td></tr>
+        <tr><td>Project-lock integration</td><td>Pass for reviewed paths</td><td><code>policy_operation_begin</code> acquires the existing project lock before loading the operation record. Public start/config/rebuild/exec contention stops before inspection and Docker, while the public exec path acquires the lock once before its child invocation.</td></tr>
+        <tr><td>Retry identity</td><td>Pass for reviewed paths</td><td>Public <code>start --apply</code> retries are exercised for removal failure, network degradation, and readiness failure. Each begins after inspection, creates a fresh id, preserves image/container/volume identity, records the retry command, and performs one mocked mutation.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Findings</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Finding and impact</th><th>Required correction</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>R10-1</td><td>Resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:3233-3468</code></a></td>
+          <td>The update suite now covers both disable controls, update-failure product invariance, distinct project identities, atomic readers, host-wide contention, a distinct rate-limit case with no notice, and a valid newer-release notice/cache result. All cases pass.</td>
+          <td>No further correction required for this finding.</td>
+        </tr>
+        <tr>
+          <td>R10-2</td><td>Resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:555-603</code></a>, <a href="../tests/run.sh"><code>tests/run.sh:3461-3552</code></a></td>
+          <td>The added fixture holds the real project lock in a concurrent process and sends public <code>start</code>, <code>config</code>, <code>rebuild</code>, and <code>exec</code> dispatches through the busy path. Each returns the project-busy diagnostic before record loading or Docker. The public exec fixture also verifies one lock acquisition and one child invocation.</td>
+          <td>No further correction required for this finding.</td>
+        </tr>
+        <tr>
+          <td>R10-3</td><td>Resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:3205-3224</code></a>, <a href="../tests/run.sh"><code>tests/run.sh:3560-3669</code></a></td>
+          <td>The public retry fixture creates and consumes each of <code>removal-failed</code>, <code>network-degraded</code>, and <code>readiness-failed</code>. It asserts fresh inspection, one mutation, no extra Docker mutation, a fresh operation id, image reuse, preserved container and named-volume identities, and <code>ab start --apply</code> as the retry command.</td>
+          <td>No further correction required for this finding.</td>
+        </tr>
+        <tr>
+          <td>R10-4</td><td>Resolved</td>
+          <td><code>jj log -r @ -T description</code></td>
+          <td>The verification line was shortened and the complete Task 10 description now has no line longer than 60 columns.</td>
+          <td>No further correction required for this finding.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Acceptance-criterion status</h2>
+    <table>
+      <thead><tr><th>Criterion</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>Every policy-sensitive operation uses exactly the Task 3 lock</td><td>Pass for reviewed paths</td><td>The operation-begin path acquires the existing lock before record loading. Public busy contention avoids unlocked inspection and Docker, and the public exec fixture shows one acquisition before child execution.</td></tr>
+        <tr><td>Update checks cannot corrupt or duplicate the host request</td><td>Pass</td><td>Non-blocking locking, permissions, one-refresh behavior, disabled controls, distinct project identities, atomic readers, product invariance, rate-limit handling, and newer-version notice/cache behavior pass.</td></tr>
+        <tr><td>Retries are bounded and identity-preserving</td><td>Pass for reviewed paths</td><td>Public terminal-state retries pass the fresh-inspection, fresh-id, image/identity-preservation, single-mutation, and explicit-retry-command checks.</td></tr>
+        <tr><td>Contention and update failures cannot cause unauthorized mutation</td><td>Pass for reviewed paths</td><td>Lock contention stops before record loading/Docker, and an update failure leaves the public start successful with its mocked mutation intact. The remaining update finding is response/result coverage, not a demonstrated product regression.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Repository and change</td><td>jj repository confirmed; exact working-copy change <code>klsnvmlmxtokrlnkywktpqoyootpxwxs</code> reviewed against parent <code>6abfec3a</code>.</td></tr>
+        <tr><td>Changed files</td><td>Igor changed <code>bin/ab</code> and <code>tests/run.sh</code>. No Rufus implementation change was made.</td></tr>
+        <tr><td>Commit comment</td><td>Pass: every Task 10 subject/body line is at most 60 columns.</td></tr>
+        <tr><td><code>just ci</code></td><td>Pass: Bash syntax checks, ShellCheck, all 1,483 tests, and Nix parsing.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Conclusion</h2>
+    <p>Task 10 is accepted. The production changes are contained, all Task 10 acceptance criteria pass, the required CI checks pass, and no regression was found in the reviewed cache, lock, or retry paths.</p>
+
+    <h2>Review history</h2>
+    <table>
+      <thead><tr><th>Round</th><th>Disposition</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Changes requested</td><td>Cache/lock mechanics pass their focused checks, but disabled-update behavior, public concurrency, and terminal-state retry coverage remain incomplete. Grade: B.</td></tr>
+        <tr><td>2</td><td>Changes requested</td><td>New public evidence resolves R10-2 and R10-3. Explicit rate-limit and newer-version update cases remain open under R10-1; R10-4 records the commit-message wrapping failure. Grade: B.</td></tr>
+        <tr><td>3</td><td>Changes requested</td><td>Rate-limit and newer-release coverage resolves R10-1. R10-4 remains open because four body lines still exceed 60 columns. Grade: B+.</td></tr>
+        <tr><td>4</td><td>Changes requested</td><td>The implementation and behavioral tests remain clear, and CI passes. R10-4 remains open because one verification line is still 62 columns. Grade: B+.</td></tr>
+        <tr><td>5</td><td>Accepted</td><td>The verification line was wrapped, all commit-message lines are within 60 columns, and the full behavioral suite plus <code>just ci</code> pass. Grade: A-.</td></tr>
+      </tbody>
+    </table>
+
+    <footer>Rufus review of Task 10. Igor owns implementation corrections; this document records the independent review.</footer>
+  </main>
+</body>
+</html>
