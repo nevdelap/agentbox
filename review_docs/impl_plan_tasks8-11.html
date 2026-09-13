@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Implementation Plan Tasks 8–11</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --warn: light-dark(#9a6500, #f2c66d); --warn-soft: light-dark(#fff6df, #302919); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1160px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, .callout, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--warn); }
+    .hero strong { color: var(--warn); font-size: 1.08rem; }
+    .callout { padding: 15px 18px; }
+    .callout.warn { background: var(--warn-soft); border-color: var(--warn); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS SPECIFICATION REVIEW</div>
+      <h1>Tasks 8–11 review</h1>
+      <p class="meta">reviewed exact jj specification revision <code>087f7b5a</code> · change <code>ksopswml</code> · parent <code>d4b8fe92</code> (<code>main@origin</code>) · guardrail-response close-out · reviewed 2026-09-13</p>
+    </header>
+
+    <section class="hero">
+      <strong>Disposition: approved for implementation with scope guardrails.</strong>
+      <p>The latest update closes the four original guardrails and the follow-up cross-task findings. It explicitly limits deferred work, defines the shared operation state and command permissions, maps the Task 7 handoff into Tasks 8–9, unifies readiness states, and gives degraded operations a non-zero result while keeping successful reports distinct.</p>
+      <p><strong>Quality grade: A-</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Review basis</h2>
+    <p>This review covers the updated <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html#task-8-spec">Tasks 8–11 plan</a> against the repository’s <a href="../design_docs/coding_standards.md">coding standards</a> and the four guardrails recorded below. The question is whether the responses are concrete enough for implementation and review in the context of the existing tool, while preserving the safety behavior delivered in Tasks 1–7.</p>
+    <p>The repository is a jj repository. No production code was changed by Rufus. The reviewed plan is revision <code>29534783</code>, based on <code>main@origin</code>.</p>
+
+    <h2>Scope for this reset</h2>
+    <section class="callout">
+      <p>Tasks 8–11 are scoped to making the existing agentbox tool safe and usable during development: reconcile configuration and policy changes explicitly, expose enough state to explain what happened, provide dependable command outcomes and diagnostics, coordinate lightweight update checks, and handle the nested runtime’s readiness and replacement path where the current tool needs it.</p>
+      <p>The original definitions of Tasks 8–11 fit within that boundary. They are appropriate feature work for this tool, not an over-engineered platform design, provided their implementation remains local to the existing launcher, container lifecycle, locks, volumes, and command surface.</p>
+      <p>This scope is intentionally local to one host, one project, and the existing container/volume lifecycle. It does not define a public API, a distributed coordination system, a general-purpose workflow engine, or an exhaustive event/history model. It does not require new policy capabilities beyond those already described by the plan. Features that do not support the core lifecycle or make failures diagnosable should remain out of scope for this group.</p>
+      <p>The implementation should favor the smallest behavior that satisfies the listed acceptance cases. Stable user-visible outcomes and no-surprise safety behavior matter; internal representation, byte-level wire compatibility, and elaborate provenance matter only where an existing command or test genuinely depends on them.</p>
+    </section>
+
+    <h2>Task coverage</h2>
+    <table>
+      <thead><tr><th>Task</th><th>Review assessment</th><th>Practical implementation boundary</th></tr></thead>
+      <tbody>
+        <tr><td>8</td><td>Provides the shared operation-state, recovery, cleanup, and read-only reporting direction needed to make policy reconciliation observable.</td><td>Implement the smallest state projection that supports the existing commands. Keep recovery explicit and preserve volumes on replacement.</td></tr>
+        <tr><td>9</td><td>Provides stable outcomes for commands, configuration, status, logs, and stop, with human-readable reporting and test expectations.</td><td>Define a small set of result categories and required fields in the implementation. Do not turn this into a public serialization protocol.</td></tr>
+        <tr><td>10</td><td>Connects the existing lock model to update checks, retries, and image identity.</td><td>Updates are best-effort and must not affect normal operation. Reuse the existing per-project lock and keep retry behavior bounded.</td></tr>
+        <tr><td>11</td><td>Describes readiness checking, process identity, replacement, diagnostics, and volume preservation for nested runtime behavior.</td><td>Implement only the probes and replacement path required by the current nested daemon behavior; retain the outer container for diagnosis.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Guardrail response close-out</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Status</th><th>Close-out assessment</th></tr></thead>
+      <tbody>
+        <tr><td>R8-1</td><td>Closed</td><td>The plan now identifies the required first-pass behavior and explicitly defers only public-protocol compatibility, exhaustive history, elaborate retry lineage, and unrelated nested-runtime cases. Tasks 8–11 are stated as required for this group.</td></tr>
+        <tr><td>R8-2</td><td>Closed</td><td>The minimum projection fields and permissions are listed, and the normative handoff table covers current, old, and new container ids plus explicit-exec and cleanup permissions.</td></tr>
+        <tr><td>R8-3</td><td>Closed</td><td>The result vocabulary and exit mapping are explicit. Optional-network failure is consistently a degraded failure with exit <code>1</code>; successful report-only commands use exit <code>0</code>.</td></tr>
+        <tr><td>R8-4</td><td>Closed</td><td>The focused matrix and task-local tests now cover the required safety, recovery, read-only, update-check, readiness, and handoff cases.</td></tr>
+        <tr><td>R9-1</td><td>Closed</td><td>The normative cross-task table defines one readiness enum, including <code>starting</code> and <code>replacement-attempted</code>, and maps the transient and terminal states into the shared projection and reports.</td></tr>
+        <tr><td>R9-2</td><td>Closed</td><td>The plan maps Task 7 <code>operation_result</code> fields to Task 8/9 fields, including status, phase, ids, permissions, retry, network, image, volume, and diagnostic data.</td></tr>
+        <tr><td>R9-3</td><td>Closed</td><td>The degraded-failure mapping is now consistent from Task 7’s <code>degraded-fail</code> through Task 9’s <code>degraded</code> result and exit <code>1</code>.</td></tr>
+        <tr><td>R9-4</td><td>Closed</td><td>The scope boundary now states that update coordination, bounded retry identity, and the current launcher’s nested-runtime path are required, while only the named nonessential extensions are deferred.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Close-out findings</h2>
+    <section class="callout">
+      No implementation-blocking specification finding remains from this review sequence. The plan is intentionally local to the existing tool and gives Luna a concrete, reviewable contract without requiring a public protocol or general orchestration framework.
+    </section>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Command/check</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td><code>just ci</code></td><td>Pass</td><td>Bash syntax checks passed, ShellCheck passed, <code>bash tests/run.sh</code> reported <code>PASS: all 666 tests passed</code>, and <code>nix-instantiate --parse sysbox.nix</code> passed.</td></tr>
+        <tr><td>Coding standards</td><td>Pass</td><td><code>design_docs/coding_standards.md</code> is present and linked from <code>design_docs/roles.md</code>; the reviewed jj subject and body lines meet the stated 60-column limits.</td></tr>
+        <tr><td>Plan readiness</td><td>Pass</td><td>R8-1 through R8-4 and R9-1 through R9-4 are closed in the exact reviewed plan. The remaining review risk belongs to implementation evidence, not missing plan contracts.</td></tr>
+        <tr><td>Live runtime</td><td>Not applicable</td><td>This is a specification review; no implementation for Tasks 8–11 is present in the reviewed change.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Conclusion</h2>
+    <section class="callout warn">
+      <strong>Ready for the new Igor.</strong> The plan is ready for implementation and criterion-by-criterion review within the stated local scope. Keep the implementation handoff focused on the existing launcher/container lifecycle and do not add the deferred platform features.
+    </section>
+
+    <footer>Rufus specification review for implementation-plan Tasks 8–11. This document records the guardrail-response close-out for the updated plan revision.</footer>
+  </main>
+</body>
+</html>
