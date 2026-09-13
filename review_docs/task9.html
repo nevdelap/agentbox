@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Task 9</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --bad: light-dark(#9b3030, #ff9f9f); --bad-soft: light-dark(#fff0f0, #321d20); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1150px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--bad); }
+    .hero strong { color: var(--bad); font-size: 1.08rem; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS IMPLEMENTATION REVIEW</div>
+      <h1>Task 9 — command and report protocol</h1>
+      <p class="meta">exact jj change <code>tvtwvlxoqrxlzwswlruqpvpwqswxrpnx</code> · parent <code>ruolwrux</code> (<code>main@origin</code>, <code>73080bbb</code>) · review round 5 · reviewed 2026-09-14</p>
+    </header>
+
+    <section class="hero">
+      <strong style="color: var(--accent)">Disposition: accepted.</strong>
+      <p>The implementation-level fixes and the expanded public acceptance coverage now satisfy the bounded Task 9 contract. The corrected invalid-config update-suppression test observes the real preflight ordering through a file-backed trace, and the jj change description meets the 60-column standard.</p>
+      <p><strong>Quality grade: A-</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Review basis</h2>
+    <p>This review covers Task 9 in <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html">the implementation plan</a>, its normative references, and exact jj change <code>tvtwvlxoqrxlzwswlruqpvpwqswxrpnx</code>. The change is based on parent <code>73080bbb</code>; the implementation content is in <a href="../bin/ab"><code>bin/ab</code></a> and <a href="../tests/run.sh"><code>tests/run.sh</code></a>. This repository is a jj repository. The reviewer document is Rufus-owned content in the same task change.</p>
+
+    <h2>Assessment</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Result</th><th>Assessment</th></tr></thead>
+      <tbody>
+        <tr><td>Shared vocabulary</td><td>Pass</td><td>The result names, exit mapping, identity, phase, readiness, network, retry, cleanup, and permission fields are now centralized in one report helper.</td></tr>
+        <tr><td>Public dispatch</td><td>Pass</td><td>Guards cover all public command families, config-init failures return through the reporting path, logs report after Docker completion, and exec/convenience commands report the final child result.</td></tr>
+        <tr><td>Schema consistency</td><td>Pass</td><td><code>operation_result_record</code> now delegates directly to the Task 9 report, so lifecycle output no longer emits the former duplicate records.</td></tr>
+        <tr><td>Test evidence</td><td>Pass</td><td>The public command/state/readiness/config/privacy paths and invalid-config update suppression are covered by cross-process-safe traces and pass under CI.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Findings</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Finding and impact</th><th>Required correction</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>R9-1</td><td>High — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:805-833</code></a></td>
+          <td>The stable report now includes the projection’s execution, mutation, update, diagnostic, and explicit-exec permission fields.</td>
+          <td>Resolved in this revision; focused tests cover allowed, blocked, diagnostic-only, and invalid states.</td>
+        </tr>
+        <tr>
+          <td>R9-2</td><td>High — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:1142-1163</code></a></td>
+          <td><code>operation_result_record</code> now delegates directly to <code>command_report_emit</code>, removing the duplicate legacy operation-result and projection streams.</td>
+          <td>Resolved in this revision; public complete-start output asserts exactly one occurrence of every report field.</td>
+        </tr>
+        <tr>
+          <td>R9-3</td><td>High — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:3459-3466</code></a>, <a href="../bin/ab"><code>bin/ab:3844-3862</code></a></td>
+          <td>The start lifecycle guard now covers the idempotent running case and early failures; the main branch emits a fallback report only when <code>cmd_start</code> did not emit one.</td>
+          <td>Resolved in this revision; public tests cover the running no-op, early failure, and complete operation paths.</td>
+        </tr>
+        <tr>
+          <td>R9-4</td><td>Medium — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:780-782</code></a>, <a href="../bin/ab"><code>bin/ab:3878-3881</code></a></td>
+          <td>The absent-container branch now emits <code>report-only</code>/<code>stop-absent</code>, distinct from a successful Docker stop and a failed stop.</td>
+          <td>Resolved in this revision; public absent-stop output is tested.</td>
+        </tr>
+        <tr>
+          <td>R9-5</td><td>Medium — resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:2573-3024</code></a></td>
+          <td>Coverage now reaches public start, stop-absent, config, config-init, status lifecycle, logs success/failure, explicit exec success/failure, successful build/rebuild and convenience commands, load failures, non-complete/invalid refusal states, both nested readiness failures through status/logs/stop, the four policy tiers, bounded output, and secret non-disclosure.</td>
+          <td>Resolved for the bounded Task 9 acceptance matrix. The ineffective invalid-config update assertion is tracked separately as R9-9.</td>
+        </tr>
+        <tr>
+          <td>R9-6</td><td>High — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:3892-3991</code></a>, <a href="../bin/ab"><code>bin/ab:4011-4023</code></a>, <a href="../bin/ab"><code>bin/ab:4128-4140</code></a>, <a href="../bin/ab"><code>bin/ab:3714</code></a></td>
+          <td>Every public command now starts the lifecycle guard. The guard emits a fallback failure report for unhandled exits; config-init option errors return to <code>main</code> and emit an aggregate failure report. Focused tests cover operation-load, host-load, and option failures.</td>
+          <td>Resolved in this revision.</td>
+        </tr>
+        <tr>
+          <td>R9-7</td><td>High — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:3993-3996</code></a>, <a href="../bin/ab"><code>bin/ab:4021-4023</code></a>, <a href="../bin/ab"><code>bin/ab:4138-4140</code></a></td>
+          <td><code>logs</code> captures the bounded Docker output and emits its result only after the pipeline completes. The explicit exec and convenience paths now invoke the child command without replacing the reporting process, emit success or failure after completion, and preserve the child exit code.</td>
+          <td>Resolved in this revision.</td>
+        </tr>
+        <tr>
+          <td>R9-8</td><td>Medium — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:3948-3956</code></a>, <a href="../bin/ab"><code>bin/ab:805-848</code></a></td>
+          <td><code>status</code> determines the outer lifecycle before emitting the report and includes it as the stable <code>outer_lifecycle</code> field. Public tests cover absent, stopped, and running states.</td>
+          <td>Resolved in this revision; readiness-overlay coverage is now included in the expanded Task 9 tests.</td>
+        </tr>
+        <tr>
+          <td>R9-9</td><td>Medium — resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:2992-3024</code></a></td>
+          <td>The earlier counter-based assertion was ineffective across the command-substitution boundary and its mocked preflight bypassed the real ordering. The new test uses a file-backed trace and the real preflight/inspection implementation, proving inspection precedes update eligibility and no update is requested for an invalid record.</td>
+          <td>Resolved in this revision; the corrected public-boundary test passes.</td>
+        </tr>
+        <tr>
+          <td>R9-10</td><td>Low — resolved</td>
+          <td>jj change description</td>
+          <td>The latest commit description now wraps every subject/body line to the repository standard’s 60-column limit.</td>
+          <td>Resolved in this revision.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Acceptance-criterion status</h2>
+    <table>
+      <thead><tr><th>Criterion</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>One deterministic result schema and exit category</td><td>Pass for reviewed paths</td><td>The shared schema covers the reviewed success, refusal, failure, degraded, and report-only outcomes; public tests now cover the bounded command/state matrix.</td></tr>
+        <tr><td>Config/status/logs expose retry and diagnostic state</td><td>Pass</td><td>The required fields, readiness/lifecycle paths, and invalid-record repair/update-suppression behavior are covered.</td></tr>
+        <tr><td>Refusal never implies forbidden work</td><td>Pass</td><td>The inherited refusal dispatch tests and the expanded public refusal checks pass with no Docker, network, or update side effects.</td></tr>
+        <tr><td>No secrets and consistent human/machine state</td><td>Pass for reviewed paths</td><td>No secret regression was found; explicit non-disclosure, duplicate-output, and final-outcome assertions now pass.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Repository and change</td><td>jj repository confirmed; exact working-copy change <code>tvtwvlxoqrxlzwswlruqpvpwqswxrpnx</code> reviewed against parent <code>73080bbb</code>.</td></tr>
+        <tr><td>Changed files</td><td>Igor changed <code>bin/ab</code> and <code>tests/run.sh</code>. Rufus maintained this review document in the same jj change.</td></tr>
+        <tr><td><code>bash -n</code>, ShellCheck</td><td>Pass as run by <code>just ci</code>.</td></tr>
+        <tr><td><code>bash tests/run.sh</code></td><td>Pass: all 1,400 tests passed.</td></tr>
+        <tr><td><code>just ci</code></td><td>Pass: the mandatory CI run completed its shell checks, all 1,400 tests, and Nix parsing successfully.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Conclusion</h2>
+    <p>Task 9 is accepted. R9-1 through R9-10 are resolved. No production defect or regression was found in the reviewed paths, and the mandatory CI suite passes with the expanded public acceptance evidence.</p>
+
+    <h2>Review history</h2>
+    <table>
+      <thead><tr><th>Round</th><th>Disposition</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Changes requested</td><td>R9-1 through R9-5 were outstanding: the report omitted permissions, lifecycle output duplicated schemas, start/stop had missing distinctions, and public coverage was incomplete.</td></tr>
+        <tr><td>2</td><td>Changes requested</td><td>R9-1 through R9-4 are resolved. R9-5 remains partially addressed; R9-6 through R9-8 cover unreported failure exits, pre-operation success reports, and missing stable outer lifecycle state.</td></tr>
+        <tr><td>3</td><td>Changes requested</td><td>R9-6 through R9-8 are resolved: public failure guards, final command outcomes, child exit preservation, and <code>outer_lifecycle</code> are now covered. R9-5 remains open for the plan-required public matrix and privacy assertions. Grade: B+.</td></tr>
+        <tr><td>4</td><td>Changes requested</td><td>R9-5 is resolved by the expanded bounded public matrix. R9-9 remains open because invalid-config update suppression is not actually observed across the command-substitution boundary; R9-10 records the 60-column commit-comment violation. Grade: B+.</td></tr>
+        <tr><td>5</td><td>Accepted</td><td>R9-9 is resolved by a file-backed trace and real preflight/inspection coverage. R9-10 is resolved by wrapping the complete jj description. All findings are closed; CI passes all 1,400 tests. Grade: A-.</td></tr>
+      </tbody>
+    </table>
+
+    <footer>Rufus review of Task 9. Igor owns implementation corrections; this document records the independent review.</footer>
+  </main>
+</body>
+</html>

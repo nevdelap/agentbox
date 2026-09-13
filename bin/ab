@@ -133,6 +133,7 @@ operation_state_operation_id=""
 operation_state_phase=""
 operation_state_terminal_status="none"
 operation_state_container_name=""
+operation_state_outer_lifecycle="unknown"
 operation_state_container_id=""
 operation_state_old_container_id=""
 operation_state_new_container_id=""
@@ -636,6 +637,7 @@ operation_state_reset() {
   operation_state_phase=""
   operation_state_terminal_status=none
   operation_state_container_name=""
+  operation_state_outer_lifecycle=unknown
   operation_state_container_id=""
   operation_state_old_container_id=""
   operation_state_new_container_id=""
@@ -715,7 +717,7 @@ operation_state_publish() {
       ;;
     *)
       operation_state_valid=0
-      operation_state_terminal_status=invalid-record
+      operation_state_terminal_status="invalid-record"
       operation_state_diagnostic="invalid operation state status: $status"
       ;;
   esac
@@ -750,6 +752,137 @@ operation_state_record() {
   printf 'update_allowed=%s\n' "$operation_state_update_allowed"
   printf 'diagnostic_allowed=%s\n' "$operation_state_diagnostic_allowed"
   printf 'explicit_exec_mode=%s\n' "$operation_state_explicit_exec_mode"
+}
+
+# Task 9's command-facing result contract.  Every command report carries the same Task 8
+# projection, so human-readable output and the stable key/value form cannot disagree about the
+# operation, retry, readiness, or cleanup state.
+command_report_reset() {
+  command_report_result="success"
+  command_report_reason="command-allowed"
+  command_report_exit_status=0
+}
+
+command_report_derive() {
+  local status="${operation_state_terminal_status:-none}" mode="${policy_operation_mode:-unknown}"
+  command_report_reset
+  if [ "${operation_state_valid:-0}" != 1 ] || [ "$status" = invalid-record ]; then
+    command_report_result="invalid-state"
+    command_report_reason="invalid-operation-record"
+    command_report_exit_status=2
+  elif [ "${operation_record_active:-0}" = 1 ] && [ "$operation_status" != complete ] &&
+       [ "$operation_status" != in-progress ] && [ -n "$operation_status" ]; then
+    command_report_result=failed
+    command_report_reason="operation-$operation_status"
+    command_report_exit_status=1
+    [ "$operation_task_status" = degraded-fail ] && command_report_result=degraded
+  elif [ "$mode" = status ] || [ "$mode" = logs ] || [ "$mode" = config ]; then
+    command_report_result=report-only
+    command_report_reason="report-$status"
+  elif [ "$mode" = stop ]; then
+    command_report_result=success
+    command_report_reason=stop-complete
+  elif [ "${policy_decision_kind:-}" = refuse ]; then
+    if [ "${policy_decision_explicit_exec_mode:-blocked}" = diagnostic-only ] &&
+       [ "${policy_explicit_exec_command:-0}" = 1 ] &&
+       { [ "$status" = network-degraded ] || [ "$status" = readiness-failed ]; }; then
+      command_report_result=success
+      command_report_reason="diagnostic-only"
+    else
+      command_report_result=refused
+      command_report_reason="${policy_decision_reason_code:-policy-refused}"
+      command_report_exit_status=2
+    fi
+  elif [ "$status" = in-progress ] || [ "$status" = removal-failed ] ||
+       [ "$status" = absent-after-failure ] || [ "$status" = network-degraded ] ||
+       [ "$status" = readiness-failed ]; then
+    command_report_result=refused
+    command_report_reason="operation-$status"
+    command_report_exit_status=2
+  elif [ "$status" = complete ]; then
+    command_report_reason=operation-complete
+  fi
+}
+
+command_report_emit() {
+  local result="${1:-}" reason="${2:-}" exit_status="${3:-}"
+  operation_state_publish
+  if [ -z "$result" ]; then
+    command_report_derive
+  else
+    command_report_result="$result"
+    command_report_reason="${reason:-command-$result}"
+    case "$result" in
+      success|report-only) command_report_exit_status=0 ;;
+      degraded|failed) command_report_exit_status=1 ;;
+      refused|invalid-state) command_report_exit_status=2 ;;
+      *) command_report_result="invalid-state"; command_report_reason="invalid-report-result"; command_report_exit_status=2 ;;
+    esac
+    [ -n "$exit_status" ] && command_report_exit_status="$exit_status"
+  fi
+  printf 'result=%s\n' "$command_report_result"
+  printf 'reason=%s\n' "$command_report_reason"
+  printf 'phase=%s\n' "${operation_state_phase:-none}"
+  printf 'container_name=%s\n' "$operation_state_container_name"
+  printf 'outer_lifecycle=%s\n' "$operation_state_outer_lifecycle"
+  printf 'container_id=%s\n' "$operation_state_container_id"
+  printf 'old_container_id=%s\n' "$operation_state_old_container_id"
+  printf 'new_container_id=%s\n' "$operation_state_new_container_id"
+  printf 'operation_id=%s\n' "$operation_state_operation_id"
+  printf 'record_path=%s\n' "$operation_state_record_path"
+  printf 'readiness=%s\n' "$operation_state_readiness_state"
+  printf 'network=%s\n' "$operation_state_network_state"
+  printf 'operation_status=%s\n' "$operation_state_terminal_status"
+  printf 'task_status=%s\n' "$operation_task_status"
+  printf 'agent_execution=%s\n' "$operation_agent_execution"
+  printf 'explicit_exec=%s\n' "$operation_explicit_exec"
+  printf 'record_cleanup=%s\n' "$operation_record_cleanup"
+  printf 'image_reference=%s\n' "$operation_state_image_reference"
+  printf 'named_volumes=%s\n' "$operation_state_named_volumes"
+  printf 'failed_phase=%s\n' "$operation_failed_phase"
+  printf 'retry_command=%s\n' "$operation_state_retry_command"
+  printf 'cleanup_allowed=%s\n' "$operation_state_cleanup_allowed"
+  printf 'execution_allowed=%s\n' "$operation_state_execution_allowed"
+  printf 'mutation_allowed=%s\n' "$operation_state_mutation_allowed"
+  printf 'update_allowed=%s\n' "$operation_state_update_allowed"
+  printf 'diagnostic_allowed=%s\n' "$operation_state_diagnostic_allowed"
+  printf 'explicit_exec_mode=%s\n' "$operation_state_explicit_exec_mode"
+  printf 'diagnostic=%s\n' "$operation_state_diagnostic"
+  printf 'exit_status=%s\n' "$command_report_exit_status"
+  command_report_emitted=1
+  return 0
+}
+
+# A preflight failure normally leaves policy_decision_kind=refuse or a non-terminal operation
+# overlay for command_report_derive to describe. Keep the report contract total for earlier
+# failures too (for example a short-circuited preflight that did not populate either).
+command_report_preflight_failure() {
+  operation_state_publish
+  command_report_derive
+  if [ "$command_report_exit_status" = 0 ]; then
+    command_report_result=refused
+    command_report_reason="${policy_decision_reason_code:-policy-preflight-failed}"
+    command_report_exit_status=2
+  fi
+  command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
+}
+
+command_report_lifecycle_exit_trap() {
+  local rc="$1"
+  if [ "${command_report_emitted:-0}" != 1 ]; then
+    command_report_emit failed command-failed 1 >&2
+  fi
+  trap - EXIT
+  exit "$rc"
+}
+
+command_report_lifecycle_guard_begin() {
+  command_report_emitted=0
+  trap 'command_report_lifecycle_exit_trap "$?"' EXIT
+}
+
+command_report_lifecycle_guard_end() {
+  trap - EXIT
 }
 
 operation_state_update_allowed() {
@@ -881,9 +1014,9 @@ operation_record_terminal() {
     operation_explicit_exec=blocked
     operation_diagnostic="completed operation handoff is inconsistent; run ab start --apply or ab rebuild"
     operation_record_write || return 1
-    policy_operation_status=invalid-record
+    policy_operation_status="invalid-record"
     policy_readiness_result=not-applicable
-    operation_status=invalid-record
+    operation_status="invalid-record"
     operation_state_publish
     return 1
   fi
@@ -897,9 +1030,9 @@ operation_record_terminal() {
       operation_explicit_exec=blocked
       operation_diagnostic="operation record cleanup failed at $operation_record_path; run ab start --apply or ab rebuild"
       operation_record_write || return 1
-      policy_operation_status=invalid-record
+      policy_operation_status="invalid-record"
       policy_readiness_result=not-applicable
-      operation_status=invalid-record
+      operation_status="invalid-record"
       operation_state_publish
       return 1
     fi
@@ -908,9 +1041,9 @@ operation_record_terminal() {
 
 operation_record_invalid() {
   local reason="$1"
-  policy_operation_status=invalid-record
+  policy_operation_status="invalid-record"
   policy_readiness_result=not-applicable
-  operation_status=invalid-record
+  operation_status="invalid-record"
   operation_diagnostic="invalid operation record at $operation_record_path: $reason; run ${operation_retry_command:-ab start --apply}"
   operation_state_publish
   return 0
@@ -1044,25 +1177,7 @@ operation_record_load() {
 }
 
 operation_result_record() {
-  operation_state_publish
-  printf 'record_path=%s\n' "$operation_record_path"
-  printf 'operation_id=%s\n' "$operation_id"
-  printf 'phase=%s\n' "$operation_phase"
-  printf 'status=%s\n' "$operation_status"
-  printf 'task_status=%s\n' "$operation_task_status"
-  printf 'agent_execution=%s\n' "$operation_agent_execution"
-  printf 'explicit_exec=%s\n' "$operation_explicit_exec"
-  printf 'retry_command=%s\n' "$operation_retry_command"
-  printf 'record_cleanup=%s\n' "$operation_record_cleanup"
-  printf 'container_name=%s\n' "$cname"
-  printf 'readiness_result=%s\n' "$operation_readiness_result"
-  printf 'network_outcomes=%s\n' "$operation_network_outcomes"
-  printf 'image_reference=%s\n' "$operation_image_reference"
-  printf 'inner_docker_volume=%s\n' "$dvol"
-  printf 'jj_volume=%s\n' "$jvol"
-  printf 'failed_phase=%s\n' "$operation_failed_phase"
-  printf 'diagnostic=%s\n' "$operation_diagnostic"
-  operation_state_record
+  command_report_emit
 }
 
 # Reset and populate the deterministic Task 5 record. The source tier entries retain every tier,
@@ -2647,7 +2762,7 @@ validate_git_blocker() {
 # invoking it, and the overlay is intentionally applied after the base state decision.
 policy_decision_reset() {
   policy_decision_kind=refuse
-  policy_decision_reason_code=invalid-input
+  policy_decision_reason_code="invalid-input"
   policy_decision_mutation_allowed=0
   policy_decision_execution_allowed=0
   policy_decision_explicit_exec_mode=blocked
@@ -2726,7 +2841,7 @@ policy_decision_apply_overlay() {
   case "$status" in
     invalid-record)
       policy_decision_kind=refuse
-      policy_decision_reason_code=invalid-operation-record
+      policy_decision_reason_code="invalid-operation-record"
       policy_decision_mutation_allowed=0
       policy_decision_execution_allowed=0
       policy_decision_explicit_exec_mode=blocked
@@ -2795,7 +2910,7 @@ policy_decide() {
   esac
   operation_state_publish
   policy_decision_overlay_valid || {
-    policy_decision_reason_code=invalid-operation-overlay
+    policy_decision_reason_code="invalid-operation-overlay"
     return 0
   }
 
@@ -2805,7 +2920,7 @@ policy_decide() {
     case "$classification" in
       absent|legacy|valid) policy_decision_update_allowed=1 ;;
       stale|invalid|unsupported-version) policy_decision_update_allowed=0 ;;
-      *) policy_decision_kind=refuse; policy_decision_reason_code=invalid-recorded-state ;;
+      *) policy_decision_kind=refuse; policy_decision_reason_code="invalid-recorded-state" ;;
     esac
     policy_decision_apply_overlay
     # Config is always read-only. An operation overlay changes whether its update check is safe,
@@ -3593,13 +3708,13 @@ cmd_config() {
 # top-level (global) tier. Reuses ab_config_candidates itself (rather than re-deriving the path)
 # so the directory this creates can never drift from what the search actually resolves.
 cmd_config_init() {
-  local want_machine=0 want_project=0
+  local want_machine=0 want_project=0 invalid=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --machine) want_machine=1; shift ;;
       --project) want_project=1; shift ;;
       --) shift; break ;;
-      -*) echo "agentbox: config init: unknown flag '$1' (expected --machine / --project)" >&2; exit 1 ;;
+      -*) echo "agentbox: config init: unknown flag '$1' (expected --machine / --project)" >&2; return 1 ;;
       *) break ;;
     esac
   done
@@ -3623,6 +3738,7 @@ cmd_config_init() {
       env | mounts | ports | setup.sh | networks | Dockerfile) ;;
       *)
         echo "agentbox: config init: unknown file '$f' (expected env|mounts|ports|setup.sh|networks|Dockerfile)" >&2
+        invalid=1
         continue
         ;;
     esac
@@ -3643,7 +3759,7 @@ cmd_config_init() {
   fi
   echo
   echo "agentbox: run 'ab config' to see what's now in effect for this machine/project."
-  return 0
+  return "$invalid"
 }
 
 # Append the invoking shell's current values for exactly the variables declared by the
@@ -3713,7 +3829,8 @@ cmd_exec() {
     local shell_args=(docker exec --user agentbox -i -e BASH_ENV=/home/agentbox/.bashrc)
     ab_append_current_env shell_args
     [ -t 0 ] && shell_args+=(-t)
-    exec "${shell_args[@]}" "$cname" bash
+    "${shell_args[@]}" "$cname" bash
+    return $?
   fi
   # Run the command so ~/.bashrc is ALWAYS applied — that's where claude()/codex() live,
   # the functions that inject --dangerously-skip-permissions /
@@ -3736,7 +3853,8 @@ cmd_exec() {
   local exec_args=(docker exec --user agentbox -i -e BASH_ENV=/home/agentbox/.bashrc)
   ab_append_current_env exec_args
   [ -t 0 ] && exec_args+=(-t)
-  exec "${exec_args[@]}" "$cname" bash -c "$(printf '%q ' "$@")"
+  "${exec_args[@]}" "$cname" bash -c "$(printf '%q ' "$@")"
+  return $?
 }
 
 main() {
@@ -3744,16 +3862,37 @@ main() {
   # update check, so invalid policy/options never trigger network access.
   case "${1:-}" in
   start)
-    shift; parse_runtime_options start "$@"
+    shift
+    command_report_lifecycle_guard_begin
+    parse_runtime_options start "$@" || {
+      command_report_emit invalid-state invalid-input 2
+      exit 2
+    }
     policy_operation_mode=start
     policy_operation_retry="$policy_apply"
     policy_operation_begin || exit 1
-    policy_preflight start || exit 1
-    policy_resolution_recheck start || exit 1
+    if ! policy_preflight start; then
+      command_report_preflight_failure
+      exit "$command_report_exit_status"
+    fi
+    if ! policy_resolution_recheck start; then
+      command_report_emit failed policy-changed-during-resolution 1
+      exit 1
+    fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
-    cmd_start
+    if cmd_start; then
+      :
+    else
+      rc=$?
+      [ "${command_report_emitted:-0}" = 1 ] || command_report_emit failed start-failed 1
+      command_report_lifecycle_guard_end
+      exit "$rc"
+    fi
+    [ "${command_report_emitted:-0}" = 1 ] || command_report_emit success already-running 0
+    command_report_lifecycle_guard_end
     ;;
   stop)
+    command_report_lifecycle_guard_begin
     policy_operation_mode=stop
     policy_operation_retry=0
     policy_operation_begin || exit 1
@@ -3762,13 +3901,17 @@ main() {
     if exists; then
       if docker stop "$cname" >/dev/null; then
         echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"
+        command_report_emit success stopped 0
       else
         echo "agentbox: failed to stop $cname (the operation record and named volumes were kept)" >&2
+        command_report_emit failed stop-failed 1
         exit 1
       fi
     else
       echo "agentbox: $cname does not exist"
+      command_report_emit report-only stop-absent 0
     fi
+    command_report_lifecycle_guard_end
     ;;
   destroy)
     policy_operation_mode=destroy
@@ -3810,62 +3953,128 @@ main() {
     fi
     ;;
   status)
+    command_report_lifecycle_guard_begin
     policy_operation_mode=status
     policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_load_host || exit 1
-    operation_state_record
     operation_state_update_allowed && [ "$policy_updates_check" = 1 ] && check_for_update
-    is_running && echo "running: $cname" || echo "not running: $cname"
+    if exists; then
+      if is_running; then operation_state_outer_lifecycle=running; else operation_state_outer_lifecycle=stopped; fi
+    else
+      operation_state_outer_lifecycle=absent
+    fi
+    command_report_emit
+    [ "$command_report_exit_status" = 0 ] || exit "$command_report_exit_status"
+    command_report_lifecycle_guard_end
     ;;
   config)
+    command_report_lifecycle_guard_begin
     policy_operation_mode=config
     policy_operation_retry=0
     policy_operation_begin || exit 1
-    policy_preflight config || exit 1
-    policy_resolution_recheck config || exit 1
+    if ! policy_preflight config; then
+      command_report_preflight_failure
+      exit "$command_report_exit_status"
+    fi
+    if ! policy_resolution_recheck config; then
+      command_report_emit failed policy-changed-during-resolution 1
+      exit 1
+    fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     shift
     if [ "${1:-}" = init ]; then
       shift
-      cmd_config_init "$@"
+      if ! cmd_config_init "$@"; then
+        command_report_emit failed config-init-failed 1
+        exit 1
+      fi
+      command_report_emit success config-init 0
     else
-      cmd_config
+      if ! cmd_config; then
+        command_report_emit failed config-report-failed 1
+        exit 1
+      fi
+      command_report_emit
     fi
+    command_report_lifecycle_guard_end
     ;;
   logs)
+    command_report_lifecycle_guard_begin
     policy_operation_mode=logs
     policy_operation_retry=0
     policy_operation_begin || exit 1
     policy_load_host || exit 1
-    operation_state_record
     operation_state_update_allowed && [ "$policy_updates_check" = 1 ] && check_for_update
     if exists; then
-      docker logs --tail 80 "$cname" 2>&1 | tail -80
+      if log_output="$(docker logs --tail 80 "$cname" 2>&1 | tail -80)"; then
+        command_report_emit report-only logs-complete 0
+        [ -z "$log_output" ] || printf '%s\n' "$log_output"
+      else
+        log_rc=$?
+        command_report_emit failed logs-failed 1
+        [ -z "$log_output" ] || printf '%s\n' "$log_output" >&2
+        exit "$log_rc"
+      fi
     else
       echo "agentbox: no container $cname; operation state above is the durable diagnostic" >&2
+      command_report_emit failed no-container 1
       exit 1
     fi
+    command_report_lifecycle_guard_end
     ;;
   exec)
     shift
-    parse_exec_options exec "$@"
+    command_report_lifecycle_guard_begin
+    parse_exec_options exec "$@" || {
+      command_report_emit invalid-state invalid-input 2
+      exit 2
+    }
     policy_operation_mode="exec"
     policy_operation_retry=0
     policy_operation_begin || exit 1
-    policy_preflight exec || exit 1
-    policy_resolution_recheck exec || exit 1
+    if ! policy_preflight exec; then
+      command_report_preflight_failure
+      exit "$command_report_exit_status"
+    fi
+    if ! policy_resolution_recheck exec; then
+      command_report_emit failed policy-changed-during-resolution 1
+      exit 1
+    fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
-    cmd_exec "${policy_command_args[@]}"
+    command_report_derive
+    if [ "$command_report_exit_status" != 0 ]; then
+      command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
+      exit "$command_report_exit_status"
+    fi
+    if cmd_exec "${policy_command_args[@]}"; then
+      command_report_emit success exec-complete 0
+      command_report_lifecycle_guard_end
+    else
+      rc=$?
+      command_report_emit failed exec-failed 1
+      command_report_lifecycle_guard_end
+      exit "$rc"
+    fi
     ;;
   build | rebuild)
     shift
-    parse_runtime_options rebuild "$@"
+    command_report_lifecycle_guard_begin
+    parse_runtime_options rebuild "$@" || {
+      command_report_emit invalid-state invalid-input 2
+      exit 2
+    }
     policy_operation_mode="rebuild"
     policy_operation_retry=1
     policy_operation_begin || exit 1
-    policy_preflight rebuild || exit 1
-    policy_resolution_recheck rebuild || exit 1
+    if ! policy_preflight rebuild; then
+      command_report_preflight_failure
+      exit "$command_report_exit_status"
+    fi
+    if ! policy_resolution_recheck rebuild; then
+      command_report_emit failed policy-changed-during-resolution 1
+      exit 1
+    fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     require_sysbox
     operation_record_begin_if_needed || exit 1
@@ -3938,12 +4147,45 @@ main() {
     # unless this sweep catches it (nothing else ever will: build_user_image's own prune only runs
     # when a Dockerfile is resolved, and `ab destroy` doesn't touch images at all).
     prune_images "${IMAGE_NAME}:${uid}-custom-${hash}-" "" "$tag"
+    command_report_lifecycle_guard_end
     ;;
   # Help = this header comment block, with the leading `# ` stripped, printed as-is
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
   --version) echo "agentbox $AB_VERSION"; exit 0 ;;
-  *) parse_convenience_options "$@"; policy_operation_mode="exec"; policy_operation_retry=0; policy_operation_begin || exit 1; policy_preflight exec || exit 1; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
+  *)
+    command_report_lifecycle_guard_begin
+    parse_convenience_options "$@" || {
+      command_report_emit invalid-state invalid-input 2
+      exit 2
+    }
+    policy_operation_mode="exec"
+    policy_operation_retry=0
+    policy_operation_begin || exit 1
+    if ! policy_preflight exec; then
+      command_report_preflight_failure
+      exit "$command_report_exit_status"
+    fi
+    if ! policy_resolution_recheck exec; then
+      command_report_emit failed policy-changed-during-resolution 1
+      exit 1
+    fi
+    [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
+    command_report_derive
+    if [ "$command_report_exit_status" != 0 ]; then
+      command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
+      exit "$command_report_exit_status"
+    fi
+    if cmd_exec "${policy_command_args[@]}"; then
+      command_report_emit success exec-complete 0
+      command_report_lifecycle_guard_end
+    else
+      rc=$?
+      command_report_emit failed exec-failed 1
+      command_report_lifecycle_guard_end
+      exit "$rc"
+    fi
+    ;;
   esac
 }
 
