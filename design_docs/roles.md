@@ -172,6 +172,10 @@ the shared change remains clear to both roles.
 The local checkout is a Jujutsu repository, while GitHub CLI operations may still try to infer
 state through Git. To make the push and PR handoff reliable:
 
+- Treat pushing the bookmark and creating the pull request as two separate
+  remote mutations. The informational “Create a pull request” URL printed
+  by `jj git push` is only a convenience link; it is not a pull request and
+  must never be reported as one.
 - Push the task bookmark first, using the explicit jj remote and bookmark. Then verify the remote
   bookmark/head with the same working transport, for example
   `GIT_SSH_COMMAND="ssh -F $HOME/.ssh/config" jj git fetch --remote origin` followed by
@@ -183,9 +187,15 @@ state through Git. To make the push and PR handoff reliable:
   already exists, inspect and use that PR; do not retry creation or report that no PR exists.
 - Treat PR handoff as unverified until `gh pr create` returns a URL or a follow-up
   `gh pr list`/`gh pr view` confirms the PR number, repository, base, head, and head commit.
-- After identifying the PR number, run `gh pr checks PR_NUMBER --watch` and inspect
-  `gh pr view PR_NUMBER` as needed. Do not report the task complete until every GitHub CI job has
-  completed successfully. If no required checks are initially reported, inspect the workflow runs
+  Verify the returned PR URL by querying the PR, and record the PR number and URL in the
+  handoff. A branch that is pushed but has no confirmed PR is explicitly incomplete.
+- If GitHub CLI/API access or authentication fails after the bookmark is pushed, report exactly
+  “bookmark pushed; pull request not created/verified” and stop the remote handoff. Do not present
+  the suggested creation URL as a PR, do not claim completion, and do not wait for CI until a real
+  PR number has been confirmed.
+- After identifying the PR number, run `gh pr checks PR_NUMBER --repo OWNER/REPO --watch` and inspect
+  `gh pr view PR_NUMBER --repo OWNER/REPO` as needed. Do not report the task complete until every
+  GitHub CI job has completed successfully. If no required checks are initially reported, inspect the workflow runs
   directly and continue waiting rather than treating that response as a pass.
 - Jujutsu pushes invoke an external Git transport and may fail before authentication when the
   host's system SSH configuration includes an unreadable or badly owned generated file. If that

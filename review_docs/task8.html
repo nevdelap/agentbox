@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Task 8</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --bad: light-dark(#9b3030, #ff9f9f); --bad-soft: light-dark(#fff0f0, #321d20); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1150px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--bad); }
+    .hero strong { color: var(--bad); font-size: 1.08rem; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS IMPLEMENTATION REVIEW</div>
+      <h1>Task 8 — operation state and recovery gating</h1>
+      <p class="meta">exact jj change <code>swvqnspp</code> · parent <code>touvosuq</code> (<code>main@origin</code>, <code>b2c8e9c0</code>) · review round 3 · reviewed 2026-09-13</p>
+    </header>
+
+    <section class="hero" style="border-left-color: var(--accent)">
+      <strong style="color: var(--accent)">Disposition: accepted.</strong>
+      <p>The lifecycle validation, cleanup-failure handling, public command gating, and repeated read-only reporting checks now satisfy the Task 8 contract. No production regression or outstanding Task 8 finding was found in this round.</p>
+      <p><strong style="color: var(--accent)">Quality grade: A-</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Review basis</h2>
+    <p>This review covers Task 8 in <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html">the implementation plan</a>, its normative references, and exact jj change <code>swvqnspp</code> touching <a href="../bin/ab"><code>bin/ab</code></a> and <a href="../tests/run.sh"><code>tests/run.sh</code></a>. The repository is a jj repository. The reviewed implementation commit was <code>8c09e975</code>; the review document is reviewer-owned content in the same jj change. No production fix was made by Rufus.</p>
+
+    <h2>Assessment</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Result</th><th>Assessment</th></tr></thead>
+      <tbody>
+        <tr><td>Shared projection</td><td>Pass</td><td>The stable fields and explicit permissions are exposed by <code>operation_state_record</code> and populated from the validated Task 7 record.</td></tr>
+        <tr><td>Record validation</td><td>Pass</td><td>Required fields, syntax, enums, permission tuples, and status/phase/readiness relationships are rejected before permissions are published.</td></tr>
+        <tr><td>Recovery gating</td><td>Pass</td><td>Non-complete and invalid states fail closed; explicit retry creates a fresh operation identity while retaining the named-volume identities.</td></tr>
+        <tr><td>Read-only integration</td><td>Pass</td><td><code>config</code>, <code>status</code>, <code>logs</code>, and <code>stop</code> consume the projection; repeated reporting leaves the record byte-stable and performs no Docker, network, or update work in the tested failure state.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Findings</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Finding and impact</th><th>Required correction</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>R8-1</td><td>High — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:998-1042</code></a></td>
+          <td>The prior lifecycle-consistency defect is fixed. The loader now validates the status/permission tuple and an explicit status/phase/readiness relationship table; invalid combinations publish <code>invalid-record</code> with permissions disabled.</td>
+          <td>Resolved by cross-field validation and focused invalid-combination tests at <a href="../tests/run.sh"><code>tests/run.sh:2299-2318</code></a>.</td>
+        </tr>
+        <tr>
+          <td>R8-2</td><td>High — resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:892-905</code></a></td>
+          <td>The cleanup failure path now retains a diagnostic record, converts the in-memory projection to <code>invalid-record</code>, disables execution/mutation/update/cleanup permissions, and returns non-zero. Reloading the retained record also fails closed.</td>
+          <td>Resolved by the explicit cleanup-failure path and deterministic mocked-<code>rm</code> coverage at <a href="../tests/run.sh"><code>tests/run.sh:2361-2375</code></a>.</td>
+        </tr>
+        <tr>
+          <td>R8-3</td><td>Medium — resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:2413-2534</code></a></td>
+          <td>The public dispatch matrix now covers every non-complete/invalid state across <code>start</code>, <code>build</code>, <code>rebuild</code>, all convenience commands, and explicit <code>exec</code>. Each case asserts refusal, unchanged record bytes, and no Docker/network/update work. Repeated public-boundary calls to <code>config</code>, <code>status</code>, <code>logs</code>, and <code>stop</code> likewise assert a byte-stable record and no such side effects.</td>
+          <td>Resolved by the table-driven dispatch and repeated-report tests. Runtime/container acceptance remains with the later task owners as specified by the plan.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Repository and change</td><td>jj repository confirmed; reviewed bookmark <code>task8-operation-state</code>, based directly on <code>main@origin</code>.</td></tr>
+        <tr><td>Changed files</td><td>Igor changed <code>bin/ab</code> and <code>tests/run.sh</code>; <code>review_docs/task8.html</code> is reviewer-owned content in the same jj change.</td></tr>
+        <tr><td>Focused behavior checks</td><td>Cross-field invalid records, cleanup failure, all terminal states, fresh recovery identity, full public command/state refusal matrix, and repeated read-only reporting are covered. The two previously reproduced production defects no longer reproduce.</td></tr>
+        <tr><td><code>just ci</code></td><td>Pass: Bash syntax checks, ShellCheck, all 984 tests, and Nix syntax validation.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Conclusion</h2>
+    <p>Task 8 is accepted. All prior findings are resolved, the public command/state and repeated-report evidence is present, and the mandatory CI suite passes. The implementation stays within Task 8’s boundary: runtime/container end-to-end validation remains with the later tasks named by the plan.</p>
+
+    <h2>Review history</h2>
+    <table>
+      <thead><tr><th>Round</th><th>Disposition</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Changes requested</td><td>R8-1 lifecycle validation, R8-2 cleanup failure, and R8-3 coverage were outstanding.</td></tr>
+        <tr><td>2</td><td>Changes requested</td><td>R8-1 and R8-2 were resolved. R8-3 remained partially resolved because command-boundary and repeated-report evidence was incomplete.</td></tr>
+        <tr><td>3</td><td>Accepted</td><td>R8-3 is resolved by the complete public dispatch matrix and repeated-report no-side-effect checks; CI passes all 984 tests.</td></tr>
+      </tbody>
+    </table>
+
+    <footer>Rufus review of Task 8. Igor owns the implementation corrections; this document records the independent review.</footer>
+  </main>
+</body>
+</html>

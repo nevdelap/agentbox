@@ -107,6 +107,10 @@ operation_started_at=""
 operation_completed_at=""
 operation_old_container_id=""
 operation_new_container_id=""
+operation_record_container_name=""
+operation_record_policy_digest=""
+operation_record_inner_docker_volume=""
+operation_record_jj_volume=""
 operation_image_reference=""
 operation_network_outcomes=""
 operation_diagnostic=""
@@ -119,6 +123,33 @@ operation_record_cleanup="forbidden"
 operation_failed_phase=""
 operation_connect_network_status=ok
 operation_record_active=0
+operation_record_sequence=0
+
+# Task 8's single read-only projection.  Keep the Task 7 producer fields above for lifecycle
+# writes, but make consumers use this stable vocabulary instead of inferring permissions from a
+# raw status string or reparsing the record themselves.
+operation_state_record_path=""
+operation_state_operation_id=""
+operation_state_phase=""
+operation_state_terminal_status="none"
+operation_state_container_name=""
+operation_state_container_id=""
+operation_state_old_container_id=""
+operation_state_new_container_id=""
+operation_state_policy_digest=""
+operation_state_image_reference=""
+operation_state_named_volumes=""
+operation_state_network_state="none"
+operation_state_readiness_state="not-applicable"
+operation_state_diagnostic=""
+operation_state_retry_command="ab start --apply"
+operation_state_cleanup_allowed=0
+operation_state_execution_allowed=1
+operation_state_mutation_allowed=1
+operation_state_update_allowed=1
+operation_state_diagnostic_allowed=0
+operation_state_explicit_exec_mode="blocked"
+operation_state_valid=1
 
 # Task 6's decision record is the only command-facing policy gate.  Task 7 may populate the
 # operation/readiness overlay before calling policy_decide; the defaults deliberately mean that
@@ -580,6 +611,10 @@ operation_record_reset_result() {
   operation_completed_at=""
   operation_old_container_id=""
   operation_new_container_id=""
+  operation_record_container_name=""
+  operation_record_policy_digest=""
+  operation_record_inner_docker_volume=""
+  operation_record_jj_volume=""
   operation_image_reference=""
   operation_network_outcomes=""
   operation_diagnostic=""
@@ -592,6 +627,133 @@ operation_record_reset_result() {
   operation_failed_phase=""
   operation_connect_network_status=ok
   operation_record_active=0
+  operation_state_reset
+}
+
+operation_state_reset() {
+  operation_state_record_path=""
+  operation_state_operation_id=""
+  operation_state_phase=""
+  operation_state_terminal_status=none
+  operation_state_container_name=""
+  operation_state_container_id=""
+  operation_state_old_container_id=""
+  operation_state_new_container_id=""
+  operation_state_policy_digest=""
+  operation_state_image_reference=""
+  operation_state_named_volumes=""
+  operation_state_network_state=none
+  operation_state_readiness_state=not-applicable
+  operation_state_diagnostic=""
+  operation_state_retry_command="ab start --apply"
+  operation_state_cleanup_allowed=0
+  operation_state_execution_allowed=1
+  operation_state_mutation_allowed=1
+  operation_state_update_allowed=1
+  operation_state_diagnostic_allowed=0
+  operation_state_explicit_exec_mode=allowed
+  operation_state_valid=1
+}
+
+# Publish one projection after either a record load or a lifecycle update.  This is the only
+# place where record fields become command permissions; callers must consume these fields rather
+# than deriving their own interpretation from operation_status.
+operation_state_publish() {
+  local status="${policy_operation_status:-none}" readiness="${policy_readiness_result:-${operation_readiness_result:-not-applicable}}"
+  if [ "${operation_record_active:-0}" = 1 ] && [ "$status" = none ] && [ -n "$operation_status" ]; then
+    status="$operation_status"
+  fi
+  operation_state_record_path="$operation_record_path"
+  operation_state_operation_id="$operation_id"
+  operation_state_phase="$operation_phase"
+  operation_state_terminal_status="$status"
+  operation_state_container_name="${operation_record_container_name:-$cname}"
+  operation_state_old_container_id="$operation_old_container_id"
+  operation_state_new_container_id="$operation_new_container_id"
+  operation_state_policy_digest="${operation_record_policy_digest:-${policy_resolved_effective[digest]:-}}"
+  operation_state_image_reference="$operation_image_reference"
+  operation_state_named_volumes="inner_docker=${operation_record_inner_docker_volume:-$dvol};jj=${operation_record_jj_volume:-$jvol}"
+  operation_state_network_state="$operation_network_outcomes"
+  if [ "$status" = none ] && [ ! -f "${operation_record_path:-}" ]; then
+    operation_state_network_state=none
+  fi
+  operation_state_readiness_state="$readiness"
+  operation_state_diagnostic="$operation_diagnostic"
+  operation_state_retry_command="${operation_retry_command:-ab start --apply}"
+  operation_state_cleanup_allowed=0
+  operation_state_execution_allowed=0
+  operation_state_mutation_allowed=0
+  operation_state_update_allowed=0
+  operation_state_diagnostic_allowed=0
+  operation_state_explicit_exec_mode=blocked
+  operation_state_valid=1
+
+  case "$status" in
+    none)
+      operation_state_execution_allowed=1
+      operation_state_mutation_allowed=1
+      operation_state_update_allowed=1
+      operation_state_explicit_exec_mode=allowed
+      ;;
+    complete)
+      operation_state_execution_allowed=1
+      operation_state_mutation_allowed=1
+      operation_state_update_allowed=1
+      operation_state_cleanup_allowed=1
+      operation_state_explicit_exec_mode=allowed
+      ;;
+    invalid-record)
+      operation_state_valid=0
+      operation_state_diagnostic_allowed=0
+      ;;
+    network-degraded|readiness-failed)
+      operation_state_explicit_exec_mode="$operation_explicit_exec"
+      [ "$operation_state_explicit_exec_mode" = diagnostic-only ] && operation_state_diagnostic_allowed=1
+      ;;
+    in-progress|removal-failed|absent-after-failure)
+      operation_state_explicit_exec_mode=blocked
+      ;;
+    *)
+      operation_state_valid=0
+      operation_state_terminal_status=invalid-record
+      operation_state_diagnostic="invalid operation state status: $status"
+      ;;
+  esac
+  if [ -n "$operation_state_new_container_id" ]; then
+    operation_state_container_id="$operation_state_new_container_id"
+  elif [ "$operation_state_diagnostic_allowed" = 1 ]; then
+    operation_state_container_id="$operation_state_old_container_id"
+  else
+    operation_state_container_id=""
+  fi
+}
+
+operation_state_record() {
+  printf 'record_path=%s\n' "$operation_state_record_path"
+  printf 'operation_id=%s\n' "$operation_state_operation_id"
+  printf 'phase=%s\n' "$operation_state_phase"
+  printf 'terminal_status=%s\n' "$operation_state_terminal_status"
+  printf 'container_name=%s\n' "$operation_state_container_name"
+  printf 'container_id=%s\n' "$operation_state_container_id"
+  printf 'old_container_id=%s\n' "$operation_state_old_container_id"
+  printf 'new_container_id=%s\n' "$operation_state_new_container_id"
+  printf 'policy_digest=%s\n' "$operation_state_policy_digest"
+  printf 'image_reference=%s\n' "$operation_state_image_reference"
+  printf 'named_volumes=%s\n' "$operation_state_named_volumes"
+  printf 'network_state=%s\n' "$operation_state_network_state"
+  printf 'readiness_state=%s\n' "$operation_state_readiness_state"
+  printf 'diagnostic=%s\n' "$operation_state_diagnostic"
+  printf 'retry_command=%s\n' "$operation_state_retry_command"
+  printf 'cleanup_allowed=%s\n' "$operation_state_cleanup_allowed"
+  printf 'execution_allowed=%s\n' "$operation_state_execution_allowed"
+  printf 'mutation_allowed=%s\n' "$operation_state_mutation_allowed"
+  printf 'update_allowed=%s\n' "$operation_state_update_allowed"
+  printf 'diagnostic_allowed=%s\n' "$operation_state_diagnostic_allowed"
+  printf 'explicit_exec_mode=%s\n' "$operation_state_explicit_exec_mode"
+}
+
+operation_state_update_allowed() {
+  [ "${operation_state_valid:-0}" = 1 ] && [ "${operation_state_update_allowed:-0}" = 1 ]
 }
 
 operation_record_prepare_path() {
@@ -630,13 +792,13 @@ operation_record_write() {
     [ -n "$operation_completed_at" ] && printf 'completed_at = "%s"\n' "$(operation_record_safe_value "$operation_completed_at")"
     printf 'phase = "%s"\n' "$(operation_record_safe_value "$operation_phase")"
     printf 'status = "%s"\n' "$(operation_record_safe_value "$operation_status")"
-    printf 'container_name = "%s"\n' "$(operation_record_safe_value "$cname")"
+    printf 'container_name = "%s"\n' "$(operation_record_safe_value "${operation_record_container_name:-$cname}")"
     [ -n "$operation_old_container_id" ] && printf 'old_container_id = "%s"\n' "$(operation_record_safe_value "$operation_old_container_id")"
     [ -n "$operation_new_container_id" ] && printf 'new_container_id = "%s"\n' "$(operation_record_safe_value "$operation_new_container_id")"
-    printf 'policy_digest = "%s"\n' "$(operation_record_safe_value "${policy_resolved_effective[digest]:-sha256:unknown}")"
+    printf 'policy_digest = "%s"\n' "$(operation_record_safe_value "${operation_record_policy_digest:-${policy_resolved_effective[digest]:-sha256:unknown}}")"
     printf 'image_reference = "%s"\n' "$(operation_record_safe_value "$operation_image_reference")"
-    printf 'inner_docker_volume = "%s"\n' "$(operation_record_safe_value "$dvol")"
-    printf 'jj_volume = "%s"\n' "$(operation_record_safe_value "$jvol")"
+    printf 'inner_docker_volume = "%s"\n' "$(operation_record_safe_value "${operation_record_inner_docker_volume:-$dvol}")"
+    printf 'jj_volume = "%s"\n' "$(operation_record_safe_value "${operation_record_jj_volume:-$jvol}")"
     printf 'network_outcomes = "%s"\n' "$(operation_record_safe_value "$operation_network_outcomes")"
     printf 'diagnostic = "%s"\n' "$(operation_record_safe_value "$operation_diagnostic")"
     printf 'readiness_result = "%s"\n' "$(operation_record_safe_value "$operation_readiness_result")"
@@ -654,7 +816,12 @@ operation_record_write() {
 operation_record_begin() {
   operation_record_reset_result
   operation_record_prepare_path || return 1
-  operation_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  operation_record_container_name="$cname"
+  operation_record_inner_docker_volume="$dvol"
+  operation_record_jj_volume="$jvol"
+  operation_record_policy_digest="${policy_resolved_effective[digest]:-sha256:unknown}"
+  operation_record_sequence=$((operation_record_sequence + 1))
+  operation_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$operation_record_sequence"
   operation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   operation_phase=preflight
   operation_status=in-progress
@@ -665,6 +832,7 @@ operation_record_begin() {
   fi
   operation_record_active=1
   operation_record_write
+  operation_state_publish
 }
 
 operation_record_begin_if_needed() {
@@ -678,6 +846,7 @@ operation_record_update() {
   operation_status="$2"
   operation_diagnostic="${3:-}"
   operation_record_write
+  operation_state_publish
 }
 
 operation_record_terminal() {
@@ -703,10 +872,55 @@ operation_record_terminal() {
       operation_record_cleanup=forbidden
       ;;
   esac
-  operation_record_write || return 1
-  if [ "$status" = complete ]; then
-    rm -f -- "$operation_record_path"
+  if [ "$status" = complete ] && {
+    [ "$operation_phase" != completion ] || [ "$operation_readiness_result" != ready ];
+  }; then
+    operation_record_cleanup=failed
+    operation_task_status=fail
+    operation_agent_execution=blocked
+    operation_explicit_exec=blocked
+    operation_diagnostic="completed operation handoff is inconsistent; run ab start --apply or ab rebuild"
+    operation_record_write || return 1
+    policy_operation_status=invalid-record
+    policy_readiness_result=not-applicable
+    operation_status=invalid-record
+    operation_state_publish
+    return 1
   fi
+  operation_record_write || return 1
+  operation_state_publish
+  if [ "$status" = complete ]; then
+    if ! rm -f -- "$operation_record_path"; then
+      operation_record_cleanup=failed
+      operation_task_status=fail
+      operation_agent_execution=blocked
+      operation_explicit_exec=blocked
+      operation_diagnostic="operation record cleanup failed at $operation_record_path; run ab start --apply or ab rebuild"
+      operation_record_write || return 1
+      policy_operation_status=invalid-record
+      policy_readiness_result=not-applicable
+      operation_status=invalid-record
+      operation_state_publish
+      return 1
+    fi
+  fi
+}
+
+operation_record_invalid() {
+  local reason="$1"
+  policy_operation_status=invalid-record
+  policy_readiness_result=not-applicable
+  operation_status=invalid-record
+  operation_diagnostic="invalid operation record at $operation_record_path: $reason; run ${operation_retry_command:-ab start --apply}"
+  operation_state_publish
+  return 0
+}
+
+operation_record_unescape() {
+  local value="$1"
+  value="${value//\\\"/\"}"
+  value="${value//\\\\/\\}"
+  printf '%s' "$value"
 }
 
 operation_record_load() {
@@ -722,30 +936,20 @@ operation_record_load() {
   [ -f "$operation_record_path" ] || {
     policy_operation_status=none
     policy_readiness_result=not-applicable
+    operation_state_publish
     return 0
   }
-  [ -r "$operation_record_path" ] || {
-    policy_operation_status=invalid-record
-    policy_readiness_result=not-applicable
-    operation_diagnostic="invalid operation record at $operation_record_path: record is not readable; run $operation_retry_command"
-    return 0
-  }
+  [ -r "$operation_record_path" ] || { operation_record_invalid "record is not readable"; return 0; }
   record_line_re='^([a-z_]+)[[:space:]]*=[[:space:]]*"(([^"\\]|\\["\\])*)"$'
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" =~ $record_line_re ]]; then
       key="${BASH_REMATCH[1]}"
-      value="${BASH_REMATCH[2]}"
+      value="$(operation_record_unescape "${BASH_REMATCH[2]}")"
     else
-      policy_operation_status=invalid-record
-      policy_readiness_result=not-applicable
-      operation_diagnostic="invalid operation record at $operation_record_path: malformed line; run $operation_retry_command"
-      return 0
+      operation_record_invalid "malformed line"; return 0
     fi
     if [ "${seen_keys[$key]+present}" = present ]; then
-      policy_operation_status=invalid-record
-      policy_readiness_result=not-applicable
-      operation_diagnostic="invalid operation record at $operation_record_path: duplicate field $key; run $operation_retry_command"
-      return 0
+      operation_record_invalid "duplicate field $key"; return 0
     fi
     seen_keys["$key"]=1
     case "$key" in
@@ -755,99 +959,95 @@ operation_record_load() {
       started_at) operation_started_at="$value" ;;
       completed_at) operation_completed_at="$value" ;;
       phase) operation_phase="$value" ;;
-      container_name) : ;;
+      container_name) operation_record_container_name="$value" ;;
       old_container_id) operation_old_container_id="$value" ;;
       new_container_id) operation_new_container_id="$value" ;;
-      policy_digest) : ;;
+      policy_digest) operation_record_policy_digest="$value" ;;
       image_reference) operation_image_reference="$value" ;;
+      inner_docker_volume) operation_record_inner_docker_volume="$value" ;;
+      jj_volume) operation_record_jj_volume="$value" ;;
       network_outcomes) operation_network_outcomes="$value" ;;
       diagnostic) operation_diagnostic="$value" ;;
       retry_command) operation_retry_command="$value" ;;
       record_cleanup) operation_record_cleanup="$value" ;;
       failed_phase) operation_failed_phase="$value" ;;
-      inner_docker_volume|jj_volume|task_status|agent_execution|explicit_exec) ;;
-      *)
-        policy_operation_status=invalid-record
-        policy_readiness_result=not-applicable
-        operation_diagnostic="invalid operation record at $operation_record_path: unknown field $key; run $operation_retry_command"
-        return 0
-        ;;
+      task_status) operation_task_status="$value" ;;
+      agent_execution) operation_agent_execution="$value" ;;
+      explicit_exec) operation_explicit_exec="$value" ;;
+      *) operation_record_invalid "unknown field $key"; return 0 ;;
     esac
   done <"$operation_record_path"
   for key in "${required_keys[@]}"; do
     if [ "${seen_keys[$key]+present}" != present ]; then
-      policy_operation_status=invalid-record
-      policy_readiness_result=not-applicable
-      operation_diagnostic="invalid operation record at $operation_record_path: missing field $key; run $operation_retry_command"
-      return 0
+      operation_record_invalid "missing field $key"; return 0
     fi
   done
+  [ -n "$operation_id" ] || { operation_record_invalid "empty operation_id"; return 0; }
+  [ -n "$operation_started_at" ] || { operation_record_invalid "empty started_at"; return 0; }
+  [ -n "$operation_record_container_name" ] || { operation_record_invalid "empty container_name"; return 0; }
+  [ -n "$operation_record_inner_docker_volume" ] && [ -n "$operation_record_jj_volume" ] || {
+    operation_record_invalid "missing named volume identity"; return 0;
+  }
+  [ "$operation_record_container_name" = "$cname" ] || {
+    operation_record_invalid "container_name does not match the current project"; return 0;
+  }
+  [ "$operation_record_inner_docker_volume" = "$dvol" ] &&
+    [ "$operation_record_jj_volume" = "$jvol" ] || {
+    operation_record_invalid "named volume identity does not match the current project"; return 0;
+  }
   case "$policy_operation_status" in
-    none|in-progress|removal-failed|absent-after-failure|network-degraded|readiness-failed|complete) ;;
-    *)
-      policy_operation_status=invalid-record
-      policy_readiness_result=not-applicable
-      operation_diagnostic="invalid operation record at $operation_record_path: unknown status $operation_status; run $operation_retry_command"
-      return 0
-      ;;
+    in-progress|removal-failed|absent-after-failure|network-degraded|readiness-failed|complete) ;;
+    *) operation_record_invalid "unknown status $operation_status"; return 0 ;;
   esac
   case "$policy_readiness_result" in
-    not-applicable|ready|failed-but-running|failed-and-exited) ;;
-    *)
-      policy_operation_status=invalid-record
-      policy_readiness_result=not-applicable
-      operation_diagnostic="invalid operation record at $operation_record_path: unknown readiness result $operation_readiness_result; run $operation_retry_command"
-      return 0
-      ;;
+    not-applicable|starting|ready|failed-but-running|failed-and-exited|replacement-attempted) ;;
+    *) operation_record_invalid "unknown readiness result $operation_readiness_result"; return 0 ;;
   esac
   case "$operation_phase" in
     preflight|removal|creation|required-network|nested-readiness|completion) ;;
-    *)
-      policy_operation_status=invalid-record
-      operation_diagnostic="invalid operation record at $operation_record_path: unknown phase $operation_phase; run $operation_retry_command"
-      return 0
-      ;;
+    *) operation_record_invalid "unknown phase $operation_phase"; return 0 ;;
   esac
   case "$operation_status:$operation_task_status:$operation_agent_execution:$operation_explicit_exec:$operation_record_cleanup" in
     in-progress:fail:blocked:blocked:forbidden)
-      [ -z "$operation_completed_at" ] || {
-        policy_operation_status=invalid-record
-        operation_diagnostic="invalid operation record at $operation_record_path: in-progress record is completed; run $operation_retry_command"
-        return 0
-      }
+      [ -z "$operation_completed_at" ] || { operation_record_invalid "in-progress record is completed"; return 0; }
       ;;
     removal-failed:fail:blocked:blocked:forbidden|absent-after-failure:fail:blocked:blocked:forbidden)
-      [ -n "$operation_completed_at" ] || {
-        policy_operation_status=invalid-record
-        operation_diagnostic="invalid operation record at $operation_record_path: terminal failure has no completion time; run $operation_retry_command"
-        return 0
-      }
+      [ -n "$operation_completed_at" ] || { operation_record_invalid "terminal failure has no completion time"; return 0; }
       ;;
     network-degraded:degraded-fail:blocked:diagnostic-only:forbidden|network-degraded:degraded-fail:blocked:blocked:forbidden|readiness-failed:fail:blocked:diagnostic-only:forbidden|readiness-failed:fail:blocked:blocked:forbidden)
-      [ -n "$operation_completed_at" ] || {
-        policy_operation_status=invalid-record
-        operation_diagnostic="invalid operation record at $operation_record_path: terminal degraded/readiness record has no completion time; run $operation_retry_command"
-        return 0
-      }
+      [ -n "$operation_completed_at" ] || { operation_record_invalid "terminal degraded/readiness record has no completion time"; return 0; }
       ;;
     complete:pass:allowed:allowed:permitted)
       [ -n "$operation_completed_at" ] && [ "$operation_readiness_result" = ready ] || {
-        policy_operation_status=invalid-record
-        operation_diagnostic="invalid operation record at $operation_record_path: incomplete complete record; run $operation_retry_command"
-        return 0
+        operation_record_invalid "incomplete complete record"; return 0;
       }
       ;;
-    *)
-      policy_operation_status=invalid-record
-      operation_diagnostic="invalid operation record at $operation_record_path: inconsistent status fields; run $operation_retry_command"
-      return 0
+    complete:fail:blocked:blocked:failed)
+      operation_record_invalid "completed operation record cleanup failed"; return 0
       ;;
+    *) operation_record_invalid "inconsistent status fields"; return 0 ;;
   esac
+  case "$operation_status:$operation_phase:$operation_readiness_result" in
+    in-progress:preflight:not-applicable|in-progress:removal:not-applicable|in-progress:creation:not-applicable|in-progress:required-network:not-applicable|in-progress:nested-readiness:starting|in-progress:nested-readiness:replacement-attempted|in-progress:completion:ready)
+      ;;
+    removal-failed:preflight:not-applicable|removal-failed:removal:not-applicable|removal-failed:creation:not-applicable|removal-failed:required-network:not-applicable|removal-failed:nested-readiness:not-applicable|removal-failed:completion:not-applicable|absent-after-failure:preflight:not-applicable|absent-after-failure:removal:not-applicable|absent-after-failure:creation:not-applicable|absent-after-failure:required-network:not-applicable|absent-after-failure:nested-readiness:not-applicable|absent-after-failure:completion:not-applicable)
+      ;;
+    network-degraded:required-network:not-applicable)
+      ;;
+    readiness-failed:nested-readiness:failed-but-running|readiness-failed:nested-readiness:failed-and-exited)
+      ;;
+    complete:completion:ready)
+      ;;
+    *) operation_record_invalid "status, phase, and readiness are inconsistent"; return 0 ;;
+  esac
+  operation_state_publish
 }
 
 operation_result_record() {
+  operation_state_publish
   printf 'record_path=%s\n' "$operation_record_path"
   printf 'operation_id=%s\n' "$operation_id"
+  printf 'phase=%s\n' "$operation_phase"
   printf 'status=%s\n' "$operation_status"
   printf 'task_status=%s\n' "$operation_task_status"
   printf 'agent_execution=%s\n' "$operation_agent_execution"
@@ -855,8 +1055,6 @@ operation_result_record() {
   printf 'retry_command=%s\n' "$operation_retry_command"
   printf 'record_cleanup=%s\n' "$operation_record_cleanup"
   printf 'container_name=%s\n' "$cname"
-  printf 'old_container_id=%s\n' "$operation_old_container_id"
-  printf 'new_container_id=%s\n' "$operation_new_container_id"
   printf 'readiness_result=%s\n' "$operation_readiness_result"
   printf 'network_outcomes=%s\n' "$operation_network_outcomes"
   printf 'image_reference=%s\n' "$operation_image_reference"
@@ -864,6 +1062,7 @@ operation_result_record() {
   printf 'jj_volume=%s\n' "$jvol"
   printf 'failed_phase=%s\n' "$operation_failed_phase"
   printf 'diagnostic=%s\n' "$operation_diagnostic"
+  operation_state_record
 }
 
 # Reset and populate the deterministic Task 5 record. The source tier entries retain every tier,
@@ -2466,6 +2665,8 @@ policy_decision_record() {
   printf 'explicit_apply_required=%s\n' "$policy_decision_explicit_apply_required"
   printf 'operation_status=%s\n' "$policy_operation_status"
   printf 'readiness_result=%s\n' "$policy_readiness_result"
+  printf 'operation_state_valid=%s\n' "$operation_state_valid"
+  printf 'operation_state_update_allowed=%s\n' "$operation_state_update_allowed"
 }
 
 policy_decision_overlay_valid() {
@@ -2474,7 +2675,7 @@ policy_decision_overlay_valid() {
     *) return 1 ;;
   esac
   case "${policy_readiness_result:-not-applicable}" in
-    not-applicable|ready|failed-but-running|failed-and-exited) return 0 ;;
+    not-applicable|starting|ready|failed-but-running|failed-and-exited|replacement-attempted) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2498,7 +2699,20 @@ policy_decision_policy_matches_recorded() {
 }
 
 policy_decision_apply_overlay() {
-  local status="${policy_operation_status:-none}" readiness="${policy_readiness_result:-not-applicable}"
+  local status="${operation_state_terminal_status:-${policy_operation_status:-none}}"
+  local readiness="${operation_state_readiness_state:-${policy_readiness_result:-not-applicable}}"
+  case "$readiness" in
+    starting|replacement-attempted)
+      policy_decision_kind=refuse
+      policy_decision_reason_code="readiness-$readiness"
+      policy_decision_mutation_allowed=0
+      policy_decision_execution_allowed=0
+      policy_decision_explicit_exec_mode=blocked
+      policy_decision_update_allowed=0
+      policy_decision_explicit_apply_required=1
+      return 0
+      ;;
+  esac
   [ "$status" = none ] || [ "$status" = complete ] || [ "$readiness" = not-applicable ] || [ "$readiness" = ready ] || {
     policy_decision_kind=refuse
     policy_decision_reason_code="operation-$status"
@@ -2579,6 +2793,7 @@ policy_decide() {
     start|exec|rebuild|config) ;;
     *) return 1 ;;
   esac
+  operation_state_publish
   policy_decision_overlay_valid || {
     policy_decision_reason_code=invalid-operation-overlay
     return 0
@@ -2814,10 +3029,12 @@ policy_operation_begin() {
   if [ "${policy_operation_retry:-0}" = 1 ]; then
     case "$policy_operation_status" in
       none|complete) ;;
+      invalid-record) operation_state_publish; return 0 ;;
       *) policy_retry_reconcile=1 ;;
     esac
     policy_operation_status=none
     policy_readiness_result=not-applicable
+    operation_state_publish
   fi
 }
 
@@ -3254,6 +3471,7 @@ cmd_start() {
   # background; `ab claude`/`ab exec` do not need to wait for it, and inner-docker callers find
   # it ready shortly after.
   operation_phase=nested-readiness
+  operation_readiness_result=starting
   operation_record_update nested-readiness in-progress "" || exit 1
   if ! wait_jj_state; then
     if is_running; then operation_readiness_result=failed-but-running; else operation_readiness_result=failed-and-exited; fi
@@ -3318,6 +3536,13 @@ cmd_config() {
   printf '  %-18s %s (source: %s)\n' "updates.check" "$([ "$policy_updates_check" = 1 ] && echo true || echo false)" "$policy_updates_source"
   printf '  recorded container: %s%s\n' "$policy_recorded_status" \
     "${policy_recorded_detail:+ — $policy_recorded_detail}"
+  echo "  operation state:    $operation_state_terminal_status (phase: ${operation_state_phase:-none})"
+  printf '  operation retry:    %s\n' "$operation_state_retry_command"
+  printf '  operation diagnostic: %s\n' "${operation_state_diagnostic:-none}"
+  printf '  operation permissions: execution=%s mutation=%s update=%s diagnostic=%s cleanup=%s\n' \
+    "$operation_state_execution_allowed" "$operation_state_mutation_allowed" \
+    "$operation_state_update_allowed" "$operation_state_diagnostic_allowed" \
+    "$operation_state_cleanup_allowed"
   if [ "$policy_recorded_status" = valid ] || [ "$policy_recorded_status" = stale ] || [ "$policy_recorded_status" = legacy ]; then
     printf '  recorded values:    git=%s github=%s ssh=%s digest=%s\n' \
     "$([ "$policy_recorded_git_enabled" = 1 ] && echo true || echo false)" \
@@ -3523,7 +3748,7 @@ main() {
     policy_operation_mode=start
     policy_operation_retry="$policy_apply"
     policy_operation_begin || exit 1
-    policy_preflight start
+    policy_preflight start || exit 1
     policy_resolution_recheck start || exit 1
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     cmd_start
@@ -3532,14 +3757,25 @@ main() {
     policy_operation_mode=stop
     policy_operation_retry=0
     policy_operation_begin || exit 1
-    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
-    if exists; then docker stop "$cname" >/dev/null && echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"; else echo "agentbox: $cname does not exist"; fi
+    policy_load_host || exit 1
+    operation_state_update_allowed && [ "$policy_updates_check" = 1 ] && check_for_update
+    if exists; then
+      if docker stop "$cname" >/dev/null; then
+        echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"
+      else
+        echo "agentbox: failed to stop $cname (the operation record and named volumes were kept)" >&2
+        exit 1
+      fi
+    else
+      echo "agentbox: $cname does not exist"
+    fi
     ;;
   destroy)
     policy_operation_mode=destroy
     policy_operation_retry=0
     policy_operation_begin || exit 1
-    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
+    policy_load_host || exit 1
+    operation_state_update_allowed && [ "$policy_updates_check" = 1 ] && check_for_update
     # Attempt BOTH removals independently and report every failure: a failed container rm
     # must not skip the volume rm (or vice versa). Exit non-zero if either failed so a
     # partial failure isn't masked (e.g. by `ab destroy && ab start`). Explicit ifs, not
@@ -3577,7 +3813,9 @@ main() {
     policy_operation_mode=status
     policy_operation_retry=0
     policy_operation_begin || exit 1
-    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
+    policy_load_host || exit 1
+    operation_state_record
+    operation_state_update_allowed && [ "$policy_updates_check" = 1 ] && check_for_update
     is_running && echo "running: $cname" || echo "not running: $cname"
     ;;
   config)
@@ -3599,8 +3837,15 @@ main() {
     policy_operation_mode=logs
     policy_operation_retry=0
     policy_operation_begin || exit 1
-    policy_load_host; [ "$policy_updates_check" = 1 ] && check_for_update
-    docker logs --tail 80 "$cname" 2>&1 | tail -80
+    policy_load_host || exit 1
+    operation_state_record
+    operation_state_update_allowed && [ "$policy_updates_check" = 1 ] && check_for_update
+    if exists; then
+      docker logs --tail 80 "$cname" 2>&1 | tail -80
+    else
+      echo "agentbox: no container $cname; operation state above is the durable diagnostic" >&2
+      exit 1
+    fi
     ;;
   exec)
     shift
@@ -3608,7 +3853,7 @@ main() {
     policy_operation_mode="exec"
     policy_operation_retry=0
     policy_operation_begin || exit 1
-    policy_preflight exec
+    policy_preflight exec || exit 1
     policy_resolution_recheck exec || exit 1
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     cmd_exec "${policy_command_args[@]}"
@@ -3619,7 +3864,7 @@ main() {
     policy_operation_mode="rebuild"
     policy_operation_retry=1
     policy_operation_begin || exit 1
-    policy_preflight rebuild
+    policy_preflight rebuild || exit 1
     policy_resolution_recheck rebuild || exit 1
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
     require_sysbox
@@ -3675,6 +3920,7 @@ main() {
       operation_record_failure network-degraded "one or more optional networks could not be attached" || exit 1
     fi
     operation_phase=nested-readiness
+    operation_readiness_result=starting
     operation_record_update nested-readiness in-progress "" || exit 1
     if ! readiness_adapter; then
       operation_record_failure readiness-failed "nested Docker readiness failed: $operation_readiness_result" || exit 1
@@ -3697,7 +3943,7 @@ main() {
   # (stops at the first non-comment line, so code is never shown).
   "" | -h | --help) awk 'NR>1 && /^#/{sub(/^#?/,""); print; next} NR>1{exit}' "$0" ;;
   --version) echo "agentbox $AB_VERSION"; exit 0 ;;
-  *) parse_convenience_options "$@"; policy_operation_mode="exec"; policy_operation_retry=0; policy_operation_begin || exit 1; policy_preflight exec; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
+  *) parse_convenience_options "$@"; policy_operation_mode="exec"; policy_operation_retry=0; policy_operation_begin || exit 1; policy_preflight exec || exit 1; policy_resolution_recheck exec || exit 1; [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update; cmd_exec "${policy_command_args[@]}" ;;
   esac
 }
 
