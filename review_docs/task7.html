@@ -61,30 +61,10 @@
     <table>
       <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Impact</th><th>Required correction</th></tr></thead>
       <tbody>
-        <tr>
-          <td>R001</td><td>High</td>
-          <td><code>bin/ab:3058-3065</code></td>
-          <td>Resolved. An existing stopped container now takes the same image-reuse path as running policy apply, so policy-only reconciliation does not build a replacement image.</td>
-          <td>No further correction required. The stopped-mismatch regression asserts that <code>build_image</code> is not called and the existing image is used.</td>
-        </tr>
-        <tr>
-          <td>R002</td><td>High</td>
-          <td><code>bin/ab:2892-2897</code>, <code>bin/ab:745-752</code></td>
-          <td>Resolved. Failure status selection now uses the contract’s existing statuses based on whether the old container remains or the logical container is absent; <code>creation-failed</code> is no longer written or accepted.</td>
-          <td>No further correction required. Focused tests cover the old-container and absent-container failure handoffs and their permissions.</td>
-        </tr>
-        <tr>
-          <td>R003</td><td>Medium</td>
-          <td><code>bin/ab:755-773</code></td>
-          <td>Resolved. The operation-result handoff now emits both old and new container IDs, including empty values when an ID is unknown.</td>
-          <td>No further correction required. Focused tests assert both known IDs are present.</td>
-        </tr>
-        <tr>
-          <td>R004</td><td>High</td>
-          <td><code>bin/ab:2319-2338</code>, <code>bin/ab:2769-2880</code>, <code>tests/run.sh:1954-1980</code></td>
-          <td>Resolved. <code>policy_verify_applied_state</code> now retains the snapshot while <code>policy_verify_task4_mounts</code> and <code>policy_verify_required_mounts</code> compare source, mode, type, destination, and named-volume identity, then resets the snapshot on exit.</td>
-          <td>No further correction required. The focused mismatch tests and the production snapshot-parser/verifier seam cover valid verification, mode/source/volume mismatches, and cleanup after verification.</td>
-        </tr>
+        <tr><td>R001</td><td>High</td><td><code>bin/ab:3058-3065</code></td><td>Resolved. An existing stopped container now takes the same image-reuse path as running policy apply, so policy-only reconciliation does not build a replacement image.</td><td>No further correction required. The stopped-mismatch regression asserts that <code>build_image</code> is not called and the existing image is used.</td></tr>
+        <tr><td>R002</td><td>High</td><td><code>bin/ab:2892-2897</code>, <code>bin/ab:745-752</code></td><td>Resolved. Failure status selection now uses the contract’s existing statuses based on whether the old container remains or the logical container is absent; <code>creation-failed</code> is no longer written or accepted.</td><td>No further correction required. Focused tests cover the old-container and absent-container failure handoffs and their permissions.</td></tr>
+        <tr><td>R003</td><td>Medium</td><td><code>bin/ab:755-773</code></td><td>Resolved. The operation-result handoff now emits both old and new container IDs, including empty values when an ID is unknown.</td><td>No further correction required. Focused tests assert both known IDs are present.</td></tr>
+        <tr><td>R004</td><td>High</td><td><code>bin/ab:2319-2338</code>, <code>bin/ab:2769-2880</code>, <code>tests/run.sh:1954-1980</code></td><td>Resolved. <code>policy_verify_applied_state</code> now retains the snapshot while <code>policy_verify_task4_mounts</code> and <code>policy_verify_required_mounts</code> compare source, mode, type, destination, and named-volume identity, then resets the snapshot on exit.</td><td>No further correction required. The focused mismatch tests and the production snapshot-parser/verifier seam cover valid verification, mode/source/volume mismatches, and cleanup after verification.</td></tr>
       </tbody>
     </table>
 

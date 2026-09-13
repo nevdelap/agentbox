@@ -710,7 +710,13 @@ operation_record_terminal() {
 }
 
 operation_record_load() {
-  local key value
+  local key value line record_line_re
+  local -a required_keys=(
+    operation_id started_at phase status container_name policy_digest image_reference
+    inner_docker_volume jj_volume network_outcomes diagnostic readiness_result task_status
+    agent_execution explicit_exec retry_command record_cleanup
+  )
+  declare -A seen_keys=()
   operation_record_reset_result
   operation_record_prepare_path || return 1
   [ -f "$operation_record_path" ] || {
@@ -718,12 +724,30 @@ operation_record_load() {
     policy_readiness_result=not-applicable
     return 0
   }
-  while IFS='=' read -r key value || [ -n "$key" ]; do
-    key="${key//[[:space:]]/}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    value="${value#\"}"
-    value="${value%\"}"
+  [ -r "$operation_record_path" ] || {
+    policy_operation_status=invalid-record
+    policy_readiness_result=not-applicable
+    operation_diagnostic="invalid operation record at $operation_record_path: record is not readable; run $operation_retry_command"
+    return 0
+  }
+  record_line_re='^([a-z_]+)[[:space:]]*=[[:space:]]*"(([^"\\]|\\["\\])*)"$'
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ $record_line_re ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+    else
+      policy_operation_status=invalid-record
+      policy_readiness_result=not-applicable
+      operation_diagnostic="invalid operation record at $operation_record_path: malformed line; run $operation_retry_command"
+      return 0
+    fi
+    if [ "${seen_keys[$key]+present}" = present ]; then
+      policy_operation_status=invalid-record
+      policy_readiness_result=not-applicable
+      operation_diagnostic="invalid operation record at $operation_record_path: duplicate field $key; run $operation_retry_command"
+      return 0
+    fi
+    seen_keys["$key"]=1
     case "$key" in
       status) operation_status="$value"; policy_operation_status="$value" ;;
       readiness_result) operation_readiness_result="$value"; policy_readiness_result="$value" ;;
@@ -734,21 +758,90 @@ operation_record_load() {
       container_name) : ;;
       old_container_id) operation_old_container_id="$value" ;;
       new_container_id) operation_new_container_id="$value" ;;
+      policy_digest) : ;;
       image_reference) operation_image_reference="$value" ;;
       network_outcomes) operation_network_outcomes="$value" ;;
       diagnostic) operation_diagnostic="$value" ;;
       retry_command) operation_retry_command="$value" ;;
       record_cleanup) operation_record_cleanup="$value" ;;
       failed_phase) operation_failed_phase="$value" ;;
+      inner_docker_volume|jj_volume|task_status|agent_execution|explicit_exec) ;;
+      *)
+        policy_operation_status=invalid-record
+        policy_readiness_result=not-applicable
+        operation_diagnostic="invalid operation record at $operation_record_path: unknown field $key; run $operation_retry_command"
+        return 0
+        ;;
     esac
   done <"$operation_record_path"
+  for key in "${required_keys[@]}"; do
+    if [ "${seen_keys[$key]+present}" != present ]; then
+      policy_operation_status=invalid-record
+      policy_readiness_result=not-applicable
+      operation_diagnostic="invalid operation record at $operation_record_path: missing field $key; run $operation_retry_command"
+      return 0
+    fi
+  done
   case "$policy_operation_status" in
     none|in-progress|removal-failed|absent-after-failure|network-degraded|readiness-failed|complete) ;;
-    *) policy_operation_status=none; policy_readiness_result=not-applicable ;;
+    *)
+      policy_operation_status=invalid-record
+      policy_readiness_result=not-applicable
+      operation_diagnostic="invalid operation record at $operation_record_path: unknown status $operation_status; run $operation_retry_command"
+      return 0
+      ;;
   esac
   case "$policy_readiness_result" in
     not-applicable|ready|failed-but-running|failed-and-exited) ;;
-    *) policy_readiness_result=not-applicable ;;
+    *)
+      policy_operation_status=invalid-record
+      policy_readiness_result=not-applicable
+      operation_diagnostic="invalid operation record at $operation_record_path: unknown readiness result $operation_readiness_result; run $operation_retry_command"
+      return 0
+      ;;
+  esac
+  case "$operation_phase" in
+    preflight|removal|creation|required-network|nested-readiness|completion) ;;
+    *)
+      policy_operation_status=invalid-record
+      operation_diagnostic="invalid operation record at $operation_record_path: unknown phase $operation_phase; run $operation_retry_command"
+      return 0
+      ;;
+  esac
+  case "$operation_status:$operation_task_status:$operation_agent_execution:$operation_explicit_exec:$operation_record_cleanup" in
+    in-progress:fail:blocked:blocked:forbidden)
+      [ -z "$operation_completed_at" ] || {
+        policy_operation_status=invalid-record
+        operation_diagnostic="invalid operation record at $operation_record_path: in-progress record is completed; run $operation_retry_command"
+        return 0
+      }
+      ;;
+    removal-failed:fail:blocked:blocked:forbidden|absent-after-failure:fail:blocked:blocked:forbidden)
+      [ -n "$operation_completed_at" ] || {
+        policy_operation_status=invalid-record
+        operation_diagnostic="invalid operation record at $operation_record_path: terminal failure has no completion time; run $operation_retry_command"
+        return 0
+      }
+      ;;
+    network-degraded:degraded-fail:blocked:diagnostic-only:forbidden|network-degraded:degraded-fail:blocked:blocked:forbidden|readiness-failed:fail:blocked:diagnostic-only:forbidden|readiness-failed:fail:blocked:blocked:forbidden)
+      [ -n "$operation_completed_at" ] || {
+        policy_operation_status=invalid-record
+        operation_diagnostic="invalid operation record at $operation_record_path: terminal degraded/readiness record has no completion time; run $operation_retry_command"
+        return 0
+      }
+      ;;
+    complete:pass:allowed:allowed:permitted)
+      [ -n "$operation_completed_at" ] && [ "$operation_readiness_result" = ready ] || {
+        policy_operation_status=invalid-record
+        operation_diagnostic="invalid operation record at $operation_record_path: incomplete complete record; run $operation_retry_command"
+        return 0
+      }
+      ;;
+    *)
+      policy_operation_status=invalid-record
+      operation_diagnostic="invalid operation record at $operation_record_path: inconsistent status fields; run $operation_retry_command"
+      return 0
+      ;;
   esac
 }
 
@@ -2377,7 +2470,7 @@ policy_decision_record() {
 
 policy_decision_overlay_valid() {
   case "${policy_operation_status:-none}" in
-    none|in-progress|removal-failed|absent-after-failure|network-degraded|readiness-failed|complete) ;;
+    none|invalid-record|in-progress|removal-failed|absent-after-failure|network-degraded|readiness-failed|complete) ;;
     *) return 1 ;;
   esac
   case "${policy_readiness_result:-not-applicable}" in
@@ -2417,6 +2510,16 @@ policy_decision_apply_overlay() {
   }
 
   case "$status" in
+    invalid-record)
+      policy_decision_kind=refuse
+      policy_decision_reason_code=invalid-operation-record
+      policy_decision_mutation_allowed=0
+      policy_decision_execution_allowed=0
+      policy_decision_explicit_exec_mode=blocked
+      policy_decision_update_allowed=0
+      policy_decision_explicit_apply_required=1
+      return 0
+      ;;
     none|complete)
       case "$readiness" in
         not-applicable|ready) return 0 ;;
@@ -2689,7 +2792,11 @@ policy_preflight() {
        [ "$policy_decision_explicit_exec_mode" = diagnostic-only ]; then
       return 0
     fi
-    policy_fail "${policy_decision_reason_code}; use the explicit apply/reconciliation path"
+    if [ "$policy_operation_status" = invalid-record ]; then
+      policy_fail "${operation_diagnostic:-invalid operation record at ${operation_record_path:-unknown}; run ab start --apply or ab rebuild}"
+    else
+      policy_fail "${policy_decision_reason_code}; use the explicit apply/reconciliation path"
+    fi
     return 1
   fi
 }
@@ -3075,6 +3182,11 @@ cmd_start() {
   if exists && [ "$policy_needs_recreate" = 0 ]; then
     # An existing container keeps the bind mounts it was created with — `mounts` edits only take
     # effect on a fresh `docker run`, hence the `ab destroy && ab start` in the README.
+    # The verifier compares the live container with this expected specification on the stopped
+    # in-place path too, so assemble it before docker start instead of leaving the maps absent.
+    if ! mount_spec_build; then
+      operation_record_failure removal-failed "policy mount assembly failed" || exit 1
+    fi
     echo "agentbox: starting $cname ..." >&2
     operation_phase=creation
     operation_record_update creation in-progress "" || exit 1
