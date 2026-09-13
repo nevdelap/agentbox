@@ -172,13 +172,17 @@ the shared change remains clear to both roles.
 The local checkout is a Jujutsu repository, while GitHub CLI operations may still try to infer
 state through Git. To make the push and PR handoff reliable:
 
-- Before creating a PR, push the task bookmark and use explicit `--repo OWNER/REPO` and
-  `--head OWNER:bookmark` arguments. Do not rely on the current Git branch inferred from the
+- Push the task bookmark first, using the explicit jj remote and bookmark. Then verify the remote
+  bookmark/head with the same working transport, for example
+  `GIT_SSH_COMMAND="ssh -F $HOME/.ssh/config" jj git fetch --remote origin` followed by
+  `jj log -r 'BOOKMARK@origin'`. Do not rely on the current Git branch inferred from the
   Jujutsu working copy.
-- Treat PR creation as unverified until `gh pr create` returns a URL or a follow-up
+- After the remote head is verified, search for an existing PR with explicit `--repo OWNER/REPO`
+  and `--head BOOKMARK` arguments. If none exists, create it with explicit
+  `--repo OWNER/REPO --head OWNER:BOOKMARK --base main` arguments. If creation reports that a PR
+  already exists, inspect and use that PR; do not retry creation or report that no PR exists.
+- Treat PR handoff as unverified until `gh pr create` returns a URL or a follow-up
   `gh pr list`/`gh pr view` confirms the PR number, repository, base, head, and head commit.
-- If PR creation reports that a PR already exists, inspect and use that PR; do not retry creation
-  or report that no PR exists.
 - After identifying the PR number, run `gh pr checks PR_NUMBER --watch` and inspect
   `gh pr view PR_NUMBER` as needed. Do not report the task complete until every GitHub CI job has
   completed successfully. If no required checks are initially reported, inspect the workflow runs
@@ -191,6 +195,3 @@ state through Git. To make the push and PR handoff reliable:
   system include but also skips the configured key and can produce a misleading `publickey`
   failure. Never print or inspect private-key contents; checking SSH config paths, file modes,
   and non-secret agent identity listings is sufficient.
-- After a successful push, verify the explicit bookmark/repository head through `gh pr list` or
-  `gh pr view`, create the PR with `--repo OWNER/REPO --head OWNER:BOOKMARK --base main`, and
-  wait for every reported GitHub check. A local `just ci` pass does not replace the remote checks.
