@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2218,SC2032,SC2317,SC2329 # test mocks are intentionally indirect/forward-declared
+# shellcheck disable=SC2119,SC2120,SC2218,SC2032,SC2317,SC2329 # tests use intentional forwarding wrappers and indirect mocks
 # Unit tests for agentbox host-side logic:
 #   - bin/ab                :: compute_names, ab_config_candidates, ab_config_file,
 #                              ab_config_container_path, ab_parse_mounts_line, ab_mount_dest_owner,
@@ -1709,16 +1709,16 @@ eval "$_saved_gate_grants_recheck_fn"; eval "$_saved_gate_grants_validate_fn"
 policy_operation_requested=0
 
 # Explicit `ab exec` may reach Docker for diagnostics when the outer container is still running;
-# convenience commands must not inherit that exception. Override only the final shell exec so
+# convenience commands must not inherit that exception. Override only the final Docker call so
 # this proves the command handoff without starting Docker or replacing the test process.
-_saved_exec_builtin_fn="$(declare -f exec 2>/dev/null || true)"
+_saved_diag_docker_fn="$(declare -f docker)"
 _saved_diag_require_fn="$(declare -f require_jj_state_mount)"
 _saved_diag_running_fn="$(declare -f is_running)"
 _saved_diag_recheck_fn="$(declare -f policy_resolution_recheck)"
 _saved_diag_grants_recheck_fn="$(declare -f grant_sources_recheck)"
 _saved_diag_grants_validate_fn="$(declare -f grant_sources_validate_snapshot)"
 mock_exec_args=()
-exec() { mock_exec_args=("$@"); return 0; }
+docker() { mock_exec_args=("$@"); return 0; }
 require_jj_state_mount() { :; }
 is_running() { return 0; }
 policy_resolution_recheck() { return 0; }
@@ -1731,14 +1731,14 @@ policy_readiness_result=not-applicable
 policy_recorded_lifecycle_state=running
 policy_decide exec
 cmd_exec diagnostics >/dev/null 2>&1
-assert_eq "diagnostic explicit exec reaches Docker boundary" docker "${mock_exec_args[0]}"
+assert_eq "diagnostic explicit exec reaches Docker boundary" exec "${mock_exec_args[0]}"
 assert_eq "diagnostic explicit exec reaches requested command" 1 \
   "$(printf '%s\n' "${mock_exec_args[@]}" | grep -c 'diagnostics')"
 policy_explicit_exec_command=0
 (_out="$(cmd_exec blocked 2>&1)"; _rc=$?; [ "$_rc" = 1 ])
 assert_eq "convenience path stays blocked during degradation" 0 "$?"
-unset -f exec require_jj_state_mount is_running policy_resolution_recheck grant_sources_recheck grant_sources_validate_snapshot
-[ -n "$_saved_exec_builtin_fn" ] && eval "$_saved_exec_builtin_fn"
+unset -f docker require_jj_state_mount is_running policy_resolution_recheck grant_sources_recheck grant_sources_validate_snapshot
+eval "$_saved_diag_docker_fn"
 eval "$_saved_diag_require_fn"
 eval "$_saved_diag_running_fn"
 eval "$_saved_diag_recheck_fn"
@@ -1806,7 +1806,7 @@ for _entry_spec in "start:start" "build:rebuild" "rebuild:rebuild" \
   entry_overlay=in-progress
   entry_run "$_entry_command"
   _entry_rc=$?
-  assert_eq "main $_entry_command refuses in-progress operation" 1 "$_entry_rc"
+  assert_eq "main $_entry_command refuses in-progress operation" 2 "$_entry_rc"
   assert_eq "main $_entry_command invokes $_entry_mode preflight" 1 \
     "$(grep -c "^preflight:$_entry_mode$" "$_entry_log")"
   assert_eq "main $_entry_command has no post-gate side effect" 0 \
@@ -2434,6 +2434,7 @@ _task8_record="$operation_record_path"
 printf 'stable operation record\n' >"$_task8_record"
 _task8_dispatch_state=removal-failed
 policy_operation_begin() {
+  operation_state_terminal_status=""
   case "$_task8_dispatch_state" in
     in-progress)
       operation_state_phase="nested-readiness"; operation_state_readiness_state=starting
@@ -2448,6 +2449,12 @@ policy_operation_begin() {
     readiness-failed-exited)
       operation_state_terminal_status="readiness-failed"
       operation_state_phase="nested-readiness"; operation_state_readiness_state="failed-and-exited"
+      ;;
+    stale)
+      operation_state_terminal_status=none
+      operation_state_phase=preflight; operation_state_readiness_state="not-applicable"
+      policy_decision_kind=refuse
+      policy_decision_reason_code=stale-recorded-state
       ;;
   esac
   [ "$_task8_dispatch_state" = invalid-record ] && operation_state_valid=0 || operation_state_valid=1
@@ -2478,19 +2485,31 @@ cmd_start() { printf 'start\n' >>"$_task8_trace"; return 0; }
 cmd_exec() { printf 'exec\n' >>"$_task8_trace"; return 0; }
 
 _task8_dispatch_states=(in-progress removal-failed absent-after-failure network-degraded
-                        readiness-failed-running readiness-failed-exited invalid-record)
+                        readiness-failed-running readiness-failed-exited stale invalid-record)
 _task8_dispatch_commands=(start build rebuild claude codex bash exec)
 for _task8_dispatch_state in "${_task8_dispatch_states[@]}"; do
   for _task8_dispatch_cmd in "${_task8_dispatch_commands[@]}"; do
     : >"$_task8_trace"
     _task8_before="$(sha256sum "$_task8_record")"
     case "$_task8_dispatch_cmd" in
-      start|build|rebuild) ( main "$_task8_dispatch_cmd" >/dev/null 2>&1 ); _task8_rc=$? ;;
-      exec) ( main exec -- true >/dev/null 2>&1 ); _task8_rc=$? ;;
-      *) ( main "$_task8_dispatch_cmd" --test >/dev/null 2>&1 ); _task8_rc=$? ;;
+      start|build|rebuild) _task8_output="$( ( main "$_task8_dispatch_cmd" ) 2>&1 )"; _task8_rc=$? ;;
+      exec) _task8_output="$( ( main exec -- true ) 2>&1 )"; _task8_rc=$? ;;
+      *) _task8_output="$( ( main "$_task8_dispatch_cmd" --test ) 2>&1 )"; _task8_rc=$? ;;
     esac
     _task8_after="$(sha256sum "$_task8_record")"
-    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd refuses" 1 "$_task8_rc"
+    case "$_task8_dispatch_state" in
+      invalid-record) _task8_expected_result="invalid-state" ;;
+      *) _task8_expected_result=refused ;;
+    esac
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd refuses" 2 "$_task8_rc"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd has one result" 1 \
+      "$(printf '%s\n' "$_task8_output" | grep -c '^result=' || true)"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd result vocabulary" 1 \
+      "$(printf '%s\n' "$_task8_output" | grep -c "^result=$_task8_expected_result$")"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd reports exit" 1 \
+      "$(printf '%s\n' "$_task8_output" | grep -c '^exit_status=2$')"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd reports permissions" 1 \
+      "$(printf '%s\n' "$_task8_output" | grep -c '^execution_allowed=')"
     assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd keeps record" \
       "$_task8_before" "$_task8_after"
     assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd avoids Docker" 0 \
@@ -2549,6 +2568,662 @@ policy_operation_requested="$_saved_task8_requested"
 XDG_STATE_HOME="$_saved_task8_xdg"; lock_identity="$_saved_task8_identity"
 cname="$_saved_task8_cname"; dvol="$_saved_task8_dvol"; jvol="$_saved_task8_jvol"
 rm -rf "$_task8_state"
+
+echo
+echo "Task 9 command reports (bin/ab)"
+# Exercise the public start/stop/config boundaries with a small lifecycle seam. The start mock
+# covers the idempotent running case, an early failure before a durable operation record, and a
+# complete operation report; the read-only commands prove stop-absent and config-init do not
+# start a container or perform unrelated work.
+_saved_task9_main_parse_runtime_fn="$(declare -f parse_runtime_options)"
+_saved_task9_main_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task9_main_load_fn="$(declare -f policy_load_host)"
+_saved_task9_main_preflight_fn="$(declare -f policy_preflight)"
+_saved_task9_main_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task9_main_update_fn="$(declare -f check_for_update)"
+_saved_task9_main_start_fn="$(declare -f cmd_start)"
+_saved_task9_main_exec_fn="$(declare -f cmd_exec)"
+_saved_task9_main_config_fn="$(declare -f cmd_config)"
+_saved_task9_main_init_fn="$(declare -f cmd_config_init)"
+_saved_task9_main_exists_fn="$(declare -f exists)"
+_saved_task9_main_running_fn="$(declare -f is_running)"
+_saved_task9_main_docker_fn="$(declare -f docker)"
+_task9_main_trace="$(mktemp)"
+task9_main_reset() {
+  [ "${_task9_fail_begin:-0}" = 1 ] && return 1
+  operation_state_reset
+  operation_record_active=0
+  operation_status=""
+  policy_operation_status=none
+  policy_readiness_result=not-applicable
+  policy_decision_kind=""
+  policy_decision_reason_code=""
+  policy_decision_explicit_exec_mode=allowed
+  policy_updates_check=0
+  operation_state_publish
+}
+parse_runtime_options() { return 0; }
+policy_operation_begin() { task9_main_reset || return 1; return 0; }
+policy_load_host() {
+  [ "${_task9_fail_load:-0}" = 1 ] && return 1
+  policy_updates_check=0
+  return 0
+}
+policy_preflight() { policy_decision_update_allowed=0; return 0; }
+policy_resolution_recheck() { return 0; }
+check_for_update() { echo update >>"$_task9_main_trace"; }
+task9_main_start_mode=no-op
+cmd_start() {
+  case "$task9_main_start_mode" in
+    no-op) return 0 ;;
+    fail) return 1 ;;
+    complete)
+      policy_operation_status=complete
+      policy_readiness_result=ready
+      operation_phase=completion
+      command_report_emit
+      return 0
+      ;;
+  esac
+}
+_task9_exec_rc=0
+cmd_exec() { echo exec >>"$_task9_main_trace"; return "$_task9_exec_rc"; }
+cmd_config() { echo config >>"$_task9_main_trace"; return 0; }
+cmd_config_init() {
+  [ "${1:-}" = --bogus ] && return 1
+  echo config-init >>"$_task9_main_trace"
+  return 0
+}
+_task9_exists=0; _task9_running=0; _task9_docker_rc=0
+exists() { [ "$_task9_exists" = 1 ]; }
+is_running() { [ "$_task9_running" = 1 ]; }
+docker() {
+  echo "docker:$*" >>"$_task9_main_trace"
+  if [ "${1:-}" = logs ]; then
+    printf 'bounded log line\n'
+    return "$_task9_docker_rc"
+  fi
+  return 0
+}
+
+_task9_main_output="$( ( main start ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public running start succeeds" 0 "$_task9_main_rc"
+assert_eq "public running start has one result" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=success$')"
+assert_eq "public running start reason" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=already-running$')"
+
+task9_main_start_mode=fail
+_task9_main_output="$( ( main start ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public early start failure exits one" 1 "$_task9_main_rc"
+assert_eq "public early start failure has one result" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
+assert_eq "public early start failure reason" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=start-failed$')"
+
+task9_main_start_mode=complete
+_task9_main_output="$( ( main start ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public complete start succeeds" 0 "$_task9_main_rc"
+for _task9_key in result reason phase container_name container_id operation_id record_path readiness \
+  network operation_status task_status agent_execution explicit_exec record_cleanup image_reference \
+  named_volumes failed_phase retry_command cleanup_allowed execution_allowed mutation_allowed \
+  update_allowed diagnostic_allowed explicit_exec_mode diagnostic exit_status; do
+  assert_eq "public complete start has one $_task9_key" 1 \
+    "$(printf '%s\n' "$_task9_main_output" | grep -c "^$_task9_key=")"
+done
+
+_task9_main_output="$( ( main stop ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public absent stop is a report-only success" 0 "$_task9_main_rc"
+assert_eq "public absent stop result" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=report-only$')"
+assert_eq "public absent stop reason" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=stop-absent$')"
+
+_task9_main_output="$( ( main config init env ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public config init succeeds" 0 "$_task9_main_rc"
+assert_eq "public config init reports success" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=config-init$')"
+assert_eq "public config init does not start" 0 "$(grep -c '^start$' "$_task9_main_trace" || true)"
+assert_eq "public config init reaches init helper" 1 "$(grep -c '^config-init$' "$_task9_main_trace" || true)"
+
+_task9_main_output="$( ( main config ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public config report succeeds" 0 "$_task9_main_rc"
+assert_eq "public config report is report-only" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=report-only$')"
+assert_eq "public config report reaches config helper" 1 "$(grep -c '^config$' "$_task9_main_trace" || true)"
+
+_task9_exists=0; _task9_running=0
+_task9_main_output="$( ( main status ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public absent status succeeds" 0 "$_task9_main_rc"
+assert_eq "public absent status lifecycle" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^outer_lifecycle=absent$')"
+_task9_exists=1; _task9_running=0
+_task9_main_output="$( ( main status ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public stopped status succeeds" 0 "$_task9_main_rc"
+assert_eq "public stopped status lifecycle" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^outer_lifecycle=stopped$')"
+_task9_running=1
+_task9_main_output="$( ( main status ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public running status succeeds" 0 "$_task9_main_rc"
+assert_eq "public running status lifecycle" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^outer_lifecycle=running$')"
+
+_task9_docker_rc=0
+_task9_main_output="$( ( main logs ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public logs success" 0 "$_task9_main_rc"
+assert_eq "public logs report-only" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=report-only$')"
+assert_eq "public logs completion reason" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=logs-complete$')"
+assert_eq "public logs output bounded" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^bounded log line$')"
+_task9_docker_rc=1
+_task9_main_output="$( ( main logs ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public logs failure exits one" 1 "$_task9_main_rc"
+assert_eq "public logs failure result" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
+assert_eq "public logs failure reason" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=logs-failed$')"
+
+_task9_exec_rc=0
+_task9_main_output="$( ( main exec -- true ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public exec success" 0 "$_task9_main_rc"
+assert_eq "public exec completion result" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=exec-complete$')"
+_task9_exec_rc=7
+_task9_main_output="$( ( main exec -- true ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public exec preserves child failure" 7 "$_task9_main_rc"
+assert_eq "public exec failure result" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
+assert_eq "public exec failure reason" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=exec-failed$')"
+
+# Convenience entry points use the same final-result boundary as explicit exec. Exercise both
+# successful and failed children so none of the fixed command names can bypass the shared report.
+for _task9_convenience in claude codex bash; do
+  _task9_exec_rc=0
+  _task9_main_output="$( ( main "$_task9_convenience" --test ) 2>&1 )"; _task9_main_rc=$?
+  assert_eq "public $_task9_convenience success" 0 "$_task9_main_rc"
+  assert_eq "public $_task9_convenience has one result" 1 \
+    "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=success$')"
+  assert_eq "public $_task9_convenience completion reason" 1 \
+    "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=exec-complete$')"
+  _task9_exec_rc=7
+  _task9_main_output="$( ( main "$_task9_convenience" --test ) 2>&1 )"; _task9_main_rc=$?
+  assert_eq "public $_task9_convenience preserves child failure" 7 "$_task9_main_rc"
+  assert_eq "public $_task9_convenience failure result" 1 \
+    "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
+done
+
+# Build/rebuild also need a public success result. Mock only Docker/lifecycle seams so this tests
+# the real dispatch and report ordering without requiring a Sysbox host or image build.
+_saved_task9_build_require_fn="$(declare -f require_sysbox)"
+_saved_task9_build_record_begin_fn="$(declare -f operation_record_begin_if_needed)"
+_saved_task9_build_record_update_fn="$(declare -f operation_record_update)"
+_saved_task9_build_mutation_guard_fn="$(declare -f operation_mutation_guard)"
+_saved_task9_build_mount_guard_fn="$(declare -f operation_mount_guard)"
+_saved_task9_build_image_fn="$(declare -f build_image)"
+_saved_task9_build_prepare_fn="$(declare -f prepare_host_state)"
+_saved_task9_build_add_mounts_fn="$(declare -f add_policy_mounts)"
+_saved_task9_build_user_mounts_fn="$(declare -f build_user_mounts)"
+_saved_task9_build_verify_fn="$(declare -f policy_verify_applied_state)"
+_saved_task9_build_network_fn="$(declare -f connect_networks)"
+_saved_task9_build_ready_fn="$(declare -f readiness_adapter)"
+_saved_task9_build_terminal_fn="$(declare -f operation_record_terminal)"
+_saved_task9_build_result_fn="$(declare -f operation_result_record)"
+_saved_task9_build_prune_fn="$(declare -f prune_images)"
+require_sysbox() { :; }
+operation_record_begin_if_needed() {
+  operation_record_active=1; operation_status=in-progress; operation_phase=preflight
+  operation_task_status=fail; operation_readiness_result=not-applicable
+  operation_record_cleanup=forbidden; operation_state_publish
+}
+operation_record_update() {
+  operation_phase="$1"; operation_status="$2"; operation_diagnostic="${3:-}"
+  operation_state_publish
+}
+operation_mutation_guard() { return 0; }
+operation_mount_guard() { return 0; }
+build_image() { printf 'agentbox:task9-test-image'; }
+prepare_host_state() { :; }
+add_policy_mounts() { :; }
+build_user_mounts() { :; }
+policy_verify_applied_state() { return 0; }
+connect_networks() { operation_connect_network_status=ok; return 0; }
+readiness_adapter() { operation_readiness_result=ready; return 0; }
+operation_record_terminal() {
+  operation_status=complete; operation_task_status=pass; operation_phase=completion
+  operation_readiness_result=ready; operation_agent_execution=allowed
+  operation_explicit_exec=allowed; operation_record_cleanup=permitted
+  operation_state_publish
+}
+operation_result_record() { command_report_emit; }
+prune_images() { :; }
+exists() { return 1; }
+docker() {
+  case "${1:-}" in
+    inspect) printf 'task9-build-container-id' ;;
+    run) return 0 ;;
+    *) return 0 ;;
+  esac
+}
+for _task9_build_command in build rebuild; do
+  _task9_main_output="$( ( main "$_task9_build_command" ) 2>&1 )"; _task9_main_rc=$?
+  assert_eq "public $_task9_build_command succeeds" 0 "$_task9_main_rc"
+  assert_eq "public $_task9_build_command has one result" 1 \
+    "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=success$')"
+  assert_eq "public $_task9_build_command reports completion" 1 \
+    "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=operation-complete$')"
+done
+eval "$_saved_task9_build_require_fn"
+eval "$_saved_task9_build_record_begin_fn"
+eval "$_saved_task9_build_record_update_fn"
+eval "$_saved_task9_build_mutation_guard_fn"
+eval "$_saved_task9_build_mount_guard_fn"
+eval "$_saved_task9_build_image_fn"
+eval "$_saved_task9_build_prepare_fn"
+eval "$_saved_task9_build_add_mounts_fn"
+eval "$_saved_task9_build_user_mounts_fn"
+eval "$_saved_task9_build_verify_fn"
+eval "$_saved_task9_build_network_fn"
+eval "$_saved_task9_build_ready_fn"
+eval "$_saved_task9_build_terminal_fn"
+eval "$_saved_task9_build_result_fn"
+eval "$_saved_task9_build_prune_fn"
+
+_task9_fail_begin=1
+_task9_main_output="$( ( main status ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public operation-load failure exits one" 1 "$_task9_main_rc"
+assert_eq "public operation-load failure reports" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
+_task9_fail_begin=0; _task9_fail_load=1
+_task9_main_output="$( ( main status ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public host-load failure exits one" 1 "$_task9_main_rc"
+assert_eq "public host-load failure reports" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
+_task9_fail_load=0
+_task9_main_output="$( ( main config init --bogus ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "public config-init option failure exits one" 1 "$_task9_main_rc"
+assert_eq "public config-init option failure reports" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=config-init-failed$')"
+
+rm -f "$_task9_main_trace"
+unset -f parse_runtime_options policy_operation_begin policy_load_host policy_preflight
+unset -f policy_resolution_recheck check_for_update cmd_start cmd_exec cmd_config cmd_config_init
+unset -f exists is_running docker
+eval "$_saved_task9_main_parse_runtime_fn"
+eval "$_saved_task9_main_begin_fn"; eval "$_saved_task9_main_load_fn"
+eval "$_saved_task9_main_preflight_fn"; eval "$_saved_task9_main_recheck_fn"
+eval "$_saved_task9_main_update_fn"; eval "$_saved_task9_main_start_fn"
+eval "$_saved_task9_main_exec_fn"
+eval "$_saved_task9_main_config_fn"; eval "$_saved_task9_main_init_fn"
+eval "$_saved_task9_main_exists_fn"; eval "$_saved_task9_main_running_fn"
+eval "$_saved_task9_main_docker_fn"
+
+# Exercise running readiness failures through all diagnostic-safe read-only commands. The record
+# hash proves status/logs/stop do not erase or rewrite the durable failure state, while logs still
+# exposes bounded diagnostics and stop remains available to recover the outer container.
+_saved_task9_readiness_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task9_readiness_load_fn="$(declare -f policy_load_host)"
+_saved_task9_readiness_exists_fn="$(declare -f exists)"
+_saved_task9_readiness_running_fn="$(declare -f is_running)"
+_saved_task9_readiness_docker_fn="$(declare -f docker)"
+_task9_readiness_record="$(mktemp)"
+printf 'readiness failure record\n' >"$_task9_readiness_record"
+_task9_readiness_trace="$(mktemp)"
+task9_readiness_fixture() {
+  policy_operation_requested=1
+  operation_state_reset
+  operation_record_active=1; operation_status="readiness-failed"
+  operation_phase=nested-readiness; operation_readiness_result="${_task9_readiness_kind:-failed-but-running}"
+  operation_task_status=fail; operation_agent_execution=blocked
+  operation_explicit_exec="diagnostic-only"; operation_record_cleanup=forbidden
+  operation_record_path="$_task9_readiness_record"
+  operation_id=task9-readiness; operation_diagnostic="nested daemon is not ready"
+  operation_retry_command="ab start --apply"; operation_failed_phase=nested-readiness
+  policy_operation_status="readiness-failed"
+  policy_readiness_result="${_task9_readiness_kind:-failed-but-running}"
+  policy_recorded_lifecycle_state=running
+  operation_state_publish
+}
+policy_operation_begin() { task9_readiness_fixture; return 0; }
+policy_load_host() { policy_updates_check=0; return 0; }
+exists() { return 0; }
+is_running() { return 0; }
+docker() {
+  printf 'docker:%s\n' "$*" >>"$_task9_readiness_trace"
+  case "${1:-}" in
+    logs) printf 'bounded nested-daemon diagnostic\n'; return 0 ;;
+    stop) return 0 ;;
+    *) return 0 ;;
+  esac
+}
+_task9_readiness_before="$(sha256sum "$_task9_readiness_record")"
+_task9_main_output="$( ( main status ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "running readiness status remains available" 1 "$_task9_main_rc"
+assert_eq "running readiness status reports failure" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
+assert_eq "running readiness status names state" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^readiness=failed-but-running$')"
+_task9_main_output="$( ( main logs ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "running readiness logs remains available" 0 "$_task9_main_rc"
+assert_eq "running readiness logs is report-only" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=report-only$')"
+assert_eq "running readiness logs is bounded" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^bounded nested-daemon diagnostic$')"
+assert_eq "running readiness logs names failed phase" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^failed_phase=nested-readiness$')"
+_task9_main_output="$( ( main stop ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "running readiness stop remains available" 0 "$_task9_main_rc"
+assert_eq "running readiness stop succeeds distinctly" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=stopped$')"
+_task9_readiness_after="$(sha256sum "$_task9_readiness_record")"
+assert_eq "readiness reports preserve record" "$_task9_readiness_before" "$_task9_readiness_after"
+assert_eq "readiness reports do not remove volumes" 0 \
+  "$(grep -Ec 'volume (rm|remove)|docker:volume rm' "$_task9_readiness_trace" || true)"
+# The daemon-exited terminal readiness result keeps the outer container available through the
+# same three commands and remains bounded/read-only.
+_task9_readiness_kind=failed-and-exited
+_task9_readiness_before="$(sha256sum "$_task9_readiness_record")"
+_task9_main_output="$( ( main status ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "exited readiness status remains available" 1 "$_task9_main_rc"
+assert_eq "exited readiness status names state" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^readiness=failed-and-exited$')"
+_task9_main_output="$( ( main logs ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "exited readiness logs remains available" 0 "$_task9_main_rc"
+assert_eq "exited readiness logs is bounded" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^bounded nested-daemon diagnostic$')"
+_task9_main_output="$( ( main stop ) 2>&1 )"; _task9_main_rc=$?
+assert_eq "exited readiness stop remains available" 0 "$_task9_main_rc"
+assert_eq "exited readiness stop reports state" 1 \
+  "$(printf '%s\n' "$_task9_main_output" | grep -c '^readiness=failed-and-exited$')"
+_task9_readiness_after="$(sha256sum "$_task9_readiness_record")"
+assert_eq "exited readiness reports preserve record" "$_task9_readiness_before" "$_task9_readiness_after"
+_task9_readiness_kind=""
+rm -f "$_task9_readiness_record" "$_task9_readiness_trace"
+unset -f policy_operation_begin policy_load_host exists is_running docker
+eval "$_saved_task9_readiness_begin_fn"; eval "$_saved_task9_readiness_load_fn"
+eval "$_saved_task9_readiness_exists_fn"; eval "$_saved_task9_readiness_running_fn"
+eval "$_saved_task9_readiness_docker_fn"
+
+# The config report is a public read-only boundary. Four policy tiers contribute independently,
+# recorded labels are shown with effective-versus-recorded deltas, and a deliberately named
+# credential secret in a policy file must never be copied into the report.
+_saved_task9_config_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task9_config_load_fn="$(declare -f policy_load_host)"
+_saved_task9_config_preflight_fn="$(declare -f policy_preflight)"
+_saved_task9_config_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task9_config_inspect_fn="$(declare -f policy_inspect_recorded)"
+_saved_task9_config_decide_fn="$(declare -f policy_decide)"
+_saved_task9_config_update_fn="$(declare -f check_for_update)"
+_task9_config_root="$(mktemp -d)"
+_task9_config_machine=task9-machine
+_task9_config_project=/work/task9-secret-project
+mkdir -p "$_task9_config_root/machines/$_task9_config_machine/projects/work/task9-secret-project" \
+  "$_task9_config_root/machines/$_task9_config_machine" \
+  "$_task9_config_root/projects/work/task9-secret-project"
+printf '[git]\nenabled = false\n' >"$_task9_config_root/agentbox.toml"
+printf '[github]\ngrant = true\n' >"$_task9_config_root/machines/$_task9_config_machine/agentbox.toml"
+printf '[ssh]\ngrant_all = true\n' >"$_task9_config_root/projects/work/task9-secret-project/agentbox.toml"
+printf '[git]\nenabled = true\n# credential-secret-must-not-leak\n' \
+  >"$_task9_config_root/machines/$_task9_config_machine/projects/work/task9-secret-project/agentbox.toml"
+chmod 600 \
+  "$_task9_config_root/agentbox.toml" \
+  "$_task9_config_root/machines/$_task9_config_machine/agentbox.toml" \
+  "$_task9_config_root/projects/work/task9-secret-project/agentbox.toml" \
+  "$_task9_config_root/machines/$_task9_config_machine/projects/work/task9-secret-project/agentbox.toml"
+_saved_cfg_root="$AB_CFG_ROOT"; _saved_machine="$MACHINE"; _saved_project="$PROJECT_DIR"
+AB_CFG_ROOT="$_task9_config_root"; MACHINE="$_task9_config_machine"; PROJECT_DIR="$_task9_config_project"
+cfg_env=""; cfg_mounts=""; cfg_ports=""; cfg_setup=""; cfg_networks=""; cfg_dockerfile=""; cfg_files_legacy=""
+_task9_config_invalid=0; _task9_config_update_trace="$(mktemp)"
+policy_operation_begin() {
+  policy_operation_requested=1; operation_state_reset; operation_record_active=0; operation_status=""
+  policy_operation_status=none
+  policy_readiness_result=not-applicable; operation_state_publish; return 0
+}
+policy_load_host() {
+  policy_git_enabled=1; policy_grant_gh=1; policy_grant_all_of_dot_ssh=1; policy_updates_check=1
+  policy_git_source=machine_project; policy_grant_gh_source=machine
+  policy_grant_all_of_dot_ssh_source=project; policy_updates_source=global
+  return 0
+}
+policy_preflight() {
+  policy_load_host
+  policy_decision_update_allowed=$([ "$_task9_config_invalid" = 1 ] && echo 0 || echo 1)
+  return 0
+}
+policy_resolution_recheck() { return 0; }
+policy_inspect_recorded() {
+  if [ "$_task9_config_invalid" = 1 ]; then
+    policy_recorded_status=invalid; policy_recorded_classification=invalid
+    policy_recorded_detail='invalid operation record; repair with ab start --apply'
+    policy_recorded_lifecycle_state=stopped
+    policy_recorded_git_enabled=""; policy_recorded_grant_gh=""; policy_recorded_grant_all_of_dot_ssh=""
+    policy_recorded_digest=""
+  else
+    policy_recorded_status=stale; policy_recorded_classification=stale
+    policy_recorded_detail='recorded Git blocker mount contradicts git.enabled'
+    policy_recorded_lifecycle_state=stopped
+    policy_recorded_git_enabled=0; policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=1
+    policy_recorded_digest=sha256:recorded
+  fi
+  return 0
+}
+policy_decide() {
+  policy_decision_kind=report-only
+  policy_decision_reason_code=report-stale
+  policy_decision_update_allowed=$([ "$_task9_config_invalid" = 1 ] && echo 0 || echo 1)
+  return 0
+}
+check_for_update() { printf 'update\n' >>"$_task9_config_update_trace"; }
+_task9_config_output="$( ( main config ) 2>&1 )"; _task9_config_rc=$?
+assert_eq "four-tier config report succeeds" 0 "$_task9_config_rc"
+_task9_config_display_root="${_task9_config_root/#"$HOME"/\~}"
+for _task9_policy_path in \
+  "$_task9_config_display_root/agentbox.toml" \
+  "$_task9_config_display_root/machines/$_task9_config_machine/agentbox.toml" \
+  "$_task9_config_display_root/projects/work/task9-secret-project/agentbox.toml" \
+  "$_task9_config_display_root/machines/$_task9_config_machine/projects/work/task9-secret-project/agentbox.toml"; do
+  assert_eq "config reports policy tier $_task9_policy_path" 1 \
+    "$(printf '%s\n' "$_task9_config_output" | grep -Fc "$_task9_policy_path")"
+done
+assert_eq "config reports effective git source" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'git.enabled.*true (source: machine_project)')"
+assert_eq "config reports effective GitHub source" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'github.grant.*true (source: machine)')"
+assert_eq "config reports effective SSH source" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'ssh.grant_all.*true (source: project)')"
+assert_eq "config reports recorded labels" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'recorded values:.*git=false.*github=false.*ssh=true')"
+assert_eq "config reports exact mount delta" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'recorded Git blocker mount contradicts git.enabled')"
+assert_eq "config reports operation state" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'operation state:.*none')"
+assert_eq "config does not leak policy secret" 0 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'credential-secret-must-not-leak')"
+_task9_config_invalid=1; : >"$_task9_config_update_trace"
+_task9_config_output="$( ( main config ) 2>&1 )"; _task9_config_rc=$?
+assert_eq "invalid config report remains read-only" 0 "$_task9_config_rc"
+assert_eq "invalid config suppresses update request" 0 \
+  "$(grep -c '^update$' "$_task9_config_update_trace" || true)"
+assert_eq "invalid config exposes repair direction" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | grep -c 'invalid operation record; repair with ab start --apply')"
+rm -rf "$_task9_config_root"; rm -f "$_task9_config_update_trace"
+AB_CFG_ROOT="$_saved_cfg_root"; MACHINE="$_saved_machine"; PROJECT_DIR="$_saved_project"
+unset -f policy_operation_begin policy_load_host policy_preflight policy_resolution_recheck
+unset -f policy_inspect_recorded policy_decide check_for_update
+eval "$_saved_task9_config_begin_fn"; eval "$_saved_task9_config_load_fn"
+eval "$_saved_task9_config_preflight_fn"; eval "$_saved_task9_config_recheck_fn"
+eval "$_saved_task9_config_inspect_fn"; eval "$_saved_task9_config_decide_fn"
+eval "$_saved_task9_config_update_fn"
+
+# Repeat invalid-config coverage through the real public preflight and operation-record loader.
+# The malformed record must be inspected before the update hook is even eligible; both Docker
+# inspection and update attempts are recorded in a file so command-substitution boundaries cannot
+# hide a side effect.
+_saved_task9_real_home="$HOME"; _saved_task9_real_cfg_root="$AB_CFG_ROOT"
+_saved_task9_real_machine="$MACHINE"; _saved_task9_real_project="$PROJECT_DIR"
+_saved_task9_real_state_home="${XDG_STATE_HOME-}"
+_saved_task9_real_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task9_real_load_fn="$(declare -f policy_load_host)"
+_saved_task9_real_preflight_fn="$(declare -f policy_preflight)"
+_saved_task9_real_inspect_fn="$(declare -f policy_inspect_recorded)"
+_saved_task9_real_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task9_real_update_fn="$(declare -f check_for_update)"
+_saved_task9_real_docker_fn="$(declare -f docker)"
+_task9_real_home="$(mktemp -d)"; _task9_real_state="$(mktemp -d)"
+_task9_real_trace="$(mktemp)"
+HOME="$_task9_real_home"; AB_CFG_ROOT="$_task9_real_home/config"
+MACHINE=task9-invalid; PROJECT_DIR=/work/task9-invalid
+XDG_STATE_HOME="$_task9_real_state"; mkdir -p "$XDG_STATE_HOME/agentbox/operations"
+policy_cli_git_enabled=""; policy_cli_grant_gh=""; policy_cli_grant_all_of_dot_ssh=""
+unset AGENTBOX_NO_GIT AGENTBOX_GRANT_GH AGENTBOX_GRANT_ALL_OF_DOT_SSH AGENTBOX_NO_UPDATE_CHECK
+policy_input_reset
+_task9_real_record_id="$(policy_lock_identity)"
+printf 'unknown_field = "invalid"\n' \
+  >"$XDG_STATE_HOME/agentbox/operations/$_task9_real_record_id.toml"
+unset -f policy_operation_begin policy_load_host policy_preflight
+unset -f policy_inspect_recorded policy_resolution_recheck check_for_update docker
+_task9_real_begin_impl="${_saved_task9_real_begin_fn/policy_operation_begin/policy_operation_begin_impl}"
+_task9_real_load_impl="${_saved_task9_real_load_fn/policy_load_host/policy_load_host_impl}"
+_task9_real_preflight_impl="${_saved_task9_real_preflight_fn/policy_preflight/policy_preflight_impl}"
+_task9_real_inspect_impl="${_saved_task9_real_inspect_fn/policy_inspect_recorded/policy_inspect_recorded_impl}"
+eval "$_task9_real_begin_impl"; eval "$_task9_real_load_impl"
+eval "$_task9_real_preflight_impl"; eval "$_task9_real_inspect_impl"
+eval "$_saved_task9_real_recheck_fn"; eval "$_saved_task9_real_update_fn"
+policy_resolution_recheck() { return 0; }
+policy_operation_begin() {
+  printf 'begin\n' >>"$_task9_real_trace"
+  policy_operation_begin_impl "$@"
+}
+policy_load_host() {
+  printf 'load\n' >>"$_task9_real_trace"
+  policy_load_host_impl "$@"
+}
+policy_preflight() {
+  printf 'preflight\n' >>"$_task9_real_trace"
+  policy_preflight_impl "$@"
+}
+policy_inspect_recorded() {
+  printf 'inspect\n' >>"$_task9_real_trace"
+  policy_inspect_recorded_impl "$@"
+}
+check_for_update() { printf 'update\n' >>"$_task9_real_trace"; }
+docker() {
+  printf 'docker:%s\n' "$*" >>"$_task9_real_trace"
+  return 1
+}
+_task9_real_output="$( ( main config ) 2>&1 )"; _task9_real_rc=$?
+assert_eq "real invalid config remains report-only" 0 "$_task9_real_rc"
+assert_eq "real invalid config enters operation load" 1 \
+  "$(grep -c '^begin$' "$_task9_real_trace")"
+assert_eq "real invalid config enters preflight" 1 \
+  "$(grep -c '^preflight$' "$_task9_real_trace")"
+assert_eq "real invalid config loads policy" 1 \
+  "$(grep -c '^load$' "$_task9_real_trace")"
+assert_eq "real invalid config runs inspection" 1 \
+  "$([ "$(grep -c '^inspect$' "$_task9_real_trace")" -ge 1 ] && echo 1 || echo 0)"
+assert_eq "real invalid config inspects container before update" 1 \
+  "$([ "$(grep -c '^docker:inspect ' "$_task9_real_trace")" -ge 1 ] && echo 1 || echo 0)"
+assert_eq "real invalid config never requests update" 0 \
+  "$(grep -c '^update$' "$_task9_real_trace" || true)"
+assert_eq "real invalid config reports repair direction" 1 \
+  "$([ "$(printf '%s\n' "$_task9_real_output" | grep -c 'invalid operation record')" -ge 1 ] && echo 1 || echo 0)"
+rm -rf "$_task9_real_home" "$_task9_real_state"; rm -f "$_task9_real_trace"
+HOME="$_saved_task9_real_home"; AB_CFG_ROOT="$_saved_task9_real_cfg_root"
+MACHINE="$_saved_task9_real_machine"; PROJECT_DIR="$_saved_task9_real_project"
+if [ -n "$_saved_task9_real_state_home" ]; then
+  XDG_STATE_HOME="$_saved_task9_real_state_home"
+else
+  unset XDG_STATE_HOME
+fi
+unset -f policy_operation_begin policy_load_host policy_preflight
+unset -f policy_inspect_recorded policy_resolution_recheck check_for_update docker
+eval "$_saved_task9_real_begin_fn"; eval "$_saved_task9_real_load_fn"
+eval "$_saved_task9_real_preflight_fn"; eval "$_saved_task9_real_inspect_fn"
+eval "$_saved_task9_real_recheck_fn"; eval "$_saved_task9_real_update_fn"
+eval "$_saved_task9_real_docker_fn"
+
+# Task 9 reports are derived from the Task 8 projection and use one stable vocabulary/exit
+# mapping. Exercise report-only, success, degraded, refusal, and invalid-state outcomes while
+# checking that the shared identity/readiness/retry fields are present in every result.
+_saved_task9_mode="$policy_operation_mode"
+_saved_task9_status="$policy_operation_status"
+_saved_task9_readiness="$policy_readiness_result"
+_saved_task9_active="$operation_record_active"
+_saved_task9_operation_status="$operation_status"
+_saved_task9_task_status="$operation_task_status"
+_saved_task9_record_path="$operation_record_path"
+_saved_task9_operation_id="$operation_id"
+_saved_task9_phase="$operation_phase"
+_saved_task9_diagnostic="$operation_diagnostic"
+_saved_task9_network="$operation_network_outcomes"
+_saved_task9_retry="$operation_retry_command"
+_saved_task9_cleanup="$operation_record_cleanup"
+_saved_task9_valid="$operation_state_valid"
+task9_report_fixture() {
+  policy_operation_mode="$1"
+  policy_operation_status="$2"
+  policy_readiness_result="$3"
+  policy_decision_kind=""
+  policy_decision_reason_code=""
+  policy_decision_explicit_exec_mode=blocked
+  policy_explicit_exec_command=0
+  operation_record_active=0
+  operation_status=""
+  operation_task_status=fail
+  operation_record_path=/tmp/agentbox-task9-operation.toml
+  operation_id=task9-operation
+  operation_phase=completion
+  operation_diagnostic="safe diagnostic"
+  operation_network_outcomes=none
+  operation_retry_command="ab start --apply"
+  operation_record_cleanup=forbidden
+  operation_explicit_exec="diagnostic-only"
+  operation_record_container_name="$cname"
+  operation_old_container_id=old-task9
+  operation_new_container_id=new-task9
+  operation_record_policy_digest=sha256:task9
+  operation_image_reference=agentbox:task9
+  operation_record_inner_docker_volume="$dvol"
+  operation_record_jj_volume="$jvol"
+  operation_state_valid=1
+  operation_state_publish
+}
+
+task9_report_fixture status none not-applicable
+_task9_report="$(command_report_emit)"
+assert_eq "none status report-only result" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^result=report-only$')"
+assert_eq "none status report-only exit" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^exit_status=0$')"
+assert_eq "report has operation identity" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^operation_id=task9-operation$')"
+assert_eq "report has readiness" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^readiness=not-applicable$')"
+assert_eq "report has retry direction" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^retry_command=ab start --apply$')"
+assert_eq "report permits ordinary execution" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^execution_allowed=1$')"
+assert_eq "report permits mutation" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^mutation_allowed=1$')"
+assert_eq "report permits update" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^update_allowed=1$')"
+assert_eq "report blocks diagnostics by default" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^diagnostic_allowed=0$')"
+assert_eq "report names ordinary exec mode" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^explicit_exec_mode=allowed$')"
+
+task9_report_fixture start complete ready
+_task9_report="$(command_report_emit)"
+assert_eq "complete start succeeds" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^result=success$')"
+assert_eq "complete start names phase" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^phase=completion$')"
+assert_eq "complete start preserves cleanup permission" 1 \
+  "$(printf '%s\n' "$_task9_report" | grep -c '^cleanup_allowed=1$')"
+
+task9_report_fixture rebuild none not-applicable
+operation_record_active=1; operation_status=network-degraded; operation_task_status=degraded-fail
+operation_state_publish
+_task9_report="$(command_report_emit)"
+assert_eq "degraded operation result" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^result=degraded$')"
+assert_eq "degraded operation exits one" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^exit_status=1$')"
+assert_eq "degraded report blocks ordinary execution" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^execution_allowed=0$')"
+assert_eq "degraded report blocks mutation" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^mutation_allowed=0$')"
+assert_eq "degraded report blocks updates" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^update_allowed=0$')"
+assert_eq "degraded report permits diagnostics" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^diagnostic_allowed=1$')"
+assert_eq "degraded report names diagnostic mode" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^explicit_exec_mode=diagnostic-only$')"
+
+task9_report_fixture start in-progress starting
+_task9_report="$(command_report_emit)"
+assert_eq "in-progress start refuses" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^result=refused$')"
+assert_eq "refusal exits two" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^exit_status=2$')"
+assert_eq "refusal names operation" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^reason=operation-in-progress$')"
+
+task9_report_fixture status invalid-record not-applicable
+_task9_report="$(command_report_emit)"
+assert_eq "invalid state result" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^result=invalid-state$')"
+assert_eq "invalid state names repair direction" 1 \
+  "$(printf '%s\n' "$_task9_report" | grep -c '^reason=invalid-operation-record$')"
+assert_eq "invalid state retains safe diagnostic" 1 \
+  "$(printf '%s\n' "$_task9_report" | grep -c '^diagnostic=safe diagnostic$')"
+assert_eq "invalid state blocks execution" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^execution_allowed=0$')"
+assert_eq "invalid state blocks diagnostics" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^diagnostic_allowed=0$')"
+
+policy_operation_mode="$_saved_task9_mode"; policy_operation_status="$_saved_task9_status"
+policy_readiness_result="$_saved_task9_readiness"; operation_record_active="$_saved_task9_active"
+operation_status="$_saved_task9_operation_status"; operation_task_status="$_saved_task9_task_status"
+operation_record_path="$_saved_task9_record_path"; operation_id="$_saved_task9_operation_id"
+operation_phase="$_saved_task9_phase"; operation_diagnostic="$_saved_task9_diagnostic"
+operation_network_outcomes="$_saved_task9_network"; operation_retry_command="$_saved_task9_retry"
+operation_record_cleanup="$_saved_task9_cleanup"; operation_state_valid="$_saved_task9_valid"
 
 _decision_record="$(policy_decision_record)"
 assert_eq "decision record has one kind" 1 "$(printf '%s\n' "$_decision_record" | grep -c '^kind=')"
