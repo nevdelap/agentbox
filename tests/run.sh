@@ -1861,6 +1861,7 @@ assert_eq "removal failure leaves record" 0 "$_task7_file_rc"
 assert_eq "removal failure is terminal" removal-failed "$(sed -n 's/^status = "\(.*\)"$/\1/p' "$_task7_record")"
 operation_record_load
 assert_eq "failed record feeds decision overlay" removal-failed "$policy_operation_status"
+operation_phase=completion; operation_readiness_result=ready
 operation_record_terminal complete pass ""
 if [ -f "$_task7_record" ]; then _task7_file_rc=0; else _task7_file_rc=1; fi
 assert_eq "complete record is cleaned up" 1 "$_task7_file_rc"
@@ -2220,6 +2221,334 @@ XDG_STATE_HOME="$_saved_task7_xdg"; lock_identity="$_saved_task7_identity"
 cname="$_saved_task7_cname"; dvol="$_saved_task7_dvol"; jvol="$_saved_task7_jvol"
 policy_operation_requested=0; operation_record_active=0
 rm -rf "$_task7_state"
+
+echo
+echo "Task 8 operation-state projection (bin/ab)"
+# Task 8 consumes the Task 7 record through one validated projection.  Exercise absent state,
+# terminal failure, in-progress readiness transitions, diagnostic-only degradation, invalid input,
+# and the no-update/no-cleanup permissions without a Docker daemon.
+_task8_state="$(mktemp -d)"
+_saved_task8_xdg="${XDG_STATE_HOME:-}"
+_saved_task8_identity="${lock_identity:-}"
+_saved_task8_cname="$cname"; _saved_task8_dvol="$dvol"; _saved_task8_jvol="$jvol"
+_saved_task8_requested="$policy_operation_requested"
+XDG_STATE_HOME="$_task8_state"
+lock_identity="$(printf task8 | sha256sum | cut -d' ' -f1)"
+cname=agentbox-task8; dvol=agentbox-docker-task8; jvol=agentbox-jj-task8
+policy_resolved_effective[digest]=sha256:task8digest
+policy_operation_requested=1
+policy_operation_status=none; policy_readiness_result=not-applicable
+operation_record_load
+assert_eq "missing record is none" none "$operation_state_terminal_status"
+assert_eq "missing record is not-applicable" not-applicable "$operation_state_readiness_state"
+assert_eq "missing record permits mutation" 1 "$operation_state_mutation_allowed"
+assert_eq "missing record permits update" 1 "$operation_state_update_allowed"
+assert_eq "missing record has stable volume projection" \
+  "inner_docker=$dvol;jj=$jvol" "$operation_state_named_volumes"
+
+operation_record_begin
+_task8_failed_id="$operation_id"
+operation_phase=removal; operation_old_container_id=old-task8
+operation_record_failure removal-failed "docker rm failed" >/dev/null 2>&1
+operation_record_load
+assert_eq "failed record projects terminal status" removal-failed "$operation_state_terminal_status"
+assert_eq "failed record preserves old identity" old-task8 "$operation_state_old_container_id"
+assert_eq "failed record does not authorize current identity" "" "$operation_state_container_id"
+assert_eq "failed record blocks execution" 0 "$operation_state_execution_allowed"
+assert_eq "failed record blocks mutation" 0 "$operation_state_mutation_allowed"
+assert_eq "failed record blocks update" 0 "$operation_state_update_allowed"
+assert_eq "failed record forbids cleanup" 0 "$operation_state_cleanup_allowed"
+assert_eq "failed record disables diagnostic exec" 0 "$operation_state_diagnostic_allowed"
+assert_eq "failed record exposes retry" "ab start --apply" "$operation_state_retry_command"
+assert_eq "failed record blocks update helper" 1 "$(operation_state_update_allowed; echo $?)"
+
+rm -f "$operation_record_path"
+operation_record_begin
+operation_phase=nested-readiness; operation_readiness_result=starting
+operation_record_update nested-readiness in-progress "" >/dev/null
+operation_record_load
+assert_eq "starting readiness is accepted" starting "$operation_state_readiness_state"
+assert_eq "starting readiness blocks execution" 0 "$operation_state_execution_allowed"
+rm -f "$operation_record_path"
+operation_record_begin
+operation_phase=nested-readiness; operation_readiness_result=replacement-attempted
+operation_record_update nested-readiness in-progress "" >/dev/null
+operation_record_load
+assert_eq "replacement readiness is accepted" replacement-attempted "$operation_state_readiness_state"
+assert_eq "replacement readiness blocks update" 0 "$operation_state_update_allowed"
+
+_saved_task8_running_fn="$(declare -f is_running)"
+is_running() { return 0; }
+rm -f "$operation_record_path"
+operation_record_begin
+operation_phase=required-network
+operation_record_failure network-degraded "optional network unavailable" >/dev/null 2>&1
+operation_record_load
+assert_eq "degraded record allows diagnostics" 1 "$operation_state_diagnostic_allowed"
+assert_eq "degraded record uses old identity for diagnostics" "" "$operation_state_container_id"
+assert_eq "degraded record still blocks updates" 0 "$operation_state_update_allowed"
+unset -f is_running; eval "$_saved_task8_running_fn"
+
+printf '%s\n' 'status = "in-progress"' 'unknown_field = "x"' >"$operation_record_path"
+operation_record_load
+assert_eq "unknown projection field is invalid" invalid-record "$operation_state_terminal_status"
+assert_eq "invalid projection blocks mutation" 0 "$operation_state_mutation_allowed"
+assert_eq "invalid projection blocks updates" 0 "$operation_state_update_allowed"
+assert_eq "invalid projection names record" 1 "$(printf '%s' "$operation_state_diagnostic" | grep -c "$operation_record_path")"
+
+# Cross-field relationships are part of the record contract, not just independent enum checks.
+rm -f "$operation_record_path"
+operation_record_begin
+operation_status=complete; operation_phase=preflight; operation_readiness_result=ready
+operation_completed_at="2026-09-13T00:00:00Z"; operation_task_status=pass
+operation_agent_execution=allowed; operation_explicit_exec=allowed
+operation_record_cleanup=permitted
+operation_record_write
+operation_record_load
+assert_eq "complete preflight handoff is invalid" invalid-record "$operation_state_terminal_status"
+assert_eq "cross-field invalid state blocks execution" 0 "$operation_state_execution_allowed"
+assert_eq "cross-field invalid state blocks cleanup" 0 "$operation_state_cleanup_allowed"
+
+rm -f "$operation_record_path"
+operation_record_begin
+operation_status=in-progress; operation_phase=required-network; operation_readiness_result=starting
+operation_record_write
+operation_record_load
+assert_eq "in-progress network readiness mismatch is invalid" invalid-record "$operation_state_terminal_status"
+assert_eq "readiness mismatch blocks updates" 0 "$operation_state_update_allowed"
+
+# Keep one valid record on disk to exercise the complete-ready projection without deleting it.
+rm -f "$operation_record_path"
+operation_record_begin
+operation_status=complete; operation_phase=completion; operation_readiness_result=ready
+operation_completed_at="2026-09-13T00:00:00Z"; operation_task_status=pass
+operation_agent_execution=allowed; operation_explicit_exec=allowed
+operation_record_cleanup=permitted
+operation_record_write
+operation_record_load
+assert_eq "complete-ready record is accepted" complete "$operation_state_terminal_status"
+assert_eq "complete-ready record permits execution" 1 "$operation_state_execution_allowed"
+assert_eq "complete-ready record permits cleanup" 1 "$operation_state_cleanup_allowed"
+
+# The parser rejects duplicate fields, unknown enum values, and malformed permission tuples.
+printf '%s\n' 'operation_id = "duplicate"' 'operation_id = "again"' >"$operation_record_path"
+operation_record_load
+assert_eq "duplicate field is invalid" invalid-record "$operation_state_terminal_status"
+operation_record_begin
+sed -i 's/status = "in-progress"/status = "unknown"/' "$operation_record_path"
+operation_record_load
+assert_eq "unknown status is invalid" invalid-record "$operation_state_terminal_status"
+operation_record_begin
+sed -i 's/readiness_result = "not-applicable"/readiness_result = "unknown"/' "$operation_record_path"
+operation_record_load
+assert_eq "unknown readiness is invalid" invalid-record "$operation_state_terminal_status"
+operation_record_begin
+sed -i 's/phase = "preflight"/phase = "unknown"/' "$operation_record_path"
+operation_record_load
+assert_eq "unknown phase is invalid" invalid-record "$operation_state_terminal_status"
+operation_record_begin
+sed -i 's/agent_execution = "blocked"/agent_execution = "allowed"/' "$operation_record_path"
+operation_record_load
+assert_eq "inconsistent permission tuple is invalid" invalid-record "$operation_state_terminal_status"
+
+# An unreadable record is not treated as missing state.
+operation_record_begin
+chmod 000 "$operation_record_path"
+operation_record_load
+assert_eq "unreadable record is invalid" invalid-record "$operation_state_terminal_status"
+chmod 600 "$operation_record_path"
+
+# Cleanup failure retains a fail-closed record and does not leave complete permissions active.
+_saved_task8_rm_fn="$(declare -f rm 2>/dev/null || true)"
+rm() { return 1; }
+operation_record_begin
+operation_phase=completion; operation_readiness_result=ready
+operation_record_terminal complete pass "" >/dev/null 2>&1; _task8_cleanup_rc=$?
+assert_eq "cleanup failure returns non-zero" 1 "$_task8_cleanup_rc"
+assert_eq "cleanup failure leaves record" 1 "$([ -f "$operation_record_path" ] && echo 1 || echo 0)"
+assert_eq "cleanup failure blocks execution" 0 "$operation_state_execution_allowed"
+assert_eq "cleanup failure blocks cleanup" 0 "$operation_state_cleanup_allowed"
+assert_eq "cleanup failure blocks updates" 0 "$operation_state_update_allowed"
+assert_eq "cleanup failure is diagnostic" 1 "$(printf '%s' "$operation_state_diagnostic" | grep -c 'cleanup failed')"
+unset -f rm; [ -n "$_saved_task8_rm_fn" ] && eval "$_saved_task8_rm_fn"
+operation_record_load
+assert_eq "retained cleanup failure reloads invalid" invalid-record "$operation_state_terminal_status"
+rm -f "$operation_record_path"
+
+# Cover the remaining terminal handoffs and explicit recovery identity.  A recovery consumes the
+# failed record, then starts a new operation with the same named volumes and a new operation id.
+operation_record_begin
+operation_phase=creation
+operation_record_failure absent-after-failure "docker run failed" >/dev/null 2>&1
+operation_record_load
+assert_eq "absent-after-failure projects terminal status" absent-after-failure "$operation_state_terminal_status"
+rm -f "$operation_record_path"
+_saved_task8_running_fn="$(declare -f is_running)"
+is_running() { return 1; }
+operation_record_begin
+operation_phase=nested-readiness; operation_readiness_result=failed-and-exited
+operation_record_failure readiness-failed "nested Docker readiness failed" >/dev/null 2>&1
+operation_record_load
+assert_eq "readiness failure projects terminal status" readiness-failed "$operation_state_terminal_status"
+assert_eq "readiness failure preserves failed state" failed-and-exited "$operation_state_readiness_state"
+unset -f is_running; eval "$_saved_task8_running_fn"
+
+rm -f "$operation_record_path"
+operation_record_begin
+operation_phase=removal; operation_old_container_id=recovery-old
+operation_record_failure removal-failed "docker rm failed" >/dev/null 2>&1
+_task8_recovery_old_id="$operation_id"
+_saved_task8_lock_fn="$(declare -f policy_lock_acquire)"
+policy_lock_acquire() { :; }
+policy_operation_retry=1
+policy_operation_begin
+assert_eq "explicit recovery marks reconciliation" 1 "$policy_retry_reconcile"
+assert_eq "explicit recovery clears ordinary failure gate" none "$policy_operation_status"
+operation_record_begin
+assert_eq "recovery creates a fresh operation id" 1 "$([ "$operation_id" != "$_task8_recovery_old_id" ] && echo 1 || echo 0)"
+assert_eq "recovery preserves Docker volume identity" "$dvol" "$operation_record_inner_docker_volume"
+assert_eq "recovery preserves jj volume identity" "$jvol" "$operation_record_jj_volume"
+unset -f policy_lock_acquire; eval "$_saved_task8_lock_fn"
+
+# Read-only and refused command boundaries must not invoke update, Docker, or network work while
+# a non-complete state is present.  These mocks exercise the real main dispatch for every
+# non-complete/invalid state and the ordinary start/build/rebuild/convenience/exec paths.
+_saved_task8_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task8_load_fn="$(declare -f policy_load_host)"
+_saved_task8_update_fn="$(declare -f check_for_update)"
+_saved_task8_preflight_fn="$(declare -f policy_preflight)"
+_saved_task8_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task8_config_fn="$(declare -f cmd_config)"
+_saved_task8_exists_fn="$(declare -f exists)"
+_saved_task8_running_fn="$(declare -f is_running)"
+_saved_task8_docker_fn="$(declare -f docker)"
+_saved_task8_network_fn="$(declare -f connect_networks)"
+_saved_task8_sysbox_fn="$(declare -f require_sysbox)"
+_saved_task8_record_begin_fn="$(declare -f operation_record_begin_if_needed)"
+_saved_task8_record_update_fn="$(declare -f operation_record_update)"
+_saved_task8_mutation_guard_fn="$(declare -f operation_mutation_guard)"
+_saved_task8_cmd_start_fn="$(declare -f cmd_start)"
+_saved_task8_cmd_exec_fn="$(declare -f cmd_exec)"
+_task8_trace="$_task8_state/dispatch.trace"
+_task8_record="$operation_record_path"
+printf 'stable operation record\n' >"$_task8_record"
+_task8_dispatch_state=removal-failed
+policy_operation_begin() {
+  case "$_task8_dispatch_state" in
+    in-progress)
+      operation_state_phase="nested-readiness"; operation_state_readiness_state=starting
+      ;;
+    removal-failed|absent-after-failure|network-degraded|invalid-record)
+      operation_state_phase="required-network"; operation_state_readiness_state="not-applicable"
+      ;;
+    readiness-failed-running)
+      operation_state_terminal_status="readiness-failed"
+      operation_state_phase="nested-readiness"; operation_state_readiness_state="failed-but-running"
+      ;;
+    readiness-failed-exited)
+      operation_state_terminal_status="readiness-failed"
+      operation_state_phase="nested-readiness"; operation_state_readiness_state="failed-and-exited"
+      ;;
+  esac
+  [ "$_task8_dispatch_state" = invalid-record ] && operation_state_valid=0 || operation_state_valid=1
+  [ "${operation_state_terminal_status:-}" = "" ] &&
+    operation_state_terminal_status="$_task8_dispatch_state"
+  operation_state_update_allowed=0; operation_state_execution_allowed=0
+  operation_state_mutation_allowed=0; operation_state_diagnostic_allowed=0
+  operation_state_explicit_exec_mode=blocked; policy_decision_update_allowed=0
+  policy_operation_status="$operation_state_terminal_status"
+  policy_readiness_result="$operation_state_readiness_state"
+  printf 'begin:%s\n' "$operation_state_terminal_status" >>"$_task8_trace"
+  return 0
+}
+policy_load_host() { policy_updates_check=1; printf 'policy-load\n' >>"$_task8_trace"; return 0; }
+check_for_update() { printf 'update\n' >>"$_task8_trace"; return 0; }
+policy_preflight() { printf 'preflight:%s\n' "$1" >>"$_task8_trace"; return 1; }
+policy_resolution_recheck() { printf 'resolution\n' >>"$_task8_trace"; return 0; }
+cmd_config() { printf 'config\n' >>"$_task8_trace"; return 0; }
+exists() { printf 'exists\n' >>"$_task8_trace"; return 1; }
+is_running() { printf 'running\n' >>"$_task8_trace"; return 1; }
+docker() { printf 'docker:%s\n' "$1" >>"$_task8_trace"; return 1; }
+connect_networks() { printf 'network\n' >>"$_task8_trace"; return 1; }
+require_sysbox() { printf 'sysbox\n' >>"$_task8_trace"; return 0; }
+operation_record_begin_if_needed() { printf 'record-begin\n' >>"$_task8_trace"; return 0; }
+operation_record_update() { printf 'record-update:%s\n' "$1" >>"$_task8_trace"; return 0; }
+operation_mutation_guard() { printf 'mutation-guard\n' >>"$_task8_trace"; return 0; }
+cmd_start() { printf 'start\n' >>"$_task8_trace"; return 0; }
+cmd_exec() { printf 'exec\n' >>"$_task8_trace"; return 0; }
+
+_task8_dispatch_states=(in-progress removal-failed absent-after-failure network-degraded
+                        readiness-failed-running readiness-failed-exited invalid-record)
+_task8_dispatch_commands=(start build rebuild claude codex bash exec)
+for _task8_dispatch_state in "${_task8_dispatch_states[@]}"; do
+  for _task8_dispatch_cmd in "${_task8_dispatch_commands[@]}"; do
+    : >"$_task8_trace"
+    _task8_before="$(sha256sum "$_task8_record")"
+    case "$_task8_dispatch_cmd" in
+      start|build|rebuild) ( main "$_task8_dispatch_cmd" >/dev/null 2>&1 ); _task8_rc=$? ;;
+      exec) ( main exec -- true >/dev/null 2>&1 ); _task8_rc=$? ;;
+      *) ( main "$_task8_dispatch_cmd" --test >/dev/null 2>&1 ); _task8_rc=$? ;;
+    esac
+    _task8_after="$(sha256sum "$_task8_record")"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd refuses" 1 "$_task8_rc"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd keeps record" \
+      "$_task8_before" "$_task8_after"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd avoids Docker" 0 \
+      "$(grep -c '^docker:' "$_task8_trace" || true)"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd avoids network" 0 \
+      "$(grep -c '^network$' "$_task8_trace" || true)"
+    assert_eq "$_task8_dispatch_state/$_task8_dispatch_cmd avoids update" 0 \
+      "$(grep -c '^update$' "$_task8_trace" || true)"
+  done
+done
+
+# Repeated read-only reporting keeps the durable record byte-for-byte unchanged and does not
+# invoke Docker, network, or update work.  Each command is run twice through main, not through
+# the underlying helper, so the dispatch guarantee is tested at the public boundary.
+_task8_dispatch_state=removal-failed
+for _task8_read_only_cmd in status logs stop config; do
+  : >"$_task8_trace"
+  _task8_before="$(sha256sum "$_task8_record")"
+  ( main "$_task8_read_only_cmd" >/dev/null 2>&1 ) || true
+  ( main "$_task8_read_only_cmd" >/dev/null 2>&1 ) || true
+  _task8_after="$(sha256sum "$_task8_record")"
+  assert_eq "repeated $_task8_read_only_cmd keeps record" "$_task8_before" "$_task8_after"
+  assert_eq "repeated $_task8_read_only_cmd avoids Docker" 0 \
+    "$(grep -c '^docker:' "$_task8_trace" || true)"
+  assert_eq "repeated $_task8_read_only_cmd avoids network" 0 \
+    "$(grep -c '^network$' "$_task8_trace" || true)"
+  assert_eq "repeated $_task8_read_only_cmd avoids update" 0 \
+    "$(grep -c '^update$' "$_task8_trace" || true)"
+done
+
+# Keep the original focused checks explicit: a failed state suppresses update checks for all
+# read-only reports, and an ordinary start cannot reach Docker after preflight refusal.
+_task8_dispatch_state=removal-failed
+_task8_update_calls=0; _task8_docker_calls=0
+for _task8_read_only_cmd in status logs stop config; do
+  ( main "$_task8_read_only_cmd" >/dev/null 2>&1 ) || true
+done
+assert_eq "read-only failure reports suppress update checks" 0 \
+  "$(grep -c '^update$' "$_task8_trace" || true)"
+assert_eq "read-only failure reports avoid Docker" 0 \
+  "$(grep -c '^docker:' "$_task8_trace" || true)"
+unset -f policy_operation_begin policy_load_host check_for_update policy_preflight
+unset -f policy_resolution_recheck cmd_config exists is_running docker connect_networks
+unset -f require_sysbox operation_record_begin_if_needed operation_record_update
+unset -f operation_mutation_guard cmd_start cmd_exec
+eval "$_saved_task8_begin_fn"; eval "$_saved_task8_load_fn"; eval "$_saved_task8_update_fn"
+eval "$_saved_task8_preflight_fn"; eval "$_saved_task8_recheck_fn"; eval "$_saved_task8_config_fn"
+eval "$_saved_task8_exists_fn"; eval "$_saved_task8_running_fn"; eval "$_saved_task8_docker_fn"
+eval "$_saved_task8_network_fn"; eval "$_saved_task8_sysbox_fn"
+eval "$_saved_task8_record_begin_fn"; eval "$_saved_task8_record_update_fn"
+eval "$_saved_task8_mutation_guard_fn"; eval "$_saved_task8_cmd_start_fn"
+eval "$_saved_task8_cmd_exec_fn"
+
+rm -f "$operation_record_path"
+policy_operation_requested="$_saved_task8_requested"
+XDG_STATE_HOME="$_saved_task8_xdg"; lock_identity="$_saved_task8_identity"
+cname="$_saved_task8_cname"; dvol="$_saved_task8_dvol"; jvol="$_saved_task8_jvol"
+rm -rf "$_task8_state"
 
 _decision_record="$(policy_decision_record)"
 assert_eq "decision record has one kind" 1 "$(printf '%s\n' "$_decision_record" | grep -c '^kind=')"
