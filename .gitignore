@@ -6,3 +6,6 @@
 # Local per-host config experiments — the canonical samples live in examples/.
 # Uncomment if you keep a local copy here for testing:
 # agentbox-config/
+
+# Quiet Just gate output.
+check.log

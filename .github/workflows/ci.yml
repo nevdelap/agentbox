@@ -1,10 +1,13 @@
-# CI for agentbox — all checks are Docker-free and fast:
-#   - unit tests (tests/run.sh sources the scripts and exercises their pure logic)
-#   - shellcheck + bash -n on every shell script
-#   - syntax-parse of the NixOS module (sysbox.nix)
+# CI for agentbox. These three steps are the same stages as the `check` gate:
+#   - formatting for Just, Nix, and implementation-owned Markdown
+#   - ShellCheck, Markdown lint, YAML lint, and Dockerfile lint
+#   - unit tests and Nix parsing
 #
-# The full image build + tests/smoke.sh need a Sysbox-equipped host with nested Docker, so
-# they run out-of-band (ab start && bash tests/smoke.sh), not here.
+# `format` applies formatters locally and rejects tracked changes in CI. The
+# equivalent local probe is `GITHUB_ACTIONS=true just format` from a clean
+# plain Git checkout.
+# The full image build + tests/smoke.sh need a Sysbox-equipped host with nested
+# Docker, so they run out-of-band (ab start && bash tests/smoke.sh), not here.
 name: CI
 
 on:
@@ -14,25 +17,24 @@ on:
   workflow_dispatch:
 
 jobs:
-  shell:
-    name: unit tests + shellcheck
+  check:
+    name: repository gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install just and shellcheck
-        run: sudo apt-get update && sudo apt-get install -y just shellcheck
-
-      - name: shell checks
-        run: just shell-check
-
-  nix:
-    name: NixOS module parses
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v27
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
         with:
-          nix_path: nixpkgs=channel:nixpkgs-unstable
-      - name: parse Nix module
-        run: nix run nixpkgs#just -- nix-parse
+          just-version: '1.57.0'
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Run formatters
+        run: just --no-deps format
+
+      - name: Run linters
+        run: just --no-deps lint
+
+      - name: Run tests
+        run: just --no-deps test

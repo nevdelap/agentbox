@@ -1,5 +1,5 @@
 # ~/.config/agentbox/Dockerfile — a CHILD image that layers tools onto the base,
-# FROM agentbox:latest. This is the place for tools that need ROOT at BUILD time
+# FROM the base tag supplied by ab. This is the place for tools that need ROOT at BUILD time
 # (`apt-get install`), keeping the base image lean and tool-free.
 #
 # Unlike setup.sh (which runs as the unprivileged agentbox user and so CAN'T apt-get install —
@@ -24,21 +24,31 @@
 # CAVEAT: editing a COPY'd SIBLING without touching this Dockerfile's text leaves the key
 # unchanged — run `ab rebuild` to re-bake. (A plain `ab start` after an edit reuses the old
 # child image: `docker start` does not rebuild, so the change wouldn't take until `ab rebuild`.)
-FROM agentbox:latest
+ARG AGENTBOX_BASE_IMAGE=agentbox:latest
+FROM ${AGENTBOX_BASE_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Example: the psql client (v17, from the PostgreSQL upstream PGDG repo — pinned here
 # regardless of whichever version the distro's postgresql-client happens to track on this
 # base, Ubuntu 26.04), so the agent can reach a database on a shared docker network (see
 # `networks`). Installed as root at BUILD time — setup.sh can't, it has no root. Supply
 # your own connection when you connect; no credentials live here.
-USER root
+# The child preserves the base entrypoint's rootful startup contract. This is an intentional,
+# human-authorized DL3002 exception; ab runs command sessions as agentbox explicitly.
+# hadolint ignore=DL3002
+USER 0
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates \
+ && apt_version() { apt-cache policy "$1" | sed -n 's/^  Candidate: //p'; } \
+ && apt-get install -y --no-install-recommends \
+      "curl=$(apt_version curl)" "ca-certificates=$(apt_version ca-certificates)" \
  && install -d /usr/share/postgresql-common/pgdg \
  && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
       https://www.postgresql.org/media/keys/ACCC4CF8.asc \
- && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo $VERSION_CODENAME)-pgdg main" \
+ && pgdg_codename="$(. /etc/os-release && printf '%s' "$VERSION_CODENAME")" \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $pgdg_codename-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends postgresql-client-17 \
+ && apt-get install -y --no-install-recommends \
+      "postgresql-client-17=$(apt_version postgresql-client-17)" \
  && rm -rf /var/lib/apt/lists/*

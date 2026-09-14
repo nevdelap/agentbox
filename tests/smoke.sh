@@ -40,9 +40,13 @@ fi
 
 # Container name for the CURRENT project (ab keys off $PWD), so this can be run from any
 # project dir to test that project's container. Override with AGENTBOX_DIR=/path.
+# shellcheck source=../bin/ab
 # shellcheck disable=SC1091
 source "$REPO/bin/ab"
+# `bin/ab` computes this global for the current project before the helpers below use it.
+declare cname
 # agentbox-entrypoint.sh defines ab_parse_port_line() (used in the ports section below).
+# shellcheck source=../agentbox-entrypoint.sh
 # shellcheck disable=SC1091
 source "$REPO/agentbox-entrypoint.sh"
 compute_names "${AGENTBOX_DIR:-$PWD}"
