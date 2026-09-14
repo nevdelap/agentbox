@@ -3230,6 +3230,467 @@ assert_eq "decision record has one kind" 1 "$(printf '%s\n' "$_decision_record" 
 assert_eq "decision record has reason" 1 "$(printf '%s\n' "$_decision_record" | grep -c '^reason_code=')"
 
 echo
+echo "Task 10 update coordination and retry identity (bin/ab)"
+_saved_task10_update_cache="$AB_UPDATE_CACHE"
+_saved_task10_update_lock_fd="$update_lock_fd"
+_saved_task10_curl_fn="$(declare -f curl 2>/dev/null || true)"
+_task10_update_root="$(mktemp -d)"
+_task10_update_trace="$_task10_update_root/refresh.trace"
+AB_UPDATE_CACHE="$_task10_update_root/cache/update-check"
+curl() {
+  printf 'refresh\n' >>"$_task10_update_trace"
+  sleep 0.15
+  printf '%s\n' '{' '  "tag_name": "v9.9.9",' '}'
+}
+
+# Different project invocations share one host cache and lock. The second check must skip the
+# courtesy request rather than waiting behind or duplicating the first refresh.
+( check_for_update >/dev/null 2>&1 ) & _task10_update_pid_a=$!
+( check_for_update >/dev/null 2>&1 ) & _task10_update_pid_b=$!
+wait "$_task10_update_pid_a"; wait "$_task10_update_pid_b"
+assert_eq "concurrent update checks refresh once" 1 "$(grep -c '^refresh$' "$_task10_update_trace" || true)"
+assert_eq "update cache contents are complete" v9.9.9 "$(cat "$AB_UPDATE_CACHE")"
+assert_eq "update cache directory is private" 700 "$(stat -c '%a' "$(dirname "$AB_UPDATE_CACHE")")"
+assert_eq "update cache file is private" 600 "$(stat -c '%a' "$AB_UPDATE_CACHE")"
+assert_eq "update lock file is private" 600 "$(stat -c '%a' "$AB_UPDATE_CACHE.lock")"
+
+# A fresh valid cache avoids the network; malformed fresh text is ignored rather than becoming a
+# product failure or an unsafe update notice.
+: >"$_task10_update_trace"
+check_for_update >/dev/null 2>&1; _task10_update_rc=$?
+assert_eq "fresh update cache succeeds" 0 "$_task10_update_rc"
+assert_eq "fresh update cache avoids refresh" 0 "$(grep -c '^refresh$' "$_task10_update_trace" || true)"
+printf '%s' 'not-a-release' >"$AB_UPDATE_CACHE"; chmod 600 "$AB_UPDATE_CACHE"
+touch "$AB_UPDATE_CACHE"
+: >"$_task10_update_trace"
+check_for_update >/dev/null 2>&1; _task10_update_rc=$?
+assert_eq "malformed cached version is harmless" 0 "$_task10_update_rc"
+assert_eq "malformed cached version avoids refresh" 0 "$(grep -c '^refresh$' "$_task10_update_trace" || true)"
+
+# A stale/offline response is cached atomically as an empty result and remains a successful
+# courtesy check. Unsupported release text is likewise ignored without a false notice.
+touch -d '2 hours ago' "$AB_UPDATE_CACHE"
+curl() { printf 'offline\n' >>"$_task10_update_trace"; return 22; }
+: >"$_task10_update_trace"
+check_for_update >/dev/null 2>&1; _task10_update_rc=$?
+assert_eq "offline update check succeeds" 0 "$_task10_update_rc"
+assert_eq "offline result is atomically cached" "" "$(cat "$AB_UPDATE_CACHE")"
+assert_eq "offline cache remains private" 600 "$(stat -c '%a' "$AB_UPDATE_CACHE")"
+printf '%s' 'unsupported' >"$AB_UPDATE_CACHE"; chmod 600 "$AB_UPDATE_CACHE"; touch -d '2 hours ago' "$AB_UPDATE_CACHE"
+curl() { printf '%s\n' '{' '  "tag_name": "stable"' '}'; }
+check_for_update >/dev/null 2>&1; _task10_update_rc=$?
+assert_eq "unsupported release text succeeds" 0 "$_task10_update_rc"
+assert_eq "unsupported release text is not cached as a version" "" "$(cat "$AB_UPDATE_CACHE")"
+
+# Rate limiting is distinct from a generic offline failure but remains courtesy-only: it must
+# return success, leave no unsafe cache value, and emit no false newer-release notice.
+touch -d '2 hours ago' "$AB_UPDATE_CACHE"
+curl() { printf 'rate-limit\n' >>"$_task10_update_trace"; return 22; }
+: >"$_task10_update_trace"
+_task10_rate_output="$(check_for_update 2>&1)"; _task10_update_rc=$?
+assert_eq "rate-limited update check succeeds" 0 "$_task10_update_rc"
+assert_eq "rate-limited response is distinct" 1 "$(grep -c '^rate-limit$' "$_task10_update_trace" || true)"
+assert_eq "rate-limited result is empty" "" "$(cat "$AB_UPDATE_CACHE")"
+assert_eq "rate-limited result has no notice" 0 \
+  "$(printf '%s\n' "$_task10_rate_output" | grep -c 'newer release' || true)"
+
+# A valid newer tag is surfaced as a courtesy notice while the helper still returns success and
+# stores the validated tag for the next hourly check.
+touch -d '2 hours ago' "$AB_UPDATE_CACHE"
+curl() { printf '%s\n' '{' '  "tag_name": "v0.0.12"' '}'; }
+_task10_newer_output="$(check_for_update 2>&1)"; _task10_update_rc=$?
+assert_eq "newer release check succeeds" 0 "$_task10_update_rc"
+assert_eq "newer release is cached" v0.0.12 "$(cat "$AB_UPDATE_CACHE")"
+assert_eq "newer release notice is shown" 1 \
+  "$(printf '%s\n' "$_task10_newer_output" | grep -c 'newer release is available' || true)"
+
+# Contention is bounded and best-effort: a held host-wide lock suppresses only the courtesy
+# request, leaving the product command's exit path unaffected.
+_task10_lock_held="$_task10_update_root/lock-held"
+(
+  exec 9>"$AB_UPDATE_CACHE.lock"
+  flock -n 9 || exit 1
+  : >"$_task10_lock_held"
+  sleep 0.25
+) & _task10_lock_pid=$!
+_task10_wait=0
+while [ ! -e "$_task10_lock_held" ] && [ "$_task10_wait" -lt 50 ]; do
+  sleep 0.01
+  _task10_wait=$((_task10_wait + 1))
+done
+_task10_update_rc=0
+check_for_update >/dev/null 2>&1 || _task10_update_rc=$?
+wait "$_task10_lock_pid"
+assert_eq "contended update check succeeds" 0 "$_task10_update_rc"
+
+# Each retry gets a fresh operation id while retaining the logical container and named volumes.
+_saved_task10_state="${XDG_STATE_HOME-}"; _saved_task10_lock_identity="$lock_identity"
+_saved_task10_project="$PROJECT_DIR"; _saved_task10_machine="$MACHINE"
+_saved_task10_cname="$cname"; _saved_task10_dvol="$dvol"; _saved_task10_jvol="$jvol"
+_saved_task10_operation_requested="$policy_operation_requested"
+_task10_state="$(mktemp -d)"; XDG_STATE_HOME="$_task10_state"
+PROJECT_DIR=/work/task10-retry; MACHINE=task10; cname=agentbox-task10; dvol=task10-docker; jvol=task10-jj
+lock_identity="$(policy_lock_identity)"; policy_operation_requested=1; policy_operation_mode=start
+operation_record_sequence=0; operation_record_active=0
+operation_record_begin; _task10_first_id="$operation_id"
+operation_record_begin; _task10_second_id="$operation_id"
+assert_eq "retry operation id is fresh" 1 "$([ "$_task10_first_id" != "$_task10_second_id" ] && echo 1 || echo 0)"
+assert_eq "retry preserves container identity" agentbox-task10 "$(sed -n 's/^container_name = "\(.*\)"$/\1/p' "$operation_record_path")"
+assert_eq "retry preserves inner volume" task10-docker "$(sed -n 's/^inner_docker_volume = "\(.*\)"$/\1/p' "$operation_record_path")"
+assert_eq "retry preserves jj volume" task10-jj "$(sed -n 's/^jj_volume = "\(.*\)"$/\1/p' "$operation_record_path")"
+
+# Every policy-sensitive entry point must stop before record loading when the shared per-project
+# lock cannot be acquired; status/logs/stop do not have a later preflight to catch this.
+_saved_task10_lock_fn="$(declare -f policy_lock_acquire)"
+_saved_task10_record_load_fn="$(declare -f operation_record_load)"
+_task10_record_load_calls=0
+policy_lock_acquire() { return 1; }
+operation_record_load() { _task10_record_load_calls=$((_task10_record_load_calls + 1)); return 0; }
+policy_operation_begin >/dev/null 2>&1; _task10_lock_rc=$?
+assert_eq "lock failure stops operation begin" 1 "$_task10_lock_rc"
+assert_eq "lock failure avoids unlocked record load" 0 "$_task10_record_load_calls"
+unset -f policy_lock_acquire operation_record_load
+eval "$_saved_task10_lock_fn"; eval "$_saved_task10_record_load_fn"
+rm -rf "$_task10_state"
+PROJECT_DIR="$_saved_task10_project"; MACHINE="$_saved_task10_machine"
+cname="$_saved_task10_cname"; dvol="$_saved_task10_dvol"; jvol="$_saved_task10_jvol"
+lock_identity="$_saved_task10_lock_identity"; policy_operation_requested="$_saved_task10_operation_requested"
+if [ -n "$_saved_task10_state" ]; then XDG_STATE_HOME="$_saved_task10_state"; else unset XDG_STATE_HOME; fi
+
+unset -f curl
+[ -n "$_saved_task10_curl_fn" ] && eval "$_saved_task10_curl_fn"
+AB_UPDATE_CACHE="$_saved_task10_update_cache"; update_lock_fd="$_saved_task10_update_lock_fd"
+rm -rf "$_task10_update_root"
+
+echo
+echo "Task 10 public update and project-lock evidence (bin/ab)"
+_saved_task10_cfg_root="$AB_CFG_ROOT"; _saved_task10_home="$HOME"
+_saved_task10_project="$PROJECT_DIR"; _saved_task10_machine="$MACHINE"
+_saved_task10_cname="$cname"; _saved_task10_dvol="$dvol"; _saved_task10_jvol="$jvol"
+_saved_task10_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task10_preflight_fn="$(declare -f policy_preflight)"
+_saved_task10_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task10_start_fn="$(declare -f cmd_start)"
+_saved_task10_exists_fn="$(declare -f exists)"
+_saved_task10_running_fn="$(declare -f is_running)"
+_saved_task10_docker_fn="$(declare -f docker)"
+_saved_task10_update_fn="$(declare -f check_for_update)"
+_task10_public_root="$(mktemp -d)"
+_task10_public_trace="$_task10_public_root/public.trace"
+AB_CFG_ROOT="$_task10_public_root/config"; HOME="$_task10_public_root/home"
+PROJECT_DIR="$_task10_public_root/project"; MACHINE=task10-public
+mkdir -p "$AB_CFG_ROOT" "$HOME" "$PROJECT_DIR"
+: >"$_task10_public_trace"
+policy_operation_begin() {
+  policy_operation_requested=1; policy_operation_status=none
+  policy_readiness_result=not-applicable; operation_state_reset
+  operation_state_update_allowed=1; operation_state_valid=1
+  return 0
+}
+exists() { return 1; }
+is_running() { return 1; }
+docker() { printf 'docker\n' >>"$_task10_public_trace"; return 1; }
+check_for_update() { printf 'update\n' >>"$_task10_public_trace"; return 0; }
+
+# Both update controls are public policy inputs: the TOML control and the host environment
+# override must suppress the request after normal command dispatch has resolved policy.
+printf '%s\n' '[updates]' 'check = false' >"$AB_CFG_ROOT/agentbox.toml"
+policy_input_reset
+_task10_public_output="$( ( main status ) 2>&1 )"; _task10_public_rc=$?
+assert_eq "updates.check=false keeps status successful" 0 "$_task10_public_rc"
+assert_eq "updates.check=false suppresses request" 0 "$(grep -c '^update$' "$_task10_public_trace" || true)"
+printf '%s\n' '[updates]' 'check = true' >"$AB_CFG_ROOT/agentbox.toml"
+AGENTBOX_NO_UPDATE_CHECK=1; export AGENTBOX_NO_UPDATE_CHECK
+policy_input_reset; : >"$_task10_public_trace"
+_task10_public_output="$( ( main status ) 2>&1 )"; _task10_public_rc=$?
+assert_eq "AGENTBOX_NO_UPDATE_CHECK keeps status successful" 0 "$_task10_public_rc"
+assert_eq "AGENTBOX_NO_UPDATE_CHECK suppresses request" 0 "$(grep -c '^update$' "$_task10_public_trace" || true)"
+unset AGENTBOX_NO_UPDATE_CHECK
+
+# An update failure is courtesy-only: a public start still returns success and performs its one
+# mocked mutation. This proves the update result cannot change product status or mutation.
+policy_preflight() {
+  policy_updates_check=1; policy_decision_update_allowed=1
+  policy_decision_kind=start-in-place; policy_decision_reason_code=policy-matches-recorded
+  policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_operation_status=none
+  operation_state_reset; operation_state_update_allowed=1; operation_state_valid=1
+  return 0
+}
+policy_resolution_recheck() { return 0; }
+check_for_update() { printf 'update-failed\n' >>"$_task10_public_trace"; return 37; }
+cmd_start() { printf 'mutation\n' >>"$_task10_public_trace"; return 0; }
+policy_input_reset; : >"$_task10_public_trace"
+_task10_public_output="$( ( main start ) 2>&1 )"; _task10_public_rc=$?
+assert_eq "update failure leaves public start successful" 0 "$_task10_public_rc"
+assert_eq "update failure does not skip mutation" 1 "$(grep -c '^mutation$' "$_task10_public_trace" || true)"
+assert_eq "update failure is observed once" 1 "$(grep -c '^update-failed$' "$_task10_public_trace" || true)"
+
+# The host cache is independent of project identity, and atomic mv replacement keeps concurrent
+# readers from seeing a partial version while another writer refreshes the same cache.
+unset -f check_for_update
+eval "$_saved_task10_update_fn"
+_saved_task10_update_cache_public="$AB_UPDATE_CACHE"
+_task10_cache_root="$_task10_public_root/cache-race"
+AB_UPDATE_CACHE="$_task10_cache_root/update-check"
+_task10_update_trace_public="$_task10_public_root/update.trace"
+: >"$_task10_update_trace_public"
+curl() { printf 'refresh\n' >>"$_task10_update_trace_public"; printf '%s\n' '{' '  "tag_name": "v9.9.9"' '}'; }
+( PROJECT_DIR="$_task10_public_root/project-a"; check_for_update >/dev/null 2>&1 ) & _task10_update_pid_a=$!
+( PROJECT_DIR="$_task10_public_root/project-b"; check_for_update >/dev/null 2>&1 ) & _task10_update_pid_b=$!
+wait "$_task10_update_pid_a"; wait "$_task10_update_pid_b"
+assert_eq "distinct projects share one refresh" 1 "$(grep -c '^refresh$' "$_task10_update_trace_public" || true)"
+update_cache_write v0.0.1
+_task10_atomic_bad="$_task10_public_root/atomic.bad"
+: >"$_task10_atomic_bad"
+(
+  _task10_reader_i=0
+  while [ "$_task10_reader_i" -lt 300 ]; do
+    if [ -f "$AB_UPDATE_CACHE" ]; then
+      _task10_reader_value="$(cat "$AB_UPDATE_CACHE")"
+      update_release_tag_valid "$_task10_reader_value" || printf 'partial\n' >>"$_task10_atomic_bad"
+    fi
+    _task10_reader_i=$((_task10_reader_i + 1))
+  done
+) & _task10_reader_pid=$!
+(
+  _task10_writer_i=1
+  while [ "$_task10_writer_i" -le 80 ]; do
+    if update_lock_try_acquire; then
+      update_cache_write "v0.0.$_task10_writer_i"
+      update_lock_release
+    fi
+    _task10_writer_i=$((_task10_writer_i + 1))
+  done
+) & _task10_writer_pid=$!
+wait "$_task10_reader_pid"; wait "$_task10_writer_pid"
+assert_eq "atomic cache readers see no partial content" 0 "$(grep -c '^partial$' "$_task10_atomic_bad" 2>/dev/null || true)"
+AB_UPDATE_CACHE="$_saved_task10_update_cache_public"
+unset -f curl
+[ -n "$_saved_task10_curl_fn" ] && eval "$_saved_task10_curl_fn"
+
+unset -f policy_operation_begin policy_preflight policy_resolution_recheck cmd_start exists is_running docker check_for_update
+eval "$_saved_task10_begin_fn"; eval "$_saved_task10_preflight_fn"
+eval "$_saved_task10_recheck_fn"; eval "$_saved_task10_start_fn"
+eval "$_saved_task10_exists_fn"; eval "$_saved_task10_running_fn"
+eval "$_saved_task10_docker_fn"; eval "$_saved_task10_update_fn"
+rm -rf "$_task10_public_root"
+AB_CFG_ROOT="$_saved_task10_cfg_root"; HOME="$_saved_task10_home"
+PROJECT_DIR="$_saved_task10_project"; MACHINE="$_saved_task10_machine"
+cname="$_saved_task10_cname"; dvol="$_saved_task10_dvol"; jvol="$_saved_task10_jvol"
+
+echo
+echo "Task 10 public project-lock contention (bin/ab)"
+_saved_task10_lock2_home="$HOME"; _saved_task10_lock2_runtime="${XDG_RUNTIME_DIR-}"
+_saved_task10_lock2_project="$PROJECT_DIR"; _saved_task10_lock2_machine="$MACHINE"
+_saved_task10_lock2_cname="$cname"; _saved_task10_lock2_dvol="$dvol"; _saved_task10_lock2_jvol="$jvol"
+_saved_task10_lock2_cfg_root="$AB_CFG_ROOT"
+_saved_task10_lock2_timeout="$lock_timeout_seconds"; _saved_task10_lock2_fd="$agentbox_lock_fd"
+_saved_task10_lock2_identity="$lock_identity"; _saved_task10_lock2_path="$lock_path"
+_saved_task10_lock2_result="$lock_result"
+_saved_task10_lock2_docker_fn="$(declare -f docker)"
+_saved_task10_lock2_load_fn="$(declare -f operation_record_load)"
+_task10_lock2_root="$(mktemp -d)"; HOME="$_task10_lock2_root/home"
+XDG_RUNTIME_DIR="$_task10_lock2_root/runtime"; AB_CFG_ROOT="$_task10_lock2_root/config"
+PROJECT_DIR="$_task10_lock2_root/project"; MACHINE=task10-lock; cname=agentbox-task10-lock
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$AB_CFG_ROOT" "$PROJECT_DIR"
+lock_identity="$(policy_lock_identity)"
+lock_path="$XDG_RUNTIME_DIR/agentbox/locks/$lock_identity.lock"
+mkdir -p "$(dirname "$lock_path")"; : >"$lock_path"; chmod 600 "$lock_path"
+_task10_lock2_held="$_task10_lock2_root/held"; _task10_lock2_trace="$_task10_lock2_root/trace"
+: >"$_task10_lock2_trace"
+(
+  exec 9>"$lock_path"
+  flock -n 9 || exit 1
+  : >"$_task10_lock2_held"
+  sleep 0.5
+) & _task10_lock2_pid=$!
+_task10_lock2_wait=0
+while [ ! -e "$_task10_lock2_held" ] && [ "$_task10_lock2_wait" -lt 50 ]; do
+  sleep 0.01
+  _task10_lock2_wait=$((_task10_lock2_wait + 1))
+done
+lock_timeout_seconds=0; agentbox_lock_fd=""
+docker() { printf 'docker\n' >>"$_task10_lock2_trace"; return 1; }
+operation_record_load() { printf 'record-load\n' >>"$_task10_lock2_trace"; return 0; }
+for _task10_lock2_command in start config rebuild exec; do
+  case "$_task10_lock2_command" in
+    exec) _task10_lock2_output="$( ( main exec -- true ) 2>&1 )"; _task10_lock2_rc=$? ;;
+    *) _task10_lock2_output="$( ( main "$_task10_lock2_command" ) 2>&1 )"; _task10_lock2_rc=$? ;;
+  esac
+  assert_eq "busy lock refuses public $_task10_lock2_command" 1 "$_task10_lock2_rc"
+  assert_eq "busy lock is diagnosed for $_task10_lock2_command" 1 \
+    "$(printf '%s\n' "$_task10_lock2_output" | grep -c 'project busy')"
+done
+wait "$_task10_lock2_pid"
+assert_eq "busy public commands avoid unlocked record load" 0 "$(grep -c '^record-load$' "$_task10_lock2_trace" || true)"
+assert_eq "busy public commands avoid Docker" 0 "$(grep -c '^docker$' "$_task10_lock2_trace" || true)"
+unset -f docker operation_record_load
+eval "$_saved_task10_lock2_docker_fn"; eval "$_saved_task10_lock2_load_fn"
+
+# An explicit exec child path inherits the already-acquired project lock. The public dispatch
+# reaches Docker once without reacquiring the lock inside the child operation.
+_saved_task10_reentrant_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task10_reentrant_preflight_fn="$(declare -f policy_preflight)"
+_saved_task10_reentrant_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task10_reentrant_lock_fn="$(declare -f policy_lock_acquire)"
+_saved_task10_reentrant_jj_fn="$(declare -f require_jj_state_mount)"
+_saved_task10_reentrant_wait_fn="$(declare -f wait_jj_state)"
+_saved_task10_reentrant_running_fn="$(declare -f is_running)"
+_saved_task10_reentrant_docker_fn="$(declare -f docker)"
+_saved_task10_reentrant_update_fn="$(declare -f check_for_update)"
+_task10_reentrant_trace="$_task10_lock2_root/reentrant.trace"
+policy_lock_acquire() { printf 'lock\n' >>"$_task10_reentrant_trace"; return 0; }
+policy_operation_begin() {
+  policy_operation_requested=1; policy_operation_status=none
+  policy_readiness_result=not-applicable; operation_state_reset
+  operation_state_update_allowed=1; policy_lock_acquire
+}
+policy_preflight() {
+  policy_decision_kind=start-in-place; policy_decision_reason_code=policy-matches-recorded
+  policy_decision_execution_allowed=1; policy_decision_update_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_decision_mutation_allowed=0
+  return 0
+}
+policy_resolution_recheck() { return 0; }
+require_jj_state_mount() { return 0; }
+wait_jj_state() { return 0; }
+is_running() { return 0; }
+docker() { printf 'docker-exec\n' >>"$_task10_reentrant_trace"; return 0; }
+check_for_update() { return 0; }
+policy_input_reset
+_task10_reentrant_output="$( ( main exec -- true ) 2>&1 )"; _task10_reentrant_rc=$?
+assert_eq "public exec reentrant path succeeds" 0 "$_task10_reentrant_rc"
+assert_eq "public exec acquires project lock once" 1 "$(grep -c '^lock$' "$_task10_reentrant_trace" || true)"
+assert_eq "public exec invokes child once" 1 "$(grep -c '^docker-exec$' "$_task10_reentrant_trace" || true)"
+unset -f policy_operation_begin policy_preflight policy_resolution_recheck policy_lock_acquire
+unset -f require_jj_state_mount wait_jj_state is_running docker check_for_update
+eval "$_saved_task10_reentrant_begin_fn"; eval "$_saved_task10_reentrant_preflight_fn"
+eval "$_saved_task10_reentrant_recheck_fn"; eval "$_saved_task10_reentrant_lock_fn"
+eval "$_saved_task10_reentrant_jj_fn"; eval "$_saved_task10_reentrant_wait_fn"; eval "$_saved_task10_reentrant_running_fn"
+eval "$_saved_task10_reentrant_docker_fn"; eval "$_saved_task10_reentrant_update_fn"
+rm -rf "$_task10_lock2_root"
+HOME="$_saved_task10_lock2_home"; if [ -n "$_saved_task10_lock2_runtime" ]; then XDG_RUNTIME_DIR="$_saved_task10_lock2_runtime"; else unset XDG_RUNTIME_DIR; fi
+AB_CFG_ROOT="$_saved_task10_lock2_cfg_root"; PROJECT_DIR="$_saved_task10_lock2_project"
+MACHINE="$_saved_task10_lock2_machine"; cname="$_saved_task10_lock2_cname"
+dvol="$_saved_task10_lock2_dvol"; jvol="$_saved_task10_lock2_jvol"
+lock_timeout_seconds="$_saved_task10_lock2_timeout"; agentbox_lock_fd="$_saved_task10_lock2_fd"
+lock_identity="$_saved_task10_lock2_identity"; lock_path="$_saved_task10_lock2_path"
+lock_result="$_saved_task10_lock2_result"
+
+echo
+echo "Task 10 public retry recovery (bin/ab)"
+_saved_task10_retry_home="$HOME"; _saved_task10_retry_runtime="${XDG_RUNTIME_DIR-}"
+_saved_task10_retry_state="${XDG_STATE_HOME-}"; _saved_task10_retry_cfg_root="$AB_CFG_ROOT"
+_saved_task10_retry_project="$PROJECT_DIR"; _saved_task10_retry_machine="$MACHINE"
+_saved_task10_retry_cname="$cname"; _saved_task10_retry_dvol="$dvol"; _saved_task10_retry_jvol="$jvol"
+_saved_task10_retry_preflight_fn="$(declare -f policy_preflight)"
+_saved_task10_retry_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task10_retry_update_fn="$(declare -f check_for_update)"
+_saved_task10_retry_start_fn="$(declare -f cmd_start)"
+_saved_task10_retry_running_fn="$(declare -f is_running)"
+_saved_task10_retry_docker_fn="$(declare -f docker)"
+_task10_retry_root="$(mktemp -d)"
+HOME="$_task10_retry_root/home"; XDG_RUNTIME_DIR="$_task10_retry_root/runtime"
+XDG_STATE_HOME="$_task10_retry_root/state"; AB_CFG_ROOT="$_task10_retry_root/config"
+PROJECT_DIR="$_task10_retry_root/project"; MACHINE=task10-retry
+cname=agentbox-task10-retry; dvol=task10-docker; jvol=task10-jj
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$AB_CFG_ROOT" "$PROJECT_DIR"
+lock_identity="$(policy_lock_identity)"; lock_path=""; agentbox_lock_fd=""
+_task10_retry_trace="$_task10_retry_root/retry.trace"
+_task10_retry_write_record() {
+  local _task10_retry_state="$1"
+  policy_operation_requested=1
+  operation_record_sequence=0
+  operation_record_begin || return 1
+  operation_image_reference=agentbox:task10-existing
+  case "$_task10_retry_state" in
+    removal-failed)
+      operation_phase=removal
+      operation_record_terminal removal-failed fail "remove failed" || return 1
+      ;;
+    network-degraded)
+      operation_phase=required-network
+      operation_record_terminal network-degraded degraded-fail "network failed" || return 1
+      ;;
+    readiness-failed)
+      operation_phase=nested-readiness
+      operation_readiness_result=failed-and-exited
+      operation_record_terminal readiness-failed fail "readiness failed" || return 1
+      ;;
+  esac
+}
+is_running() { return 0; }
+policy_preflight() {
+  printf 'inspect\n' >>"$_task10_retry_trace"
+  policy_updates_check=1; policy_decision_update_allowed=1
+  policy_decision_kind=reconcile-stopped; policy_decision_reason_code=explicit-apply
+  policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_decision_explicit_apply_required=0
+  policy_needs_recreate=1
+  return 0
+}
+policy_resolution_recheck() { return 0; }
+check_for_update() { return 0; }
+docker() { printf 'docker\n' >>"$_task10_retry_trace"; return 1; }
+cmd_start() {
+  local _task10_retry_image="$operation_image_reference"
+  printf 'mutate\n' >>"$_task10_retry_trace"
+  operation_record_begin_if_needed || return 1
+  operation_image_reference="$_task10_retry_image"
+  printf 'id=%s\nimage=%s\ncontainer=%s\ninner=%s\njj=%s\nretry=%s\n' \
+    "$operation_id" "$operation_image_reference" "$operation_record_container_name" \
+    "$operation_record_inner_docker_volume" "$operation_record_jj_volume" \
+    "$operation_retry_command" >>"$_task10_retry_trace"
+  operation_phase=completion; operation_readiness_result=ready
+  operation_record_terminal complete pass "" || return 1
+  return 0
+}
+
+# Every durable terminal failure has the same explicit public recovery path: inspect once while
+# holding the project lock, create one fresh record, reuse the prior image/identities, and perform
+# one mocked mutation. Docker is traced separately so a policy-only retry cannot hide a duplicate.
+for _task10_retry_state in removal-failed network-degraded readiness-failed; do
+  : >"$_task10_retry_trace"
+  _task10_retry_write_record "$_task10_retry_state"
+  assert_eq "$_task10_retry_state records existing image" "image_reference = \"agentbox:task10-existing\"" \
+    "$(grep '^image_reference' "$operation_record_path" || true)"
+  _task10_retry_old_id="$operation_id"
+  _task10_retry_output="$( ( main start --apply ) 2>&1 )"; _task10_retry_rc=$?
+  assert_eq "$_task10_retry_state public retry succeeds" 0 "$_task10_retry_rc"
+  assert_eq "$_task10_retry_state performs fresh inspection" 1 \
+    "$(grep -c '^inspect$' "$_task10_retry_trace" || true)"
+  assert_eq "$_task10_retry_state performs one mutation" 1 \
+    "$(grep -c '^mutate$' "$_task10_retry_trace" || true)"
+  assert_eq "$_task10_retry_state avoids duplicate Docker mutation" 0 \
+    "$(grep -c '^docker$' "$_task10_retry_trace" || true)"
+  _task10_retry_new_id="$(sed -n 's/^id=//p' "$_task10_retry_trace")"
+  assert_eq "$_task10_retry_state gets a fresh operation id" 1 \
+    "$([ "$_task10_retry_old_id" != "$_task10_retry_new_id" ] && echo 1 || echo 0)"
+  assert_eq "$_task10_retry_state reuses image" 1 \
+    "$(grep -c '^image=agentbox:task10-existing$' "$_task10_retry_trace" || true)"
+  assert_eq "$_task10_retry_state preserves container" 1 \
+    "$(grep -c '^container=agentbox-task10-retry$' "$_task10_retry_trace" || true)"
+  assert_eq "$_task10_retry_state preserves inner volume" 1 \
+    "$(grep -c '^inner=task10-docker$' "$_task10_retry_trace" || true)"
+  assert_eq "$_task10_retry_state preserves jj volume" 1 \
+    "$(grep -c '^jj=task10-jj$' "$_task10_retry_trace" || true)"
+  assert_eq "$_task10_retry_state uses retry command" 1 \
+    "$(grep -c '^retry=ab start --apply$' "$_task10_retry_trace" || true)"
+done
+unset -f policy_preflight policy_resolution_recheck check_for_update cmd_start is_running docker
+eval "$_saved_task10_retry_preflight_fn"; eval "$_saved_task10_retry_recheck_fn"
+eval "$_saved_task10_retry_update_fn"; eval "$_saved_task10_retry_start_fn"
+eval "$_saved_task10_retry_running_fn"; eval "$_saved_task10_retry_docker_fn"
+rm -rf "$_task10_retry_root"
+HOME="$_saved_task10_retry_home"
+if [ -n "$_saved_task10_retry_runtime" ]; then XDG_RUNTIME_DIR="$_saved_task10_retry_runtime"; else unset XDG_RUNTIME_DIR; fi
+if [ -n "$_saved_task10_retry_state" ]; then XDG_STATE_HOME="$_saved_task10_retry_state"; else unset XDG_STATE_HOME; fi
+AB_CFG_ROOT="$_saved_task10_retry_cfg_root"; PROJECT_DIR="$_saved_task10_retry_project"
+MACHINE="$_saved_task10_retry_machine"; cname="$_saved_task10_retry_cname"
+dvol="$_saved_task10_retry_dvol"; jvol="$_saved_task10_retry_jvol"
+
+echo
 if [ "$FAIL" -eq 0 ]; then
   printf 'PASS: all %d tests passed\n' "$PASS"
   exit 0
