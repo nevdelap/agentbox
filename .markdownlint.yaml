@@ -1,0 +1,12 @@
+default: true
+
+# Prose, tables, command output, and generated documentation are not constrained
+# to an 80-column display width.
+MD013: false
+
+# Igor and Rufus intentionally use the same section names in separate role sections.
+MD024:
+  siblings_only: true
+
+# Fenced blocks include command output and syntax fragments that have no language.
+MD040: false

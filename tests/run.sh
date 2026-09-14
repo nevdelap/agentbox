@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2119,SC2120,SC2218,SC2032,SC2100,SC2317,SC2329 # tests use intentional forwarding wrappers and indirect mocks
+# SC2034 stays scoped to the sourced-mock seams below.
 # Unit tests for agentbox host-side logic:
 #   - bin/ab                :: compute_names, ab_config_candidates, ab_config_file,
 #                              ab_config_container_path, ab_parse_mounts_line, ab_mount_dest_owner,
@@ -28,13 +29,30 @@ fail() { printf '  FAIL %s\n' "$1";
 assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else fail "$1" "$2" "$3"; fi; }
 
 # --- source the code under test, then relax errexit/nounset (all three scripts set them) ---
+# shellcheck source=../bin/ab
 # shellcheck disable=SC1091
 source "$REPO/bin/ab"
+# shellcheck source=../agentbox-entrypoint.sh
 # shellcheck disable=SC1091
 source "$REPO/agentbox-entrypoint.sh"
+# shellcheck source=../tests/smoke.sh
 # shellcheck disable=SC1091
 source "$REPO/tests/smoke.sh"   # source-safe: its ab_parse_env_line() is unit-tested below
 set +e +u
+
+# The sourced launcher owns these globals; declare the cross-file test contract so ShellCheck
+# can distinguish dynamically exchanged test state from genuinely missing variables.
+declare slug nocache operation_readiness_handoff_state operation_state_readiness_daemon_evidence
+declare operation_state_readiness_retryable operation_state_readiness_diagnostic
+declare operation_state_named_volumes operation_state_old_container_id operation_state_container_id
+declare operation_state_cleanup_allowed operation_state_retry_command operation_state_diagnostic
+declare policy_retry_reconcile
+declare -a policy_snapshot_paths protected_mount_destinations
+declare -A grant_source_snapshot policy_tier_git_enabled policy_tier_grant_all_of_dot_ssh
+declare -A policy_tier_updates_check policy_resolved_source policy_resolved_labels
+declare -A mount_spec_state mount_spec_source mount_spec_destination policy_input
+# The report tests opt in explicitly; normal launcher use keeps reports disabled by default.
+AGENTBOX_REPORT=1
 
 # Expected hash for a project dir, computed the same way compute_names does (sha256[:16]).
 hex16() { printf '%s' "$1" | sha256sum | cut -c1-16; }
@@ -190,6 +208,8 @@ assert_eq "grant directory replacement detected" 1 "$_grant_rc"
 rm "$HOME/.ssh/known_hosts"; ln -s "$HOME/.ssh/missing" "$HOME/.ssh/known_hosts"
 grant_sources_snapshot >/dev/null 2>&1; _grant_rc=$?
 assert_eq "known_hosts symlink rejected" 1 "$_grant_rc"
+policy_grant_gh=0; policy_grant_all_of_dot_ssh=0
+assert_eq "no-grants source recheck accepted" 0 "$(grant_sources_recheck >/dev/null 2>&1; echo $?)"
 HOME="$_saved_home_for_sources"; rm -rf "$_source_home"
 
 _snapshot_root="$(mktemp -d)"; mkdir -p "$_snapshot_root/machines" "$_snapshot_root/projects"
@@ -201,8 +221,25 @@ policy_input_reset; policy_load_host >/dev/null 2>&1
 assert_eq "four policy sources snapshotted" 4 "${#policy_snapshot_paths[@]}"
 printf '%s\n' '[git]' 'enabled = false' >"$_snapshot_root/agentbox.toml"
 assert_eq "policy replacement detected" 1 "$(policy_snapshot_recheck >/dev/null 2>&1; echo $?)"
+rm -f "$_snapshot_root/agentbox.toml"
+policy_input_reset; policy_load_host >/dev/null 2>&1
+assert_eq "unchanged absent policy snapshot accepted" 0 "$(policy_snapshot_recheck >/dev/null 2>&1; echo $?)"
 mkdir "$_snapshot_root/outside"; rm -rf "$_snapshot_root/machines"; ln -s "$_snapshot_root/outside" "$_snapshot_root/machines"
 assert_eq "symlinked policy tier rejected" 1 "$(policy_load_host >/dev/null 2>&1; echo $?)"
+_snapshot_symlink_target="$(mktemp -d)"; _snapshot_symlink_parent="$(mktemp -d)"
+mkdir -p "$_snapshot_symlink_target/machines" "$_snapshot_symlink_target/projects" \
+  "$_snapshot_symlink_target/project"
+ln -s "$_snapshot_symlink_target" "$_snapshot_symlink_parent/agentbox"
+AB_CFG_ROOT="$_snapshot_symlink_parent/agentbox"; PROJECT_DIR="$_snapshot_symlink_target/project"
+policy_input_reset
+assert_eq "symlinked policy root allows absent defaults" 0 "$(policy_load_host >/dev/null 2>&1; echo $?)"
+_snapshot_symlink_retarget="$(mktemp -d)"
+mkdir -p "$_snapshot_symlink_retarget/machines" "$_snapshot_symlink_retarget/projects"
+rm -f "$_snapshot_symlink_parent/agentbox"
+ln -s "$_snapshot_symlink_retarget" "$_snapshot_symlink_parent/agentbox"
+assert_eq "retargeted policy root rejected" 1 \
+  "$(policy_snapshot_recheck >/dev/null 2>&1; echo $?)"
+rm -rf "$_snapshot_symlink_parent" "$_snapshot_symlink_target" "$_snapshot_symlink_retarget"
 AB_CFG_ROOT="$_saved_policy_root_for_snapshot"; PROJECT_DIR="$_saved_project_for_snapshot"; MACHINE="$_saved_machine_for_snapshot"
 rm -rf "$_snapshot_root"
 
@@ -237,11 +274,10 @@ policy_preflight() {
   return 0
 }
 policy_grant_gh=0; policy_grant_all_of_dot_ssh=0
-policy_snapshot_retry_count=0
 policy_resolution_recheck start >/dev/null 2>&1; _retry_rc=$?
 assert_eq "policy retry succeeds after one change" 0 "$_retry_rc"
 assert_eq "start retry preserves recorded grant" 1 "$policy_grant_gh"
-recheck_calls=0; policy_snapshot_retry_count=0
+recheck_calls=0
 policy_snapshot_recheck() { recheck_calls=$((recheck_calls + 1)); return 1; }
 policy_resolution_recheck start >/dev/null 2>&1; _retry_rc=$?
 assert_eq "second policy change fails" 1 "$_retry_rc"
@@ -523,13 +559,13 @@ policy_container_snapshot() {
   policy_container_snapshot_reset
   [ "$mock_container_exists" = 1 ] || return 1
   if [ "$mock_container_running" = 1 ]; then policy_container_snapshot_lifecycle=running; else policy_container_snapshot_lifecycle=stopped; fi
-  [ -n "$mock_version" ] && policy_container_snapshot_labels[org.agentbox.policy.version]="$mock_version"
-  [ -n "$mock_git" ] && policy_container_snapshot_labels[org.agentbox.policy.git_enabled]="$mock_git"
-  [ -n "$mock_gh" ] && policy_container_snapshot_labels[org.agentbox.policy.github_grant]="$mock_gh"
-  [ -n "$mock_ssh" ] && policy_container_snapshot_labels[org.agentbox.policy.ssh_grant_all]="$mock_ssh"
-  [ -n "$mock_digest" ] && policy_container_snapshot_labels[org.agentbox.policy.digest]="$mock_digest"
-  [ -n "${mock_old_gh-}" ] && policy_container_snapshot_labels[agentbox.grant-gh]="$mock_old_gh"
-  [ -n "${mock_old_ssh-}" ] && policy_container_snapshot_labels[agentbox.grant-all-of-dot-ssh]="$mock_old_ssh"
+  [ -n "$mock_version" ] && policy_container_snapshot_labels["org.agentbox.policy.version"]="$mock_version"
+  [ -n "$mock_git" ] && policy_container_snapshot_labels["org.agentbox.policy.git_enabled"]="$mock_git"
+  [ -n "$mock_gh" ] && policy_container_snapshot_labels["org.agentbox.policy.github_grant"]="$mock_gh"
+  [ -n "$mock_ssh" ] && policy_container_snapshot_labels["org.agentbox.policy.ssh_grant_all"]="$mock_ssh"
+  [ -n "$mock_digest" ] && policy_container_snapshot_labels["org.agentbox.policy.digest"]="$mock_digest"
+  [ -n "${mock_old_gh-}" ] && policy_container_snapshot_labels["agentbox.grant-gh"]="$mock_old_gh"
+  [ -n "${mock_old_ssh-}" ] && policy_container_snapshot_labels["agentbox.grant-all-of-dot-ssh"]="$mock_old_ssh"
   [ "$mock_git_mount" = 1 ] && policy_container_snapshot_mount_sources[/usr/bin/git]="$mock_git_source"
   [ "$mock_gitconfig_mount" = 1 ] && policy_container_snapshot_mount_sources[/home/agentbox/.gitconfig]=legacy
   [ "$mock_xdg_gitconfig_mount" = 1 ] && policy_container_snapshot_mount_sources[/home/agentbox/.config/git/config]=legacy
@@ -647,16 +683,18 @@ policy_container_snapshot() {
     mock_git_source=/tmp/replacement-git
   fi
 }
+# Human-authorized exception: this mock exports snapshot globals to sourced bin/ab code.
+# shellcheck disable=SC2034
 policy_container_snapshot_fixture() {
   mock_snapshot_calls=$((mock_snapshot_calls + 1))
   policy_container_snapshot_reset
   [ "$mock_container_exists" = 1 ] || return 1
   if [ "$mock_container_running" = 1 ]; then policy_container_snapshot_lifecycle=running; else policy_container_snapshot_lifecycle=stopped; fi
-  [ -n "$mock_version" ] && policy_container_snapshot_labels[org.agentbox.policy.version]="$mock_version"
-  [ -n "$mock_git" ] && policy_container_snapshot_labels[org.agentbox.policy.git_enabled]="$mock_git"
-  [ -n "$mock_gh" ] && policy_container_snapshot_labels[org.agentbox.policy.github_grant]="$mock_gh"
-  [ -n "$mock_ssh" ] && policy_container_snapshot_labels[org.agentbox.policy.ssh_grant_all]="$mock_ssh"
-  [ -n "$mock_digest" ] && policy_container_snapshot_labels[org.agentbox.policy.digest]="$mock_digest"
+  [ -n "$mock_version" ] && policy_container_snapshot_labels["org.agentbox.policy.version"]="$mock_version"
+  [ -n "$mock_git" ] && policy_container_snapshot_labels["org.agentbox.policy.git_enabled"]="$mock_git"
+  [ -n "$mock_gh" ] && policy_container_snapshot_labels["org.agentbox.policy.github_grant"]="$mock_gh"
+  [ -n "$mock_ssh" ] && policy_container_snapshot_labels["org.agentbox.policy.ssh_grant_all"]="$mock_ssh"
+  [ -n "$mock_digest" ] && policy_container_snapshot_labels["org.agentbox.policy.digest"]="$mock_digest"
   [ "$mock_git_mount" = 1 ] && policy_container_snapshot_mount_sources[/usr/bin/git]="$mock_git_source"
   policy_container_snapshot_ready=1
 }
@@ -1247,6 +1285,7 @@ assert_eq "mounts jj conf.d" "$XDG_CONFIG_HOME/jj/conf.d:/home/agentbox/.config/
 assert_eq "JJ_CONFIG paths" \
   "JJ_CONFIG=/home/agentbox/.jjconfig.toml:/home/agentbox/.config/jj-host-config.toml:/home/agentbox/.config/jj-host-conf.d" \
   "$(jj_config_env_arg)"
+assert_eq "JJ_CONFIG path count" 3 "${#jj_config_paths[@]}"
 assert_eq "jj state mount is not host config" "" \
   "$(ab_mount_dest_owner /home/agentbox/.config/jj)"
 HOME="$_saved_home"
@@ -1566,10 +1605,12 @@ echo "ab_setup_fail (agentbox-entrypoint.sh)"
 # of the setup log (the actual cause), where to read the full log, and that it auto-retries.
 _ab_setup_tmp="$(mktemp)"
 printf 'downloading tool...\ncurl: (6) Could not resolve host: github.com\n' >"$_ab_setup_tmp"
+_saved_setup_log="$SETUP_LOG"
 SETUP_LOG="$_ab_setup_tmp"
 _ab_fail_msg="$(ab_setup_fail 7 2>&1)"
-SETUP_LOG=""
+SETUP_LOG="$_saved_setup_log"
 rm -f "$_ab_setup_tmp"
+assert_eq "setup log restored" "$_saved_setup_log" "$SETUP_LOG"
 assert_eq "reports exit code"    "1" "$(printf '%s\n' "$_ab_fail_msg" | grep -c 'exited 7')"
 assert_eq "includes log tail"    "1" "$(printf '%s\n' "$_ab_fail_msg" | grep -c 'Could not resolve host')"
 assert_eq "full-log hint shown"  "1" "$(printf '%s\n' "$_ab_fail_msg" | grep -c 'ab exec cat')"
@@ -1856,6 +1897,7 @@ decision_matrix_case() {
     fi
   fi
   policy_decide "$mode"
+  assert_eq "$name apply state" "$apply" "$policy_apply"
   assert_eq "$name" "$expected" "$policy_decision_kind"
 }
 
@@ -2168,6 +2210,8 @@ policy_git_enabled=0; policy_grant_gh=0; policy_grant_all_of_dot_ssh=0
 mount_spec_reset
 mount_spec_set git_blocker /tmp/git-disabled /usr/bin/git ro
 task7_verify_blocker_mode=ro; task7_verify_project_source=/srv/project; task7_verify_jj_name="$jvol"
+# Human-authorized exception: this mock exports mount arrays to sourced bin/ab code.
+# shellcheck disable=SC2034
 policy_inspect_recorded() {
   policy_container_snapshot_reset
   policy_container_snapshot_ready=1
@@ -2301,7 +2345,6 @@ _saved_task11_grant_labels_decl="$(declare -p grant_labels)"
 XDG_STATE_HOME="$_saved_task11_state"
 lock_identity="$(printf task11-host | sha256sum | cut -d' ' -f1)"
 cname=agentbox-task11; dvol=agentbox-docker-task11; jvol=agentbox-jj-task11
-DOCKER_READINESS_STATE_CONTAINER=/var/run/agentbox/nested-docker-state
 operation_id=task11-host-operation
 _task11_handoff_operation_id=task11-host-operation
 _task11_handoff_state=ready
@@ -2501,8 +2544,14 @@ for _task11_report_state in starting replacement-attempted ready failed-but-runn
   operation_record_container_name="$cname"; operation_record_inner_docker_volume="$dvol"
   operation_record_jj_volume="$jvol"; operation_readiness_result="$_task11_report_state"
   operation_readiness_operation_id=task11-report
-  operation_readiness_retryable=1; operation_readiness_replacement_attempted=0
+# Human-authorized exception: operation_result_record consumes these globals through the
+# sourced report path, which ShellCheck cannot follow across the test seam.
+# shellcheck disable=SC2034
+  operation_readiness_retryable=1
+  # shellcheck disable=SC2034
+  operation_readiness_replacement_attempted=0
   operation_readiness_daemon_evidence=live-dockerd
+  # shellcheck disable=SC2034
   operation_readiness_wait_attempts=60; operation_readiness_wait_bound_seconds=30
   operation_readiness_diagnostic="state fixture"
   case "$_task11_report_state" in
@@ -2510,6 +2559,7 @@ for _task11_report_state in starting replacement-attempted ready failed-but-runn
       operation_status=complete; operation_task_status=pass; operation_phase=completion
       operation_agent_execution=allowed; operation_explicit_exec=allowed
       operation_record_cleanup=permitted; operation_readiness_result=ready
+      # shellcheck disable=SC2034
       operation_readiness_retryable=0
       ;;
     starting|replacement-attempted)
@@ -2849,6 +2899,7 @@ operation_agent_execution=allowed; operation_explicit_exec=allowed
 operation_record_cleanup=permitted
 operation_record_write
 operation_record_load
+assert_eq "completed timestamp is set" "2026-09-13T00:00:00Z" "$operation_completed_at"
 assert_eq "complete-ready record is accepted" complete "$operation_state_terminal_status"
 assert_eq "complete-ready record permits execution" 1 "$operation_state_execution_allowed"
 assert_eq "complete-ready record permits cleanup" 1 "$operation_state_cleanup_allowed"
@@ -2925,6 +2976,7 @@ _saved_task8_lock_fn="$(declare -f policy_lock_acquire)"
 policy_lock_acquire() { :; }
 policy_operation_retry=1
 policy_operation_begin
+assert_eq "policy retry remains requested" 1 "$policy_operation_retry"
 assert_eq "explicit recovery marks reconciliation" 1 "$policy_retry_reconcile"
 assert_eq "explicit recovery clears ordinary failure gate" none "$policy_operation_status"
 operation_record_begin
@@ -2988,6 +3040,10 @@ policy_operation_begin() {
   operation_state_explicit_exec_mode=blocked; policy_decision_update_allowed=0
   policy_operation_status="$operation_state_terminal_status"
   policy_readiness_result="$operation_state_readiness_state"
+  assert_eq "$_task8_dispatch_state publishes a phase" 1 \
+    "$([ -n "$operation_state_phase" ] && echo 1 || echo 0)"
+  assert_eq "$_task8_dispatch_state blocks explicit exec" blocked \
+    "$operation_state_explicit_exec_mode"
   printf 'begin:%s\n' "$operation_state_terminal_status" >>"$_task8_trace"
   return 0
 }
@@ -3179,6 +3235,17 @@ _task9_main_output="$( ( main start ) 2>&1 )"; _task9_main_rc=$?
 assert_eq "public early start failure exits one" 1 "$_task9_main_rc"
 assert_eq "public early start failure has one result" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^result=failed$')"
 assert_eq "public early start failure reason" 1 "$(printf '%s\n' "$_task9_main_output" | grep -c '^reason=start-failed$')"
+
+_task9_fail_begin=1
+_task9_stdout="$(mktemp)"; _task9_stderr="$(mktemp)"
+( main start >"$_task9_stdout" 2>"$_task9_stderr" ); _task9_main_rc=$?
+assert_eq "public lifecycle trap failure exits one" 1 "$_task9_main_rc"
+assert_eq "public lifecycle trap report is on stdout" 1 \
+  "$(grep -c '^result=failed$' "$_task9_stdout")"
+assert_eq "public lifecycle trap report is absent from stderr" 0 \
+  "$(grep -c '^result=' "$_task9_stderr" || true)"
+rm -f "$_task9_stdout" "$_task9_stderr"
+_task9_fail_begin=0
 
 task9_main_start_mode=complete
 _task9_main_output="$( ( main start ) 2>&1 )"; _task9_main_rc=$?
@@ -3372,6 +3439,8 @@ _saved_task9_readiness_docker_fn="$(declare -f docker)"
 _task9_readiness_record="$(mktemp)"
 printf 'readiness failure record\n' >"$_task9_readiness_record"
 _task9_readiness_trace="$(mktemp)"
+# Human-authorized exception: this fixture exports report globals to sourced bin/ab code.
+# shellcheck disable=SC2034
 task9_readiness_fixture() {
   policy_operation_requested=1
   operation_state_reset
@@ -3475,13 +3544,15 @@ chmod 600 \
   "$_task9_config_root/machines/$_task9_config_machine/projects/work/task9-secret-project/agentbox.toml"
 _saved_cfg_root="$AB_CFG_ROOT"; _saved_machine="$MACHINE"; _saved_project="$PROJECT_DIR"
 AB_CFG_ROOT="$_task9_config_root"; MACHINE="$_task9_config_machine"; PROJECT_DIR="$_task9_config_project"
-cfg_env=""; cfg_mounts=""; cfg_ports=""; cfg_setup=""; cfg_networks=""; cfg_dockerfile=""; cfg_files_legacy=""
+cfg_env=""; cfg_mounts=""; cfg_networks=""; cfg_dockerfile=""
 _task9_config_invalid=0; _task9_config_update_trace="$(mktemp)"
 policy_operation_begin() {
   policy_operation_requested=1; operation_state_reset; operation_record_active=0; operation_status=""
   policy_operation_status=none
   policy_readiness_result=not-applicable; operation_state_publish; return 0
 }
+# Human-authorized exception: this mock exports policy sources to sourced bin/ab code.
+# shellcheck disable=SC2034
 policy_load_host() {
   policy_git_enabled=1; policy_grant_gh=1; policy_grant_all_of_dot_ssh=1; policy_updates_check=1
   policy_git_source=machine_project; policy_grant_gh_source=machine
@@ -3494,6 +3565,8 @@ policy_preflight() {
   return 0
 }
 policy_resolution_recheck() { return 0; }
+# Human-authorized exception: this mock exports policy state to sourced bin/ab code.
+# shellcheck disable=SC2034
 policy_inspect_recorded() {
   if [ "$_task9_config_invalid" = 1 ]; then
     policy_recorded_status=invalid; policy_recorded_classification=invalid
@@ -3540,6 +3613,14 @@ assert_eq "config reports exact mount delta" 1 \
   "$(printf '%s\n' "$_task9_config_output" | grep -c 'recorded Git blocker mount contradicts git.enabled')"
 assert_eq "config reports operation state" 1 \
   "$(printf '%s\n' "$_task9_config_output" | grep -c 'operation state:.*none')"
+assert_eq "config report values align" 1 \
+  "$(printf '%s\n' "$_task9_config_output" | awk '
+    /^  (git\.enabled|github\.grant|ssh\.grant_all|updates\.check|recorded container:|operation state:|operation retry:|operation diagnostic:|operation permissions:|recorded values:)/ {
+      if (substr($0, 26, 1) !~ /[^[:space:]]/ || substr($0, 25, 1) != " ") bad=1
+      count++
+    }
+    END { print count == 10 && !bad ? 1 : 0 }
+  ')"
 assert_eq "config does not leak policy secret" 0 \
   "$(printf '%s\n' "$_task9_config_output" | grep -c 'credential-secret-must-not-leak')"
 _task9_config_invalid=1; : >"$_task9_config_update_trace"
@@ -3662,6 +3743,8 @@ _saved_task9_network="$operation_network_outcomes"
 _saved_task9_retry="$operation_retry_command"
 _saved_task9_cleanup="$operation_record_cleanup"
 _saved_task9_valid="$operation_state_valid"
+# Human-authorized exception: this fixture exports report state to sourced bin/ab code.
+# shellcheck disable=SC2034
 task9_report_fixture() {
   policy_operation_mode="$1"
   policy_operation_status="$2"
@@ -3696,6 +3779,18 @@ task9_report_fixture status none not-applicable
 _task9_report="$(command_report_emit)"
 assert_eq "none status report-only result" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^result=report-only$')"
 assert_eq "none status report-only exit" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^exit_status=0$')"
+AGENTBOX_REPORT=0
+assert_eq "report override suppresses output" "" "$(command_report_emit)"
+unset AGENTBOX_REPORT
+assert_eq "report is opt-in by default" "" "$(command_report_emit)"
+# Human-authorized exception: command_report_emit consumes this sourced environment control.
+# shellcheck disable=SC2034
+AGENTBOX_REPORT=1
+assert_eq "report override forces output" 1 "$(command_report_emit | grep -c '^result=report-only$')"
+assert_eq "help documents report opt-in" 1 \
+  "$("$REPO/bin/ab" --help | grep -c 'AGENTBOX_REPORT=1')"
+assert_eq "README documents report opt-in" 1 \
+  "$(grep -c 'AGENTBOX_REPORT=1 ab status' "$REPO/README.md")"
 assert_eq "report has operation identity" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^operation_id=task9-operation$')"
 assert_eq "report has readiness" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^readiness=not-applicable$')"
 assert_eq "report has retry direction" 1 "$(printf '%s\n' "$_task9_report" | grep -c '^retry_command=ab start --apply$')"
@@ -3933,6 +4028,8 @@ unset AGENTBOX_NO_UPDATE_CHECK
 # An update failure is courtesy-only: a public start still returns success and performs its one
 # mocked mutation. This proves the update result cannot change product status or mutation.
 policy_preflight() {
+  # Human-authorized exception: command dispatch consumes this sourced policy global.
+  # shellcheck disable=SC2034
   policy_updates_check=1; policy_decision_update_allowed=1
   policy_decision_kind=start-in-place; policy_decision_reason_code=policy-matches-recorded
   policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1
@@ -4124,6 +4221,8 @@ _task10_retry_trace="$_task10_retry_root/retry.trace"
 _task10_retry_write_record() {
   local _task10_retry_state="$1"
   policy_operation_requested=1
+  # Human-authorized exception: operation_record_begin consumes this sourced global.
+  # shellcheck disable=SC2034
   operation_record_sequence=0
   operation_record_begin || return 1
   operation_image_reference=agentbox:task10-existing
@@ -4146,6 +4245,8 @@ _task10_retry_write_record() {
 is_running() { return 0; }
 policy_preflight() {
   printf 'inspect\n' >>"$_task10_retry_trace"
+  # Human-authorized exception: command dispatch consumes this sourced policy global.
+  # shellcheck disable=SC2034
   policy_updates_check=1; policy_decision_update_allowed=1
   policy_decision_kind=reconcile-stopped; policy_decision_reason_code=explicit-apply
   policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1

@@ -29,6 +29,10 @@
 #                            otherwise just re-hit the cached install layer from the last build)
 #   ab --version             print the agentbox version
 #
+# Structured command reports are disabled by default. Set AGENTBOX_REPORT=1 to append the
+# stable key/value report to stdout (AGENTBOX_REPORT=0 disables it explicitly); accepted true
+# values are 1, true, yes, and on, and all other values disable reporting.
+#
 # Each project path gets its own container (and its own inner-docker data root), so
 # per-container state — notably CARGO_TARGET_DIR=/tmp/target — persists across ab
 # invocations until `ab destroy`.
@@ -392,8 +396,9 @@ ab_policy_candidates() {
     "$root/machines/$machine/projects/$proj/agentbox.toml"
 }
 
-# Reject a symlink anywhere below the policy root. `test -f` follows symlinked parent
-# directories, which would otherwise let a policy source move outside the configured tree.
+# Reject a symlink in the policy path below the configured root. The root itself may be a
+# deliberate configuration-tree symlink, such as a Home Manager-managed ~/.config/agentbox;
+# policy tier directories and files remain non-symlink sources within that resolved tree.
 policy_path_has_symlink() {
   local path="$1" root="$2" rest part current
   case "$path" in
@@ -401,7 +406,6 @@ policy_path_has_symlink() {
     "$root"/*) rest="${path#"$root"/}" ;;
     *) return 1 ;;
   esac
-  [ ! -L "$root" ] || return 0
   current="$root"
   while [ -n "$rest" ]; do
     part="${rest%%/*}"
@@ -429,9 +433,82 @@ declare -A policy_snapshot_hash=() policy_snapshot_content=()
 policy_snapshot_paths=()
 policy_snapshot_ready=0
 policy_snapshot_changed_path=""
+policy_root_snapshot_path=""
+policy_root_snapshot_state=""
+policy_root_snapshot_identity=""
+policy_root_snapshot_target=""
+policy_root_snapshot_ready=0
 
 policy_source_identity() {
   stat -c '%F|%d|%i|%a|%s|%Y' -- "$1" 2>/dev/null
+}
+
+policy_root_snapshot_reset() {
+  policy_root_snapshot_path=""
+  policy_root_snapshot_state=""
+  policy_root_snapshot_identity=""
+  policy_root_snapshot_target=""
+  policy_root_snapshot_ready=0
+}
+
+policy_root_snapshot_take() {
+  local state=absent identity="" target=""
+  policy_root_snapshot_reset
+  policy_root_snapshot_path="$AB_CFG_ROOT"
+  if [ -L "$AB_CFG_ROOT" ]; then
+    state=symlink
+    target="$(readlink -- "$AB_CFG_ROOT")" || {
+      policy_fail "cannot read policy root symlink: $AB_CFG_ROOT"
+      return 1
+    }
+  elif [ -d "$AB_CFG_ROOT" ]; then
+    state=directory
+  elif [ -e "$AB_CFG_ROOT" ]; then
+    state=other
+  fi
+  if [ "$state" != absent ]; then
+    identity="$(policy_source_identity "$AB_CFG_ROOT")" || {
+      policy_fail "cannot snapshot policy root: $AB_CFG_ROOT"
+      return 1
+    }
+  fi
+  policy_root_snapshot_state="$state"
+  policy_root_snapshot_identity="$identity"
+  policy_root_snapshot_target="$target"
+  policy_root_snapshot_ready=1
+}
+
+policy_root_snapshot_recheck() {
+  local state=absent identity="" target=""
+  [ "$policy_root_snapshot_ready" = 1 ] || return 0
+  [ "$AB_CFG_ROOT" = "$policy_root_snapshot_path" ] || {
+    policy_snapshot_changed_path="$AB_CFG_ROOT"
+    return 1
+  }
+  if [ -L "$AB_CFG_ROOT" ]; then
+    state=symlink
+    target="$(readlink -- "$AB_CFG_ROOT")" || {
+      policy_snapshot_changed_path="$AB_CFG_ROOT"
+      return 1
+    }
+  elif [ -d "$AB_CFG_ROOT" ]; then
+    state=directory
+  elif [ -e "$AB_CFG_ROOT" ]; then
+    state=other
+  fi
+  if [ "$state" != absent ]; then
+    identity="$(policy_source_identity "$AB_CFG_ROOT")" || {
+      policy_snapshot_changed_path="$AB_CFG_ROOT"
+      return 1
+    }
+  fi
+  if [ "$state" != "$policy_root_snapshot_state" ] ||
+     [ "$identity" != "$policy_root_snapshot_identity" ] ||
+     [ "$target" != "$policy_root_snapshot_target" ]; then
+    policy_snapshot_changed_path="$AB_CFG_ROOT"
+    return 1
+  fi
+  return 0
 }
 
 policy_snapshot_reset() {
@@ -443,11 +520,13 @@ policy_snapshot_reset() {
   policy_snapshot_paths=()
   policy_snapshot_ready=0
   policy_snapshot_changed_path=""
+  policy_root_snapshot_reset
 }
 
 policy_snapshot_take() {
   local file content size identity hash
   policy_snapshot_reset
+  policy_root_snapshot_take || return 1
   while IFS= read -r file; do
     policy_snapshot_paths+=("$file")
     policy_snapshot_state["$file"]=absent
@@ -480,6 +559,7 @@ policy_snapshot_recheck() {
   local file state content size identity hash
   [ "$policy_snapshot_ready" = 1 ] || return 0
   policy_snapshot_changed_path=""
+  policy_root_snapshot_recheck || return 1
   for file in "${policy_snapshot_paths[@]}"; do
     state="${policy_snapshot_state[$file]}"
     if policy_path_has_symlink "$file" "$AB_CFG_ROOT" || [ -L "$file" ]; then
@@ -501,6 +581,7 @@ policy_snapshot_recheck() {
       policy_snapshot_changed_path="$file"; return 1
     fi
   done
+  return 0
 }
 
 # The resolved mounts file is a second policy source: unlike agentbox.toml it is first-match
@@ -872,6 +953,11 @@ command_report_emit() {
     esac
     [ -n "$exit_status" ] && command_report_exit_status="$exit_status"
   fi
+  if ! command_report_should_emit; then
+    command_report_emitted=1
+    return 0
+  fi
+  printf '\n'
   printf 'result=%s\n' "$command_report_result"
   printf 'reason=%s\n' "$command_report_reason"
   printf 'phase=%s\n' "${operation_state_phase:-none}"
@@ -929,7 +1015,7 @@ command_report_preflight_failure() {
 command_report_lifecycle_exit_trap() {
   local rc="$1"
   if [ "${command_report_emitted:-0}" != 1 ]; then
-    command_report_emit failed command-failed 1 >&2
+    command_report_emit failed command-failed 1
   fi
   trap - EXIT
   exit "$rc"
@@ -942,6 +1028,17 @@ command_report_lifecycle_guard_begin() {
 
 command_report_lifecycle_guard_end() {
   trap - EXIT
+}
+
+# Structured reports are useful to pipes and automation, but are noise after an interactive
+# command has already shown its human-facing output. Keep explicit overrides for callers that
+# need the protocol from a terminal or want it suppressed in a script.
+command_report_should_emit() {
+  case "${AGENTBOX_REPORT:-0}" in
+    1|true|yes|on) return 0 ;;
+    0|false|no|off) return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 operation_state_update_allowed() {
@@ -1881,7 +1978,8 @@ build_user_image() {
     build_flags=(--progress=plain)
     [ "$nocache" = --no-cache ] && build_flags+=(--no-cache)
     policy_final_mutation_guard "$mode" || return 1
-    if ! log="$(cd "$ctx" && docker build "${build_flags[@]}" -t "$child_tag" . 2>&1)"; then
+    if ! log="$(cd "$ctx" && docker build "${build_flags[@]}" \
+        --build-arg "AGENTBOX_BASE_IMAGE=$base_tag" -t "$child_tag" . 2>&1)"; then
       printf '%s\n' "$log" >&2
       echo "agentbox: child image build failed (see above)" >&2
       return 1
@@ -2531,6 +2629,7 @@ grant_sources_recheck() {
     expected="${grant_source_snapshot[known_hosts]:-}"
     [ "$current" = "$expected" ] || { policy_fail "credential source changed during resolution: $path"; return 1; }
   }
+  return 0
 }
 
 # The policy mount specification is the one source of truth for the protected mounts assembled
@@ -3947,6 +4046,7 @@ cmd_config() {
   local config_grant_gh_source="$policy_grant_gh_source"
   local config_grant_all_of_dot_ssh_source="$policy_grant_all_of_dot_ssh_source"
   local policy_file
+  local report_label_width=22
   # `ab start` preserves a container's recorded policy when the host supplied no explicit value.
   # Show that effective start policy here as well, without mutating the resolved host globals or
   # refusing merely because the existing container is stale.
@@ -3977,21 +4077,22 @@ cmd_config() {
   [ "$policy_file_count" -gt 0 ] || echo "  (none — built-in defaults apply)"
   echo
   echo "policy:"
-  printf '  %-18s %s (source: %s)\n' "git.enabled" "$([ "$config_git_enabled" = 1 ] && echo true || echo false)" "$config_git_source"
-  printf '  %-18s %s (source: %s)\n' "github.grant" "$([ "$config_grant_gh" = 1 ] && echo true || echo false)" "$config_grant_gh_source"
-  printf '  %-18s %s (source: %s)\n' "ssh.grant_all" "$([ "$config_grant_all_of_dot_ssh" = 1 ] && echo true || echo false)" "$config_grant_all_of_dot_ssh_source"
-  printf '  %-18s %s (source: %s)\n' "updates.check" "$([ "$policy_updates_check" = 1 ] && echo true || echo false)" "$policy_updates_source"
-  printf '  recorded container: %s%s\n' "$policy_recorded_status" \
+  printf '  %-*s %s (source: %s)\n' "$report_label_width" "git.enabled" "$([ "$config_git_enabled" = 1 ] && echo true || echo false)" "$config_git_source"
+  printf '  %-*s %s (source: %s)\n' "$report_label_width" "github.grant" "$([ "$config_grant_gh" = 1 ] && echo true || echo false)" "$config_grant_gh_source"
+  printf '  %-*s %s (source: %s)\n' "$report_label_width" "ssh.grant_all" "$([ "$config_grant_all_of_dot_ssh" = 1 ] && echo true || echo false)" "$config_grant_all_of_dot_ssh_source"
+  printf '  %-*s %s (source: %s)\n' "$report_label_width" "updates.check" "$([ "$policy_updates_check" = 1 ] && echo true || echo false)" "$policy_updates_source"
+  printf '  %-*s %s%s\n' "$report_label_width" "recorded container:" "$policy_recorded_status" \
     "${policy_recorded_detail:+ — $policy_recorded_detail}"
-  echo "  operation state:    $operation_state_terminal_status (phase: ${operation_state_phase:-none})"
-  printf '  operation retry:    %s\n' "$operation_state_retry_command"
-  printf '  operation diagnostic: %s\n' "${operation_state_diagnostic:-none}"
-  printf '  operation permissions: execution=%s mutation=%s update=%s diagnostic=%s cleanup=%s\n' \
+  printf '  %-*s %s (phase: %s)\n' "$report_label_width" "operation state:" \
+    "$operation_state_terminal_status" "${operation_state_phase:-none}"
+  printf '  %-*s %s\n' "$report_label_width" "operation retry:" "$operation_state_retry_command"
+  printf '  %-*s %s\n' "$report_label_width" "operation diagnostic:" "${operation_state_diagnostic:-none}"
+  printf '  %-*s execution=%s mutation=%s update=%s diagnostic=%s cleanup=%s\n' "$report_label_width" "operation permissions:" \
     "$operation_state_execution_allowed" "$operation_state_mutation_allowed" \
     "$operation_state_update_allowed" "$operation_state_diagnostic_allowed" \
     "$operation_state_cleanup_allowed"
   if [ "$policy_recorded_status" = valid ] || [ "$policy_recorded_status" = stale ] || [ "$policy_recorded_status" = legacy ]; then
-    printf '  recorded values:    git=%s github=%s ssh=%s digest=%s\n' \
+    printf '  %-*s git=%s github=%s ssh=%s digest=%s\n' "$report_label_width" "recorded values:" \
     "$([ "$policy_recorded_git_enabled" = 1 ] && echo true || echo false)" \
     "$([ "$policy_recorded_grant_gh" = 1 ] && echo true || echo false)" \
     "$([ "$policy_recorded_grant_all_of_dot_ssh" = 1 ] && echo true || echo false)" "${policy_recorded_digest:-none}"

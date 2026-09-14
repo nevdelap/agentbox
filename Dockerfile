@@ -31,12 +31,26 @@ ARG AGENTBOX_VERSION=unknown
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # --- Enable universe, then install tools. NO python3 is pulled in. ---------
 RUN sed -i 's/Components: main restricted/Components: main restricted universe/' \
       /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
+    && apt_version() { apt-cache policy "$1" | sed -n 's/^  Candidate: //p'; } \
     && apt-get install -y --no-install-recommends \
-          build-essential ca-certificates curl gh git jq just moreutils openssh-client ripgrep socat tmux \
+          build-essential="$(apt_version build-essential)" \
+          ca-certificates="$(apt_version ca-certificates)" \
+          curl="$(apt_version curl)" \
+          gh="$(apt_version gh)" \
+          git="$(apt_version git)" \
+          jq="$(apt_version jq)" \
+          just="$(apt_version just)" \
+          moreutils="$(apt_version moreutils)" \
+          openssh-client="$(apt_version openssh-client)" \
+          ripgrep="$(apt_version ripgrep)" \
+          socat="$(apt_version socat)" \
+          tmux="$(apt_version tmux)" \
     && rm -rf /var/lib/apt/lists/*
 
 # Jujutsu (Ubuntu's resolute repositories do not provide a binary package). Use the upstream
@@ -67,12 +81,17 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
          -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" \
+    && docker_codename="$(. /etc/os-release && printf '%s' "$VERSION_CODENAME")" \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $docker_codename stable" \
          > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
+    && apt_version() { apt-cache policy "$1" | sed -n 's/^  Candidate: //p'; } \
     && apt-get install -y --no-install-recommends \
-         docker-ce docker-ce-cli containerd.io \
-         docker-buildx-plugin docker-compose-plugin \
+         docker-ce="$(apt_version docker-ce)" \
+         docker-ce-cli="$(apt_version docker-ce-cli)" \
+         containerd.io="$(apt_version containerd.io)" \
+         docker-buildx-plugin="$(apt_version docker-buildx-plugin)" \
+         docker-compose-plugin="$(apt_version docker-compose-plugin)" \
     && rm -rf /var/lib/apt/lists/*
 
 # --- uv (python is provided by uv on demand — no system python) ------------
@@ -86,7 +105,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh \
 RUN existing="$(getent passwd "$HOST_UID" | cut -d: -f1)"; \
     if [ -n "$existing" ]; then userdel -r "$existing" || userdel "$existing"; fi; \
     if ! getent group "$HOST_GID" >/dev/null; then groupadd -g "$HOST_GID" agentbox; fi; \
-    useradd -m -u "$HOST_UID" -g "$HOST_GID" -s /bin/bash agentbox; \
+    useradd -l -m -u "$HOST_UID" -g "$HOST_GID" -s /bin/bash agentbox; \
     usermod -aG docker agentbox
 
 # Rust (stable toolchain) + cargo-sweep. Keep the toolchain shared and root-owned; cargo still
@@ -111,11 +130,12 @@ RUN case "$CLAUDE_CHANNEL" in \
     echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/$claude_channel $claude_channel main" \
       > /etc/apt/sources.list.d/claude-code.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends claude-code; \
+    apt_version() { apt-cache policy "$1" | sed -n 's/^  Candidate: //p'; }; \
+    apt-get install -y --no-install-recommends "claude-code=$(apt_version claude-code)"; \
     rm -rf /var/lib/apt/lists/*
 
 # --- Runtime user -----------------------------------------------------------
-USER agentbox
+USER ${HOST_UID}
 ENV HOME=/home/agentbox
 # /home/agentbox/.bin is on PATH by convention, but nothing mounts it by default — bind your own
 # host script dir there via a `~/.bin` line in ~/.config/agentbox/mounts if you want one. Appended
@@ -128,7 +148,11 @@ ENV PATH="/home/agentbox/.local/bin:/home/agentbox/.cargo/bin:/usr/local/bin:${P
 # the whole release bin/ (codex plus sibling binaries it execs at runtime, e.g.
 # codex-code-mode-host) to /usr/local/bin so a bind-mounted ~/.codex (config/auth)
 # cannot shadow the binary store.
-USER root
+# The entrypoint must start rootful dockerd and repair mounted-volume ownership before it
+# launches unprivileged docker-exec sessions. This is an intentional, human-authorized
+# DL3002 exception; the runtime contract cannot be preserved by ending as agentbox.
+# hadolint ignore=DL3002
+USER 0
 
 # Stable, image-baked identity for software running inside agentbox. This is
 # deliberately a file rather than a host-configurable environment variable.
@@ -160,11 +184,11 @@ RUN if command -v python3 >/dev/null 2>&1; then \
 COPY --chown=agentbox:$HOST_GID .bashrc /home/agentbox/.bashrc
 
 # Inner rootful dockerd data root (named volume `agentbox-docker` mounts here).
-RUN mkdir -p /var/lib/docker
 # Writable jj repo/workspace state (the launcher mounts a per-project named volume here).
 # The entrypoint repeats this ownership setup after the volume is mounted, including for
 # volumes created before this directory was added to the image.
-RUN install -d -o agentbox -g "$HOST_GID" -m 0700 /home/agentbox/.config/jj
+RUN mkdir -p /var/lib/docker \
+ && install -d -o agentbox -g "$HOST_GID" -m 0700 /home/agentbox/.config/jj
 COPY --chmod=0755 agentbox-entrypoint.sh /usr/local/bin/agentbox-entrypoint
 
 # Pin CLI versions (no auto-update); locale/term fallbacks; persist Rust build
