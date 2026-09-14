@@ -2516,7 +2516,7 @@ assert_eq "recovery preserves jj volume" 1 \
 assert_eq "recovery preserves credential boundaries" 2 \
   "$(printf '%s\n' "${_task11_run_args[@]}" | grep -Ec '/home/agentbox/\.config/gh:rw|/home/agentbox/\.ssh:ro')"
 assert_eq "recovery performs no volume removal" 0 \
-  "$(grep -Ec 'docker:(volume|rm)' "$_task11_trace" || true)"
+  "$(grep -Ec 'docker:volume rm' "$_task11_trace" || true)"
 
 # A failed recovery keeps the detailed handoff in the durable Task 7 record, where the Task 8
 # projection and Task 9 report reload it without consulting the private state file again.

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Task 13</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --bad: light-dark(#9b3030, #ff9f9f); --good: light-dark(#176b3a, #8be0aa); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1200px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--bad); }
+    .hero strong { color: var(--bad); font-size: 1.08rem; }
+    .hero.accepted { border-left-color: var(--good); }
+    .hero.accepted strong { color: var(--good); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS IMPLEMENTATION REVIEW</div>
+      <h1>Task 13 — end-to-end runtime validation</h1>
+      <p class="meta">Igor implementation <code>ad133eb5</code> · task change <code>tsqlvoszqksyrtzmpvtykrvxytxtzvqk</code> · parent <code>3c779d2c</code> (<code>main@origin</code>) · review round 7 · reviewed 2026-09-15</p>
+    </header>
+
+    <section class="hero accepted">
+      <strong>Disposition: accepted.</strong>
+      <p>This revision resolves R13-20. Cleanup eligibility is now established when the harness verifies a test-owned reservation or exact creation event, allowing safe cleanup after early failures while refusing to remove resources whose ownership or identity is uncertain. The prior runtime, row-coverage, prerequisite, network/result-inventory, setup-result, and production-scope findings remain resolved.</p>
+      <p><strong>Quality grade: A</strong> <span>(A+–F scale)</span></p>
+    </section>
+
+    <h2>Review basis</h2>
+    <p>This review covers Task 13 in <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html">the implementation plan</a>, its runtime and mount-behavior references, and Igor’s implementation revision <code>c19e050f</code>. Igor changed <a href="../justfile"><code>justfile</code></a>, <a href="../tests/run.sh"><code>tests/run.sh</code></a>, and added <a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh</code></a>; Rufus updated this document in the same jj task change. The repository is a jj repository.</p>
+
+    <h2>Assessment</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>Matrix shape and blocked result</td><td>Pass for structure</td><td>The harness defines P13-01 through P13-08, records per-row status and diagnostics, and returns blocked <code>3</code> when the prerequisite gate fails.</td></tr>
+        <tr><td>Isolation and context protection</td><td>Pass for addressed paths</td><td>The revision snapshots the launcher build inputs and isolates <code>XDG_RUNTIME_DIR</code>; no new issue was found in those corrections.</td></tr>
+        <tr><td>Resource accounting and cleanup</td><td>Pass</td><td>Inspection errors, exact identities, test-only reservation ownership, network inventory, final checks, and cleanup on both success and early failure are present. Cleanup remains exact and refuses uncertain ownership or identity.</td></tr>
+        <tr><td>Runtime assertions</td><td>Pass for supported run</td><td>Duplicate detection, build evidence, report fields, complete-ready gating, content-aware read-only checks, direct-operation bounds, all row coverage, and the successful full matrix are present.</td></tr>
+        <tr><td>Nested-daemon safety</td><td>Pass for addressed paths</td><td>The termination helper rechecks PID, executable, command name, and start time, and recovery compares start-time evidence.</td></tr>
+        <tr><td>Mandatory local gate</td><td>Pass</td><td><code>just qcheck</code> passes. This validates shell syntax, lint, and the ordinary test gate; it does not execute the live Docker/Sysbox matrix.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Findings</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Finding and required correction</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>R13-1</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:344-356</code></a></td>
+          <td>Resolved in this revision. The mount list is counted line-by-line and the synthetic duplicate fixture exercises the helper before runtime work begins.</td>
+        </tr>
+        <tr>
+          <td>R13-2</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:654-675</code></a></td>
+          <td>Resolved in this revision. Preflight distinguishes recognized not-found diagnostics from other inspection errors and refuses to continue on the latter.</td>
+        </tr>
+        <tr>
+          <td>R13-3</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:314-329, 522-576</code></a></td>
+          <td>Resolved in this revision within the test boundary. The harness reserves each expected volume with a per-invocation private root label, verifies that label immediately, records the exact identity, and refuses to claim a changed reservation. Production resources no longer receive test-only labels or environment.</td>
+        </tr>
+        <tr>
+          <td>R13-4</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:42-48, 135-164</code></a></td>
+          <td>Resolved in this revision. The context snapshot includes the present <code>.bashrc</code> and <code>.dockerignore</code> build inputs.</td>
+        </tr>
+        <tr>
+          <td>R13-5</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:232-247</code></a>; <a href="../bin/ab"><code>bin/ab:652-674</code></a></td>
+          <td>Resolved in this revision. The harness creates a mode-700 runtime directory below the test root, exports it, validates it, and records it.</td>
+        </tr>
+        <tr>
+          <td>R13-6</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:551-559</code></a></td>
+          <td>Resolved in this revision. The termination helper rechecks the PID file, command name, executable, and start-time evidence immediately before sending <code>TERM</code>.</td>
+        </tr>
+        <tr>
+          <td>R13-7</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:571-589</code></a></td>
+          <td>Resolved in this revision. Recovery compares daemon start-time evidence rather than requiring a different numeric PID, and retains the one-replacement bound.</td>
+        </tr>
+        <tr>
+          <td>R13-8</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:502-530</code></a></td>
+          <td>Resolved in this revision. The row compares pre/post image identity, rejects build output during policy-only apply, requires build output for rebuild, and verifies final policy labels and mounts.</td>
+        </tr>
+        <tr>
+          <td>R13-9</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:325-330, 989-1015</code></a></td>
+          <td>Resolved in this revision. Network inspection now fails closed, exact network identities are retained and verified, and the result verifier requires all eight row IDs with status consistency and a complete network-inventory field.</td>
+        </tr>
+        <tr>
+          <td>R13-10</td><td>Medium — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:344-358, 690-705</code></a></td>
+          <td>Resolved in this revision. The fingerprint covers the isolated state roots and hashes regular-file contents as well as metadata, and the report calls compare it before and after execution.</td>
+        </tr>
+        <tr>
+          <td>R13-11</td><td>Medium — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:1062-1100</code></a></td>
+          <td>Resolved in this revision. The configured Nix-store runtime path is parsed and versioned; the latest retained live result records Sysbox <code>0.7.0</code> and its runtime path.</td>
+        </tr>
+        <tr>
+          <td>R13-12</td><td>Medium — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:66-71</code></a></td>
+          <td>Resolved in this revision. Direct Docker CLI calls go through the 30-second wrapper, while the launcher remains under the 180-second row bound.</td>
+        </tr>
+        <tr>
+          <td>R13-13</td><td>Low — resolved</td>
+          <td><code>jj log -r @ -T description</code>, verification bullet</td>
+          <td>Resolved in this revision. The handoff accurately reports the successful Docker/Sysbox matrix and the validated Docker <code>29.7.2</code>/Sysbox <code>0.7.0</code> baseline.</td>
+        </tr>
+        <tr>
+          <td>R13-14</td><td>Medium — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:68-71, 1129-1135</code></a></td>
+          <td>Resolved in this revision. The external Docker path is resolved before the wrapper and missing Docker produces a clear blocked <code>3</code> result.</td>
+        </tr>
+        <tr>
+          <td>R13-15</td><td>Low — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:1136-1139, 1076-1096</code></a></td>
+          <td>Resolved in this revision. P13-01 runs plain <code>docker info</code> independently and records its status before the formatted runtime inspection.</td>
+        </tr>
+        <tr>
+          <td>R13-16</td><td>Medium — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:503-543, 586-623</code></a></td>
+          <td>Resolved in this revision. The row covers the running mismatch refusal, new baseline, stopped reconciliation, and explicit rebuild while checking identity and named-volume preservation.</td>
+        </tr>
+        <tr>
+          <td>R13-17</td><td>Medium — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:503-543</code></a></td>
+          <td>Resolved in this revision. The baseline start asserts the complete operation result, reason, task/operation status, and ready state.</td>
+        </tr>
+        <tr>
+          <td>R13-18</td><td>Medium — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:1118-1156, 1252-1278</code></a></td>
+          <td>Resolved in this revision. Setup failures retain <code>current_row=setup</code> and a diagnostic, record all eight matrix rows as blocked, and the result verifier explicitly accepts that shape without requiring a matrix failure row.</td>
+        </tr>
+        <tr>
+          <td>R13-19</td><td>High — resolved</td>
+          <td><a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html"><code>Task 13 boundary</code></a>; <a href="../bin/ab"><code>bin/ab</code></a></td>
+          <td>Resolved in this revision. The out-of-scope production volume-label and replacement-container environment changes are absent; ownership is now established by test-only volume reservations.</td>
+        </tr>
+        <tr>
+          <td>R13-20</td><td>High — resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:314-329, 588-604, 1026-1095</code></a></td>
+          <td>Resolved in this revision. A verified harness-reserved volume or exact container creation event sets cleanup eligibility before P13-08; <code>cleanup_exact</code> then removes only resources with matching recorded identities and known ownership after early failures. Uncertain ownership remains preserved and is reported as deferred.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Acceptance-criterion status</h2>
+    <table>
+      <thead><tr><th>Criterion</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>Runtime matrix proves blocker, grants, mounts, labels, state, and volume preservation</td><td>Pass for supported run</td><td>The latest supported-runtime result records all eight rows passing, including baseline complete-ready and the Git/grant/policy/state checks.</td></tr>
+        <tr><td>Policy changes and recovery preserve identity, avoid unnecessary builds, and produce documented states</td><td>Pass</td><td>The row compares policy-only image reuse, covers running refusal and stopped reconciliation, requires rebuild evidence, and checks final policy labels and mounts.</td></tr>
+        <tr><td>Nested recovery is bounded and safe</td><td>Pass</td><td>PID identity and replacement start-time checks are present, direct Docker operations are wrapped with the required 30-second bound, and the successful live result records P13-07 as passing.</td></tr>
+        <tr><td>Every resource is accounted for and cleaned without touching unrelated state</td><td>Pass</td><td>Exact names/IDs and test-only volume ownership are recorded; the latest supported run cleans up; and early failure paths now attempt safe exact cleanup while preserving resources when ownership or identity cannot be proven.</td></tr>
+        <tr><td>Supported rows pass; unavailable prerequisites are blocked</td><td>Pass for supported run</td><td>The latest retained supported-runtime invocation records P13-01 through P13-08 as <code>pass</code>; the earlier unsupported/failed runs remain correctly recorded as blocked or failed.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Verification</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Repository/change</td><td>jj repository confirmed; Igor implementation <code>ad133eb5</code> reviewed against parent <code>3c779d2c</code> (<code>main@origin</code>); Rufus’s review remains in the same task change <code>tsqlvoszqksyrtzmpvtykrvxytxtzvqk</code>.</td></tr>
+        <tr><td>Changed files</td><td>Igor changed <code>justfile</code>, <code>tests/run.sh</code>, and <code>tests/runtime_matrix.sh</code>. Rufus made no implementation change.</td></tr>
+        <tr><td><code>just qcheck</code></td><td>Pass on the reviewed tree.</td></tr>
+        <tr><td>Prescribed isolated runtime invocation</td><td>Igor’s handoff reports all eight rows passing after this revision. The retained pass artifact <code>/tmp/agentbox-task13.rSsvdx/result.toml</code> records the reservation-based cleanup path and was generated against predecessor <code>de5c0e8e</code>; <code>jj diff de5c0e8e..ad133eb5</code> is empty, so the reviewed file tree is identical.</td></tr>
+        <tr><td>Result record</td><td>The retained pass records P13-01 through P13-08 <code>pass</code>, verified network inventory, cleanup status <code>pass</code>, Docker <code>29.7.2</code>, and Sysbox <code>0.7.0</code>. Igor also reports setup-failure result verification passing.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Conclusion</h2>
+    <p>Task 13 is accepted. R13-1 through R13-20 are resolved. The current tree passes <code>just qcheck</code>, the supported runtime artifact passes all eight rows with verified cleanup and network inventory, and the production boundary remains intact.</p>
+
+    <h2>Review history</h2>
+    <table>
+      <thead><tr><th>Round</th><th>Disposition</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Changes requested</td><td>Matrix structure, bounded execution, result recording, and ordinary quality checks pass. R13-1 through R13-11 remained open for cleanup safety, isolation, nested-daemon identity, and incomplete acceptance evidence. Grade: C+.</td></tr>
+        <tr><td>2</td><td>Changes requested</td><td>R13-1, R13-2, and R13-4 through R13-8 were resolved. R13-3, R13-9, and R13-10 were only partially resolved; R13-11 remained open because the configured runtime-path parser failed on this host. R13-12 recorded the missing direct-operation timeout bound, and R13-13 recorded the inaccurate handoff claim. Grade: B.</td></tr>
+        <tr><td>3</td><td>Changes requested</td><td>R13-10 through R13-13 are resolved. R13-3 remains raceable because event ownership is name-only; R13-9 remains incomplete for exact network/result inventory; R13-14 through R13-17 record prerequisite-check, prescribed-command, policy-state, and baseline-readiness gaps. The latest supported-runtime run timed out at P13-02. Grade: B-.</td></tr>
+        <tr><td>4</td><td>Changes requested</td><td>R13-9 and R13-14 through R13-17 are resolved, and the complete supported runtime matrix passes. R13-3 remained a high-severity same-name ownership race for volumes; R13-18 recorded the setup-failure result-schema mismatch. Grade: B+.</td></tr>
+        <tr><td>5</td><td>Changes requested</td><td>R13-3 is resolved functionally by operation-labelled volumes, and the full supported runtime matrix passes. R13-18 is only partially resolved; R13-19 records the production-scope violation introduced to establish ownership. Grade: B.</td></tr>
+        <tr><td>6</td><td>Changes requested</td><td>R13-18 and R13-19 are resolved. R13-3 is resolved within the test boundary by private reservations. R13-20 finds that exact harness-owned resources are still left behind when a row fails before P13-08, so the failure-cleanup contract is not complete. Grade: B.</td></tr>
+        <tr><td>7</td><td>Accepted</td><td>R13-20 is resolved: verified reservations and exact creation events enable safe cleanup after early failures, while uncertain resources remain protected. The current tree has an identical-file-tree live result with all eight rows and cleanup passing, and the quiet gate passes. Grade: A.</td></tr>
+      </tbody>
+    </table>
+
+    <footer>Rufus review of Task 13. Igor owns implementation corrections; this document records the independent review.</footer>
+  </main>
+</body>
+</html>

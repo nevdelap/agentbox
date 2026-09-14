@@ -3,7 +3,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 DOCKERFILES := "Dockerfile examples/agentbox-config/Dockerfile"
 MARKDOWN_FILES := "README.md design_docs/coding_standards.md design_docs/roles.md"
 NIX_IMAGE := "nixos/nix:2.28.4"
-SHELL_FILES := "bin/ab agentbox-entrypoint.sh install-sysbox-ubuntu.sh tests/run.sh tests/smoke.sh examples/agentbox-config/setup.sh"
+SHELL_FILES := "bin/ab agentbox-entrypoint.sh install-sysbox-ubuntu.sh tests/run.sh tests/runtime_matrix.sh tests/smoke.sh examples/agentbox-config/setup.sh"
 SHELLCHECK_LOCK := "/tmp/agentbox-shellcheck.lock"
 SHELLCHECK_IMAGE := "koalaman/shellcheck:stable"
 UV_ENV := "UV_CACHE_DIR=/tmp/agentbox-uv-cache UV_TOOL_DIR=/tmp/agentbox-uv-tools"
