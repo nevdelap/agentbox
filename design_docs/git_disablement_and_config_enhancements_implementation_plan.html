@@ -58,11 +58,11 @@
       <div class="eyebrow">IMPLEMENTATION PLAN</div>
       <h1>Agentbox Git Disablement</h1>
       <p class="subtitle">Ordered implementation breakdown for the Git disablement and configuration enhancements.</p>
-      <p class="meta">Planning pass · Tasks 1–11 have executable specifications below; tasks 12–14 remain at breakdown level.</p>
+      <p class="meta">Planning pass · Tasks 1–11 are merged; tasks 12–14 have executable specifications below.</p>
     </header>
 
     <section class="callout">
-      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–11 additionally define implementation scope, tests, and acceptance criteria for execution and review; tasks 12–14 remain a high-level breakdown. The full system design remains in the design document.
+      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–11 are complete and their detailed specifications remain below in collapsed sections for traceability. Tasks 12–14 are the remaining executable work. The full system design remains in the design document.
     </section>
 
     <h2>Implementation tasks</h2>
@@ -72,113 +72,113 @@
         <tr><th>Order</th><th>Role</th><th>Task</th><th>Implementation scope</th><th>Depends on</th></tr>
       </thead>
       <tbody>
-        <tr class="group"><td colspan="5">Foundation and Git-disablement critical path — implement the feature before general lifecycle improvements.</td></tr>
+        <tr class="group"><td colspan="5">Completed implementation — tasks 1–11 are merged; their detailed specifications remain collapsed below.</td></tr>
         <tr id="task-1-definition">
           <td>1</td>
-          <td>Foundation</td>
+          <td>Foundation<br><span class="status">Merged</span></td>
           <td><a href="#task-1-spec">Baseline and change inventory</a></td>
           <td>Capture the current launcher, entrypoint, policy resolver, tests, runtime assets, and documentation touchpoints. Establish the task fixtures and test seams used by the later work.</td>
           <td>None</td>
         </tr>
         <tr id="task-2-definition">
           <td>2</td>
-          <td>Critical path</td>
+          <td>Critical path<br><span class="status">Merged</span></td>
           <td><a href="#task-2-spec">Git disablement and access policy</a></td>
           <td>Implement the host-facing control surfaces for Git availability, GitHub credential access, and full SSH access. This task owns command, environment, and configuration inputs, not their merged persistence or container metadata.</td>
           <td>1</td>
         </tr>
         <tr id="task-3-definition">
           <td>3</td>
-          <td>Critical path</td>
+          <td>Critical path<br><span class="status">Merged</span></td>
           <td><a href="#task-3-spec">Identity, mount safety, and source consistency</a></td>
           <td>Implement canonical project/config identities, protected-mount conflict handling, policy-source snapshots, grant-source checks, and source-change handling that later Git-policy work consumes.</td>
           <td>1, 2</td>
         </tr>
         <tr id="task-4-definition">
           <td>4</td>
-          <td>Critical path</td>
+          <td>Critical path<br><span class="status">Merged</span></td>
           <td><a href="#task-4-spec">No-Git blocker and credential mounts</a></td>
           <td>Implement the Git blocker asset and mount integration, Git configuration omission, GitHub credential mounting, SSH mounting, and mount-specification checks that leave project/jj destinations unshadowed. Task 7 owns lifecycle preservation of that state.</td>
           <td>2, 3</td>
         </tr>
         <tr id="task-5-definition">
           <td>5</td>
-          <td>Critical path</td>
+          <td>Critical path<br><span class="status">Merged</span></td>
           <td><a href="#task-5-spec">Policy persistence and container metadata</a></td>
           <td>Implement merged scoped configuration resolution, effective-policy labels and digest handling, legacy migration, and recorded-policy inspection for Git and credential state.</td>
           <td>2, 3, 4</td>
         </tr>
         <tr id="task-6-definition">
           <td>6</td>
-          <td>Critical path</td>
+          <td>Critical path<br><span class="status">Merged</span></td>
           <td><a href="#task-6-spec">Git policy state and command decisions</a></td>
           <td>Implement the shared decision layer that determines whether each launcher command may proceed, must preserve existing Git state, must reconcile policy, or must refuse.</td>
           <td>2, 3, 4, 5</td>
         </tr>
         <tr id="task-7-definition">
           <td>7</td>
-          <td>Critical path</td>
+          <td>Critical path<br><span class="status">Merged</span></td>
           <td><a href="#task-7-spec">Policy application and recreation</a></td>
           <td>Implement Git disablement and grant changes for new, stopped, and running agentboxes, including explicit apply/rebuild flows and preservation of named project, jj, and Docker state.</td>
           <td>3, 4, 5, 6</td>
         </tr>
-        <tr class="group"><td colspan="5">Supporting lifecycle and general improvements — add recovery, observability, coordination, and runtime support without obscuring the core path.</td></tr>
+        <tr class="group"><td colspan="5">Completed supporting implementation — tasks 8–11 are merged and their specifications are collapsed below.</td></tr>
         <tr id="task-8-definition">
           <td>8</td>
-          <td>Supporting</td>
+          <td>Supporting<br><span class="status">Merged</span></td>
           <td><a href="#task-8-spec">Operation record reporting and recovery integration</a></td>
           <td>Extend the Task 7 operation-record interface with user-facing reporting, recovery presentation, completion cleanup, and cross-command integration.</td>
           <td>6, 7</td>
         </tr>
         <tr id="task-9-definition">
           <td>9</td>
-          <td>Supporting</td>
+          <td>Supporting<br><span class="status">Merged</span></td>
           <td><a href="#task-9-spec">Command and report protocol</a></td>
           <td>Implement command-facing result handling for Git-policy success, refusal, failure, status, logs, config, and config initialization, consuming the operation states from task 8.</td>
           <td>6, 8</td>
         </tr>
         <tr id="task-10-definition">
           <td>10</td>
-          <td>Supporting</td>
+          <td>Supporting<br><span class="status">Merged</span></td>
           <td><a href="#task-10-spec">Concurrency, updates, and retry identity</a></td>
           <td>Use the Task 3 per-project lock, then implement host-wide update coordination and image/retry handling. Retry/image identity consumes Task 7/8 records and Task 7 recreation; this task does not introduce a second project-lock implementation.</td>
           <td>7, 8</td>
         </tr>
         <tr id="task-11-definition">
           <td>11</td>
-          <td>Supporting</td>
+          <td>Supporting<br><span class="status">Merged</span></td>
           <td><a href="#task-11-spec">Nested runtime integration</a></td>
           <td>Complete nested Docker readiness and recovery integration, including its interaction with Git-policy application, operation records, command decisions, and lifecycle reporting.</td>
           <td>7, 8, 9, 10</td>
         </tr>
-        <tr class="group"><td colspan="5">Verification and release — prove the implementation and finish user-facing integration work.</td></tr>
+        <tr class="group"><td colspan="5">Remaining verification and release — prove the merged implementation and finish user-facing integration work.</td></tr>
         <tr id="task-12-definition">
           <td>12</td>
-          <td>Verification</td>
-          <td>Focused tests and mocked lifecycle coverage</td>
+          <td>Verification<br><span class="status">Remaining</span></td>
+          <td><a href="#task-12-spec">Focused tests and mocked lifecycle coverage</a></td>
           <td>Add final focused and regression coverage for no-Git behavior, Git/jj/gh interactions, credential grants, policy migration, state transitions, failures, races, retries, reports, and concurrency. Each preceding task also adds its local verification as part of completion.</td>
           <td>1–11</td>
         </tr>
         <tr id="task-13-definition">
           <td>13</td>
-          <td>Verification</td>
-          <td>End-to-end runtime validation</td>
+          <td>Verification<br><span class="status">Remaining</span></td>
+          <td><a href="#task-13-spec">End-to-end runtime validation</a></td>
           <td>Own the supported-runtime checks removed from Task 4: direct <code>git</code>, jj, <code>gh --version</code>, Git-dependent <code>gh</code>, Git-config absence, workspace/.git/jj preservation, plus the full Docker/Sysbox lifecycle matrix for credential mounts, policy transitions, labels, volumes, nested runtime behavior, reports, retries, and cleanup.</td>
-          <td>6–12</td>
+          <td>12</td>
         </tr>
         <tr id="task-14-definition">
           <td>14</td>
-          <td>Release</td>
-          <td>Interface documentation and release cleanup</td>
+          <td>Release<br><span class="status">Remaining</span></td>
+          <td><a href="#task-14-spec">Interface documentation and release cleanup</a></td>
           <td>Update user-facing help, README material, design status, implementation notes, and release checks to reflect the completed Git disablement implementation.</td>
-          <td>2, 5, 7, 9, 12, 13</td>
+          <td>12, 13</td>
         </tr>
       </tbody>
     </table>
 
-    <h2>Executable specifications for tasks 1–7</h2>
+    <h2>Completed task specifications (collapsed)</h2>
     <section class="callout">
-      <strong>Execution contract:</strong> Igor implements one task at a time in dependency order. Each task is complete only when its scope, tests, and acceptance criteria below are satisfied. A task must not silently expand into a later task; if implementation exposes a missing dependency or contradiction, stop at that boundary and report it for review. The mandatory baseline test command for every code task is <code>bash tests/run.sh</code>, plus <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>. Focused tests are added alongside the task that owns the behavior; task 12 later consolidates regression coverage.
+      <strong>Execution record:</strong> Igor implemented tasks 1–11 in dependency order, and those changes are merged. Their scope, tests, and acceptance criteria remain available below for traceability. The mandatory baseline command for every code task was <code>bash tests/run.sh</code>, plus <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>. The remaining tasks must preserve these completed contracts.
     </section>
 
     <details class="task-spec completed">
@@ -508,7 +508,7 @@
       </ul>
     </details>
 
-    <h2>Executable specifications for tasks 8–11</h2>
+    <h2>Completed supporting-task specifications (collapsed)</h2>
     <section class="callout">
       <strong>Supporting-task boundary:</strong> Tasks 8–11 consume the accepted Task 7 operation
       and readiness interfaces. Each task remains one independently reviewable Jujutsu change based
@@ -603,7 +603,7 @@
       <code>2</code>.</p>
     </section>
 
-    <details class="task-spec" open>
+    <details class="task-spec completed">
       <summary><span class="task-title" id="task-8-spec" role="heading" aria-level="3"><a href="#task-8-definition">Task 8 — Operation record reporting and recovery integration</a></span></summary>
       <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Apply atomicity and failure recovery</a>, <a href="git_disablement_and_config_enhancements.html">Authoritative state and command matrix</a>, and <a href="git_disablement_and_config_enhancements.html">Update-check scope and concurrency</a>.</p>
       <div class="spec-grid">
@@ -644,7 +644,7 @@
       </ul>
     </details>
 
-    <details class="task-spec" open>
+    <details class="task-spec completed">
       <summary><span class="task-title" id="task-9-spec" role="heading" aria-level="3"><a href="#task-9-definition">Task 9 — Command and report protocol</a></span></summary>
       <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Apply and observability contract</a>, <a href="git_disablement_and_config_enhancements.html">Authoritative state and command matrix</a>, and <a href="git_disablement_and_config_enhancements.html">Deterministic acceptance and network scope</a>.</p>
       <div class="spec-grid">
@@ -684,7 +684,7 @@
       </ul>
     </details>
 
-    <details class="task-spec" open>
+    <details class="task-spec completed">
       <summary><span class="task-title" id="task-10-spec" role="heading" aria-level="3"><a href="#task-10-definition">Task 10 — Concurrency, updates, and retry identity</a></span></summary>
       <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Update-check scope and concurrency</a>, <a href="git_disablement_and_config_enhancements.html">Policy snapshot and source-change consistency</a>, and <a href="git_disablement_and_config_enhancements.html">Apply atomicity and failure recovery</a>.</p>
       <div class="spec-grid">
@@ -724,7 +724,7 @@
       </ul>
     </details>
 
-    <details class="task-spec" open>
+    <details class="task-spec completed">
       <summary><span class="task-title" id="task-11-spec" role="heading" aria-level="3"><a href="#task-11-definition">Task 11 — Nested runtime integration</a></span></summary>
       <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Nested-Docker restart recovery contract</a>, <a href="git_disablement_and_config_enhancements.html">Apply and observability contract</a>, and <a href="git_disablement_and_config_enhancements.html">Apply atomicity and failure recovery</a>.</p>
       <div class="spec-grid">
@@ -765,14 +765,185 @@
       </ul>
     </details>
 
-    <h2>Task review handoff</h2>
+    <h2>Remaining task specifications</h2>
     <section class="callout">
-      For each task, Igor’s handoff must list the changed files, explicitly identify any requested out-of-scope change, show the task-local test commands and results, and map every acceptance criterion to evidence. The reviewer must verify that no later-task behavior was smuggled into the task, that the mandatory shell checks pass, and that the implementation matches the task’s stated boundaries. A task is accepted only when both the implementation evidence and the reviewer’s criterion-by-criterion result are present.
+      <strong>Remaining-work boundary:</strong> Tasks 12–14 validate, document, and package the
+      merged implementation. They must not reopen or silently change the accepted behavior of
+      tasks 1–11. A newly discovered product defect belongs in a separately scoped implementation
+      change; a test or documentation correction belongs to the remaining task that owns it.
+      Task 13 may require a supported Docker/Sysbox host, but it must never use the developer’s
+      real credentials, project data, containers, or named volumes.
     </section>
 
-    <p class="note">Ordering is provisional until implementation begins. The critical path is tasks 1–7; supporting tasks 8–11 must not become accidental prerequisites for beginning the core Git-disablement work. Reordering a task requires updating its dependency column and preserving the separation between this breakdown and the detailed specification.</p>
+    <details class="task-spec" open>
+      <summary><span class="task-title" id="task-12-spec" role="heading" aria-level="3"><a href="#task-12-definition">Task 12 — Focused tests and mocked lifecycle coverage</a></span></summary>
+      <p><strong>Normative references:</strong> the accepted task contracts above, especially the
+      Task 6 decision matrix, Task 7 terminal handoff, the Task 8 operation projection, the Task 9
+      result protocol, the Task 10 coordination rules, and the Task 11 readiness state machine.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Consolidate regression coverage for the merged implementation without changing its public behavior. The suite must cover policy input and precedence, canonical identity and source rechecks, mount safety, labels and digests, command decisions, operation records, reports, updates, retries, and nested-runtime recovery.</li>
+            <li>Use deterministic shell-unit fixtures and mocked Docker, network, update, filesystem, process, and nested-daemon boundaries. Tests must assert calls, arguments, ordering, state transitions, and absence of forbidden side effects rather than only exit codes.</li>
+            <li>Make the test matrix explicit for absent, matching, stale, invalid, in-progress, degraded, readiness-failed, complete, and recovered states. Include every command family that consumes the shared decision and report contracts.</li>
+            <li>Keep runtime-dependent proof in Task 13. This task must run on a plain development host with the repository’s documented test prerequisites and must not require a live Docker/Sysbox daemon.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary and deliverable</h4>
+          <ul>
+            <li>This task owns regression tests, reusable test fixtures, mock helpers, and test-only diagnostics. It may simplify test seams, but it must not weaken production validation or suppress a real linter finding.</li>
+            <li>Do not duplicate Task 13’s end-to-end runtime matrix or Task 14’s user-facing documentation. A missing seam may be exposed only by a test-only helper or hook with no production behavior change. A production defect or behavior change must be separately scoped to its owning task and must not be smuggled into Task 12.</li>
+            <li>The deliverable is a reviewable test matrix in <code>tests/run.sh</code> and its fixtures/helpers, with each matrix area traceable to one or more named test cases.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Finite regression matrix</h4>
+      <p><em>Retained</em> means the named existing section must remain green; <em>new</em>
+      means Task 12 adds the named case. Every row is required once, rather than an open-ended
+      product of all possible inputs.</p>
+      <table>
+        <thead><tr><th>ID and coverage</th><th>Fixture inputs and command family</th><th>Expected result/calls</th><th>No-side-effect assertion</th></tr></thead>
+        <tbody>
+          <tr><td><strong>T12-01</strong><br>Retained: <code>raw policy input capture</code>; new: <code>T12-invalid-policy-input</code></td><td>Unset, true, false, every accepted spelling, invalid value; start/build/rebuild/claude/codex/bash/exec.</td><td>Raw tri-state record is exact; invalid input exits non-zero before policy resolution.</td><td>Zero Docker, network, update, build, or container calls for invalid input.</td></tr>
+          <tr><td><strong>T12-02</strong><br>Retained: <code>Task 3 canonical identity and mount safety</code> and <code>Task 4 mount specification</code>; new: <code>T12-mount-snapshot-race</code></td><td>Protected/custom destinations, changed policy/mount source between snapshot and mutation, Git enabled/disabled.</td><td>Safe destinations are emitted; changed sources refuse before final mount construction.</td><td>No custom protected mount, policy mount, Docker mutation, or volume change after refusal.</td></tr>
+          <tr><td><strong>T12-03</strong><br>Retained: <code>Task 6 policy decisions</code>; new: <code>T12-command-state-matrix</code></td><td>Absent, matching, stale, invalid, legacy, and contradictory records across start/build/rebuild/convenience/exec.</td><td>Exact decision kind, exit category, permissions, retry direction, and update eligibility match the accepted matrix.</td><td>Refused or invalid rows make no unauthorized Docker, network, update, or policy-file call.</td></tr>
+          <tr><td><strong>T12-04</strong><br>Retained: <code>Task 7 durable operation records and lifecycle handoff</code> and <code>Task 8 operation-state projection</code>; new: <code>T12-recovery-permission-matrix</code></td><td>Every non-complete status, complete-ready, malformed, incomplete, and inconsistent operation record, plus mocked removal/create/required-network/optional-network/readiness/cleanup faults.</td><td>Projection preserves fields and gives explicit execution/mutation/update/diagnostic/retry/cleanup permissions; each injected fault produces its documented terminal record; apply/rebuild begins fresh inspection.</td><td>Read-only inspection never rewrites state; failed/invalid records and named volumes are retained; no injected fault authorizes an unmocked Docker mutation.</td></tr>
+          <tr><td><strong>T12-05</strong><br>Retained: <code>Task 9 command reports</code>; new: <code>T12-readonly-report-matrix</code></td><td>Config/status/logs/stop against running, stopped, readiness-failed, degraded, and invalid states.</td><td>Stable result/reason/phase/identity/retry fields and exact exit categories; stop remains recovery-safe.</td><td>Reports make zero Docker/network/update/policy mutation calls and emit no credentials.</td></tr>
+          <tr><td><strong>T12-06</strong><br>Retained: <code>Task 10 update coordination and retry identity</code>, <code>public update and project-lock evidence</code>, <code>public project-lock contention</code>, and <code>public retry recovery</code></td><td>Fresh/stale/malformed/offline/rate-limited cache; two projects; same-project contention; repeated retry.</td><td>One bounded refresh, atomic cache, 30-second lock behavior, fresh operation ids, stable image/volume identity.</td><td>Update failures do not change product results; contention prevents duplicate mutation.</td></tr>
+          <tr><td><strong>T12-07</strong><br>Retained: <code>Task 11 readiness handoff and integrated recovery</code>; new: <code>T12-readiness-permission-matrix</code></td><td>Starting, ready, failed-but-running, failed-and-exited, replacement-attempted; generic exec and nested-dependent commands.</td><td>Exact readiness transition, diagnostic-only/blocked permission, one replacement limit, and stored retry state.</td><td>Live daemon is never killed or duplicated; outer container, record, and inner-Docker volume remain available.</td></tr>
+          <tr><td><strong>T12-08</strong><br>Retained: <code>cmd_config_init</code> and <code>runtime grant options</code></td><td>Copyable, existing, invalid, unknown config files; GitHub/SSH missing, unreadable, symlinked, empty, and writable <code>known_hosts</code> sources.</td><td>Per-file result and aggregate exit are deterministic; grant source validation and mount mode match policy.</td><td>Initialization and report paths do not start/recreate containers or expose credential contents.</td></tr>
+        </tbody>
+      </table>
+      <h4>Tests</h4>
+      <ul>
+        <li>Run <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>, <code>bash tests/run.sh</code>, and <code>just qtest</code>.</li>
+        <li>Run <code>just qformat</code>, <code>just qlint</code>, and <code>just qcheck</code>; inspect <code>check.log</code> only if a quiet recipe fails.</li>
+        <li>Run focused subsets for each state family and verify that the complete suite remains deterministic when repeated.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>Every accepted Task 1–11 contract has at least one regression test, including the negative permission and no-side-effect paths.</li>
+        <li>Tests cover all enumerated operation, readiness, result, permission, retry, and cleanup values; no value is accepted only through an untested default branch.</li>
+        <li>Mocked tests prove read-only reporting does not mutate Docker, network, policy files, records, credentials, or named volumes.</li>
+        <li>The suite is deterministic, does not depend on host credentials or a live runtime, and the full quiet gate passes.</li>
+      </ul>
+    </details>
 
-    <footer>This is an implementation breakdown with executable specifications for tasks 1–11, not the complete system behavioral specification.</footer>
+    <details class="task-spec" open>
+      <summary><span class="task-title" id="task-13-spec" role="heading" aria-level="3"><a href="#task-13-definition">Task 13 — End-to-end runtime validation</a></span></summary>
+      <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Runtime and mount behavior</a>, <a href="git_disablement_and_config_enhancements.html">Apply atomicity and failure recovery</a>, and the completed Task 7–11 acceptance contracts.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Run the supported runtime matrix against an isolated temporary project and configuration tree: direct <code>git</code>, jj, <code>gh --version</code>, Git-dependent <code>gh</code>, Git-config absence, workspace and collocated <code>.git</code> preservation, and jj metadata/state preservation.</li>
+            <li>Exercise Git enabled/disabled transitions and GitHub/SSH grant combinations for new, stopped, and running agentboxes. Verify blocker and credential mounts, policy labels/digest, mount deltas, logical container identity, and preservation of project, jj, and inner-Docker named volumes.</li>
+            <li>Exercise runtime-reproducible nested-daemon readiness and one permitted replacement, outer-container availability, diagnostic-only execution, status/logs/config/stop, explicit recovery, retry identity, and successful cleanup. Task 12 owns mocked removal, creation, network, invalid-record, cleanup, and non-runtime-injectable failure cases.</li>
+            <li>Use throwaway credentials and fixture repositories only. The harness must identify every container, network, volume, temporary directory, and process it creates and clean them up on success and failure without touching unrelated user state.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary and deliverable</h4>
+          <ul>
+            <li>This task owns supported-runtime evidence and the smoke/lifecycle harness. It does not redesign production behavior, add new policy semantics, or convert an unavailable host into a false pass.</li>
+            <li>Prerequisite checks must report the missing Docker/Sysbox capability clearly and exit with the distinct blocked result code <code>3</code>; they must not skip individual assertions while claiming the matrix passed.</li>
+            <li>The deliverable is <code>tests/runtime_matrix.sh</code> plus an auditable result record at <code>$AGENTBOX_RUNTIME_TEST_ROOT/result.toml</code>, covering each matrix row, environment prerequisites, created-resource identities, cleanup result, and any blocked rows.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Finite risk-based runtime matrix</h4>
+      <p>The matrix is eight fixed rows, not a Cartesian product. Each row runs in the isolated
+      test project and uses the named command sequence; a row is <code>pass</code> only when all
+      listed assertions pass.</p>
+      <table>
+        <thead><tr><th>Row</th><th>Invocation and setup</th><th>Required assertions</th></tr></thead>
+        <tbody>
+          <tr><td><strong>P13-01</strong><br>Prerequisites</td><td><code>docker version</code>, <code>docker info</code>, <code>docker info --format '{{json .Runtimes}}'</code>, and <code>docker run --rm --runtime=sysbox-runc hello-world</code>.</td><td>Record Docker client/server versions and <code>sysbox-runc</code>. The recorded baseline is Docker <code>29.7.2</code> and Sysbox <code>0.7.0</code>; other versions are recorded as unsupported until explicitly validated. Missing Docker, runtime, or nested capability returns blocked <code>3</code>.</td></tr>
+          <tr><td><strong>P13-02</strong><br>Baseline state</td><td>Create a temporary jj project and run <code>ab start</code>; inspect container mounts, labels, workspace, <code>.git</code>, jj config/state, and named volumes.</td><td>Container starts with required readiness; project/jj/inner-Docker identities and contents survive an outer stop/start; no policy-controlled destination is shadowed.</td></tr>
+          <tr><td><strong>P13-03</strong><br>No-Git path</td><td>Run <code>AGENTBOX_NO_GIT=1 ab start --apply</code>, then <code>ab exec git --version</code>, <code>ab exec jj root</code>, <code>ab exec gh --version</code>, and one Git-dependent <code>gh</code> fixture operation.</td><td>Git is non-zero with the exact blocker first line; jj and local <code>gh --version</code> work; Git-dependent <code>gh</code> fails through the blocker; Git config mounts are absent.</td></tr>
+          <tr><td><strong>P13-04</strong><br>Credential grants</td><td>With throwaway <code>~/.config/gh</code> and <code>~/.ssh</code> fixtures, run grant-off, GitHub-only, SSH-only, and both-grants starts.</td><td>Mount presence, read-only state, writable <code>known_hosts</code> behavior, and labels match each policy; missing/symlinked sources refuse before mutation.</td></tr>
+          <tr><td><strong>P13-05</strong><br>Policy transitions</td><td>Apply Git/grant changes against new, stopped, and running containers using normal start refusal and explicit <code>ab start --apply</code>/<code>ab rebuild</code>.</td><td>Normal mismatch refuses; explicit apply reconciles; logical container name, project/jj/inner-Docker volumes, and expected image/build behavior are preserved.</td></tr>
+          <tr><td><strong>P13-06</strong><br>Runtime recovery/report</td><td>After a successful start, stop the exact outer container with <code>docker stop &lt;recorded-id&gt;</code>; run <code>config</code>, <code>status</code>, <code>logs</code>, <code>stop</code>, and explicit <code>ab start</code> recovery.</td><td>Reports remain available and read-only; the outer lifecycle and named volumes recover; no failed state is silently cleaned or used. Removal/creation/network/invalid-record/cleanup fault cases are covered by Task 12 mocks, not this row.</td></tr>
+          <tr><td><strong>P13-07</strong><br>Nested readiness</td><td>Inside the isolated outer container, terminate only the recorded inner <code>dockerd</code> PID; run status/logs/config and one outer recovery. Do not attempt synthetic persistent non-ready or Docker API faults.</td><td>Runtime-reproducible readiness transitions and the 30-second bound are recorded; only the previously recorded inner daemon may be terminated, and no host daemon, outer daemon, or unrelated inner daemon may be killed or started. At most one permitted replacement may start; the outer container and inner-Docker volume remain available. The complete state/fault matrix is Task 12 coverage.</td></tr>
+          <tr><td><strong>P13-08</strong><br>Retry and cleanup</td><td>Repeat one runtime-reproducible readiness retry and then a successful completion in the same isolated project.</td><td>Operation ids distinguish attempts, image/volume identity remains stable, cleanup occurs only after complete-ready verification, and the final inventory is empty. Mock-only failed/degraded retry variants remain in Task 12.</td></tr>
+        </tbody>
+      </table>
+      <h4>Harness contract</h4>
+      <ul>
+        <li>Invocation creates a fresh root and sets every state location explicitly: <code>repo_root="$(cd "$(dirname "$0")/.." &amp;&amp; pwd)"; root="$(mktemp -d "${TMPDIR:-/tmp}/agentbox-task13.XXXXXX")"; mkdir -p "$root/home/.config" "$root/home/.ssh" "$root/xdg-config" "$root/state" "$root/cache" "$root/project"; touch "$root/.agentbox-task13-root"; HOME="$root/home" XDG_CONFIG_HOME="$root/xdg-config" XDG_STATE_HOME="$root/state" XDG_CACHE_HOME="$root/cache" AGENTBOX_MACHINE="task13" AGENTBOX_CONTEXT="$repo_root" AGENTBOX_RUNTIME_TEST_ROOT="$root" AGENTBOX_DIR="$root/project" bash "$repo_root/tests/runtime_matrix.sh"</code>. Policy and GitHub fixtures are under <code>$HOME/.config</code>, SSH fixtures under <code>$HOME/.ssh</code>, and all operation/update state is under the isolated XDG directories.</li>
+        <li>The harness refuses a missing marker, non-absolute root, root that is not a fresh directory it created, or any runtime path whose canonical path is outside the temporary test area. It verifies that <code>HOME</code>, <code>XDG_CONFIG_HOME</code>, <code>XDG_STATE_HOME</code>, <code>XDG_CACHE_HOME</code>, and <code>AGENTBOX_DIR</code> all resolve below that root before invoking <code>ab</code>. <code>AGENTBOX_CONTEXT</code> is the sole allowed outside-root exception and must resolve exactly to the checked-out repository root.</li>
+        <li><code>AGENTBOX_CONTEXT</code> is a checked-out repository used read-only. Before the first runtime row, the harness records the checkout revision, verifies the launcher/runtime inputs, snapshots their hashes and metadata, and asserts that the snapshot is unchanged after the run. No harness filesystem operation or cleanup target may be inside that context. The temporary empty project directory remains separate from it.</li>
+        <li>Do not add a production run-label input or rename launcher resources. Before the first mutation, compute the exact expected container/volume names from the isolated project and machine, assert that each is absent, and record every exact name and ID observed from this run. Record any attached or harness-created network by exact name and ID; a harness-created network may carry a harness-only label, but production resources need no new label.</li>
+        <li>Cleanup verifies that each resource still has the recorded exact name/ID, was absent during preflight, and is owned by this run before removing it. It removes only those recorded containers, volumes, and networks; it never scans or removes a prefix, label set, or unrelated resource.</li>
+        <li>Each row has a 30-second lifecycle/readiness timeout, a 180-second row timeout, and a 15-minute whole-run timeout. Timeout is a failure, not an implicit pass.</li>
+        <li>An exit of <code>0</code> means all eight rows passed, <code>1</code> means a product/assertion failure, and <code>3</code> means prerequisites were unavailable. The result file contains <code>schema=1</code>, overall status, exact versions, invocation, row id/status/diagnostic, resource inventory, cleanup status, and timestamps.</li>
+        <li>An unconditional shell trap records the current row, inventories the exact recorded resources, attempts bounded cleanup, records cleanup failures, and preserves the result file. Fixture credentials and private key contents never enter the result.</li>
+      </ul>
+      <h4>Tests</h4>
+      <ul>
+        <li>Run the isolated smoke/lifecycle harness from a temporary test directory with the supported Docker/Sysbox runtime.</li>
+        <li>Run the complete local quiet gate before and after runtime validation: <code>just qcheck</code>.</li>
+        <li>For every failure, retain the bounded diagnostic and resource inventory needed to reproduce it, but do not retain fixture credentials or private key contents.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>The runtime matrix proves the Git blocker and credential grants without masking workspace, <code>.git</code>, jj, or named-volume state.</li>
+        <li>Policy changes and recovery preserve logical identity and named volumes, avoid unnecessary image builds, and produce the documented operation/report states.</li>
+        <li>Nested-daemon recovery starts no duplicate daemon, performs no unauthorized marker cleanup, is bounded, and leaves the outer container available for the documented diagnostics.</li>
+        <li>Every created resource is accounted for and cleaned up, or the result explicitly records why cleanup was impossible. No unrelated host resource is changed.</li>
+        <li>All supported rows pass; unavailable prerequisites are reported as blocked rather than silently omitted.</li>
+      </ul>
+    </details>
+
+    <details class="task-spec" open>
+      <summary><span class="task-title" id="task-14-spec" role="heading" aria-level="3"><a href="#task-14-definition">Task 14 — Interface documentation and release cleanup</a></span></summary>
+      <p><strong>Normative references:</strong> the public interface and policy-file sections of
+      <a href="git_disablement_and_config_enhancements.html">the design document</a>, the accepted
+      command/report contract, and the repository coding and role standards.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Update <code>README.md</code> and command help to document jj-first/no-Git behavior, GitHub and SSH grants, policy-file tiers and precedence, boolean inputs, config/report output, refusal and recovery commands, update-check controls, and runtime prerequisites.</li>
+            <li>Update implementation status and notes in <code>design_docs/</code> so they identify tasks 1–13 as complete or verified where evidence exists, and identify any runtime prerequisite or explicitly blocked validation without overstating completion.</li>
+            <li>Document the supported safety boundaries: credentials are explicit mounts, policy files contain no secrets, failed operations retain diagnostics and named volumes, and only authorized recovery paths mutate failed state.</li>
+            <li>Perform release cleanup for stale examples, contradictory terminology, dead links, temporary test artifacts, and generated files. Explicitly exclude <code>review_docs/</code> and review-named documents under <code>design_docs/</code>; do not edit, remove, or rename them. Report any existing stale reviewer-owned artifact to Rufus.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary and deliverable</h4>
+          <ul>
+            <li>This task owns user-facing documentation, help text, design status, examples, and release-readiness notes. It does not change production semantics to make documentation easier to write.</li>
+            <li>Every documented command, option, environment variable, policy key, output token, exit category, and recovery direction must match the accepted implementation and tests. Unknown or unsupported behavior must be labeled as such.</li>
+            <li>The deliverable is a consistent documentation set plus a short release checklist recording formatting, linting, tests, runtime validation status, and unresolved blockers.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests</h4>
+      <ul>
+        <li>Exercise documented help/examples against the launcher without creating a real agentbox where possible.</li>
+        <li>Run <code>just qformat</code>, <code>just qlint</code>, <code>just qtest</code>, and <code>just qcheck</code>; verify links and referenced files exist.</li>
+        <li>Compare documented output fields and exit categories with the Task 12 regression fixtures and Task 13 runtime evidence.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>A new user can determine how to enable/disable Git, grant credentials, inspect policy, diagnose failure, and choose the exact permitted recovery command from the documentation.</li>
+        <li>README, help, design status, examples, and release notes agree on names, defaults, precedence, output vocabulary, safety boundaries, and prerequisites.</li>
+        <li>No stale review artifact is added; any existing stale reviewer-owned artifact is reported to Rufus. No temporary runtime resource, contradictory instruction, or broken internal link is introduced or left as a release omission within Igor-owned files.</li>
+        <li>The complete formatting, lint, test, and check gates pass, and the release checklist distinguishes passed, blocked, and not-applicable runtime evidence.</li>
+      </ul>
+    </details>
+
+    <h2>Task review handoff</h2>
+    <section class="callout">
+      For each remaining task, Igor’s handoff must list the changed files, explicitly identify any requested out-of-scope change, show the task-local test commands and results, and map every acceptance criterion to evidence. The reviewer must verify that no later-task behavior was smuggled into the task, that the mandatory shell checks pass, and that the implementation matches the task’s stated boundaries. A task is accepted only when both the implementation evidence and the reviewer’s criterion-by-criterion result are present.
+    </section>
+
+    <p class="note">Tasks 1–11 are merged. The remaining order is deliberate: consolidate deterministic regressions in task 12, prove the supported runtime in task 13, then finalize the user-facing interface and release record in task 14. Reordering a remaining task requires updating its dependency column and preserving the separation between this plan and the normative design.</p>
+
+    <footer>This is an implementation plan with completed task records and executable specifications for the remaining tasks 12–14, not the complete system behavioral specification.</footer>
   </main>
 </body>
 </html>
