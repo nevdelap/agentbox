@@ -13,7 +13,23 @@
 set -euo pipefail
 
 DOCKER_SOCK=/var/run/docker.sock
+DOCKER_PID_FILE=/var/run/docker.pid
 DOCKERD_LOG=/var/log/dockerd.log
+DOCKER_READINESS_STATE_FILE=/var/run/agentbox/nested-docker-state
+docker_readiness_operation_id="${AGENTBOX_OPERATION_ID:-unknown}"
+DOCKER_READINESS_ATTEMPTS=60
+DOCKER_READINESS_INTERVAL=0.5
+DOCKER_READINESS_BOUND_SECONDS=30
+docker_readiness_state=starting
+docker_readiness_retryable=1
+docker_readiness_replacement_attempted=0
+docker_readiness_daemon_evidence=none
+docker_readiness_wait_attempts=0
+docker_readiness_diagnostic=""
+docker_readiness_terminal_failure=0
+docker_readiness_transition_log=""
+docker_readiness_launch_observed=0
+docker_readiness_launch_pid=""
 # Per-project named volume mounted here by bin/ab. It contains jj's writable repo/workspace
 # state, separate from the read-only host user config files supplied through JJ_CONFIG.
 JJ_STATE_DIR=/home/agentbox/.config/jj
@@ -31,12 +47,14 @@ AB_PORTS_FILE="${AGENTBOX_PORTS_FILE:-$AB_CFG/ports}"
 AB_SETUP_FILE="${AGENTBOX_SETUP_FILE:-$AB_CFG/setup.sh}"
 
 docker_daemon_pid_alive() {
-  local pid comm
-  [ -r /var/run/docker.pid ] || return 1
-  read -r pid < /var/run/docker.pid || return 1
+  local pid comm stat
+  [ -r "$DOCKER_PID_FILE" ] || return 1
+  read -r pid <"$DOCKER_PID_FILE" || return 1
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
   comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
   [ "$comm" = dockerd ] || return 1
+  stat="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+  case "$stat" in Z*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null
 }
 
@@ -55,29 +73,116 @@ docker_daemon_alive() {
   docker_daemon_pid_alive || docker_daemon_process_alive
 }
 
+docker_readiness_state_set() {
+  local state="$1" evidence="${2:-$docker_readiness_daemon_evidence}" diagnostic="${3:-}"
+  docker_readiness_state="$state"
+  docker_readiness_daemon_evidence="$evidence"
+  docker_readiness_diagnostic="$diagnostic"
+  docker_readiness_transition_log="${docker_readiness_transition_log:+$docker_readiness_transition_log }$state"
+  case "$state" in
+    ready) docker_readiness_retryable=0; docker_readiness_terminal_failure=0 ;;
+    failed-but-running|failed-and-exited|replacement-attempted)
+      docker_readiness_retryable=1
+      ;;
+  esac
+  printf 'agentbox: nested-docker state=%s evidence=%s%s\n' "$state" "$evidence" \
+    "${diagnostic:+ diagnostic=$diagnostic}" >&2
+  docker_readiness_state_write
+}
+
+docker_readiness_state_record() {
+  printf 'operation_id=%s\n' "$docker_readiness_operation_id"
+  printf 'state=%s\n' "$docker_readiness_state"
+  printf 'retryable=%s\n' "$docker_readiness_retryable"
+  printf 'replacement_attempted=%s\n' "$docker_readiness_replacement_attempted"
+  printf 'daemon_evidence=%s\n' "$docker_readiness_daemon_evidence"
+  printf 'wait_attempts=%s\n' "$docker_readiness_wait_attempts"
+  printf 'wait_bound_seconds=%s\n' "$DOCKER_READINESS_BOUND_SECONDS"
+  printf 'diagnostic=%s\n' "$docker_readiness_diagnostic"
+}
+
+docker_readiness_state_write() {
+  local dir tmp
+  [ -n "$DOCKER_READINESS_STATE_FILE" ] || return 0
+  dir="${DOCKER_READINESS_STATE_FILE%/*}"
+  mkdir -p -- "$dir" 2>/dev/null || return 0
+  tmp="$(mktemp "$dir/.nested-docker-state.XXXXXX" 2>/dev/null)" || return 0
+  if ! docker_readiness_state_record >"$tmp"; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  chmod 644 -- "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$DOCKER_READINESS_STATE_FILE" 2>/dev/null || rm -f -- "$tmp"
+  return 0
+}
+
+docker_socket_ready() {
+  [ -S "$DOCKER_SOCK" ]
+}
+
+readiness_sleep() {
+  sleep "$1"
+}
+
+docker_readiness_launched_process_alive() {
+  local stat
+  [[ "$docker_readiness_launch_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$docker_readiness_launch_pid" 2>/dev/null || return 1
+  stat="$(ps -o stat= -p "$docker_readiness_launch_pid" 2>/dev/null || true)"
+  case "$stat" in Z*) return 1 ;; esac
+  return 0
+}
+
+docker_readiness_launched_process_exited() {
+  local stat
+  [[ "$docker_readiness_launch_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  if ! kill -0 "$docker_readiness_launch_pid" 2>/dev/null; then
+    return 0
+  fi
+  stat="$(ps -o stat= -p "$docker_readiness_launch_pid" 2>/dev/null || true)"
+  case "$stat" in Z*) return 0 ;; esac
+  return 1
+}
+
 wait_for_dockerd() {
-  for _ in $(seq 1 60); do
-    if [ -S "$DOCKER_SOCK" ] && docker info >/dev/null 2>&1; then
+  while [ "$docker_readiness_wait_attempts" -lt "$DOCKER_READINESS_ATTEMPTS" ]; do
+    docker_readiness_wait_attempts=$((docker_readiness_wait_attempts + 1))
+    if docker_socket_ready && docker info >/dev/null 2>&1; then
       chown agentbox:agentbox "$DOCKER_SOCK" 2>/dev/null || true
       return 0
     fi
-    sleep 0.5
+    # Once a launched daemon has had time to appear, only positive termination evidence tied to
+    # that launch PID authorizes the replacement path. A transient process-table miss must not
+    # remove markers or start a duplicate daemon while the original launch is still progressing.
+    if [ "$docker_readiness_launch_observed" = 1 ] &&
+       [ "$docker_readiness_wait_attempts" -ge 2 ] &&
+       docker_readiness_launched_process_exited; then
+      return 2
+    fi
+    if [ "$docker_readiness_wait_attempts" -lt "$DOCKER_READINESS_ATTEMPTS" ]; then
+      readiness_sleep "$DOCKER_READINESS_INTERVAL"
+    fi
   done
   return 1
 }
 
 start_dockerd_once() {
   echo "agentbox: starting inner dockerd..." >&2
+  docker_readiness_launch_observed=1
   dockerd >"$DOCKERD_LOG" 2>&1 &
+  docker_readiness_launch_pid=$!
   if wait_for_dockerd; then
     echo "agentbox: inner dockerd ready." >&2
     return 0
   fi
-  if docker_daemon_alive; then
+  if docker_readiness_launched_process_alive || docker_daemon_alive; then
     echo "agentbox: WARNING — inner dockerd stayed alive but did not become ready; see $DOCKERD_LOG" >&2
     return 1
   fi
-  return 2
+  if docker_readiness_launched_process_exited; then
+    return 2
+  fi
+  return 1
 }
 
 ensure_dockerd() {
@@ -85,20 +190,39 @@ ensure_dockerd() {
   if docker info >/dev/null 2>&1; then
     # Already up — make sure agentbox can reach the socket.
     chown agentbox:agentbox "$DOCKER_SOCK" 2>/dev/null || true
+    docker_readiness_state_set ready api-available
     return 0
   fi
+
+  if [ "$docker_readiness_terminal_failure" = 1 ]; then
+    docker_readiness_state_set failed-and-exited "$docker_readiness_daemon_evidence" \
+      "replacement already attempted; start a fresh outer container recovery cycle"
+    return 1
+  fi
+  docker_readiness_state=starting
+  docker_readiness_retryable=1
+  docker_readiness_replacement_attempted=0
+  docker_readiness_daemon_evidence=none
+  docker_readiness_wait_attempts=0
+  docker_readiness_diagnostic=""
+  docker_readiness_transition_log=""
+  docker_readiness_launch_observed=0
+  docker_readiness_launch_pid=""
+  docker_readiness_state_set starting launch-requested
 
   # An outer-container stop can leave Docker's Unix socket and PID file behind even
   # though the nested daemon was killed. Do not start a second daemon while a real
   # dockerd is still coming up; otherwise only remove the stale runtime markers before
   # starting a fresh daemon. This preserves the /var/lib/docker volume across restart.
   if docker_daemon_alive; then
+    docker_readiness_daemon_evidence=live-dockerd
     if wait_for_dockerd; then
-      echo "agentbox: inner dockerd ready." >&2
+      docker_readiness_state_set ready live-dockerd
       return 0
     fi
     if docker_daemon_alive; then
-      echo "agentbox: WARNING — inner dockerd stayed alive but did not become ready; see $DOCKERD_LOG" >&2
+      docker_readiness_state_set failed-but-running live-dockerd \
+        "bounded readiness wait expired; see $DOCKERD_LOG"
       return 1
     fi
   fi
@@ -106,25 +230,46 @@ ensure_dockerd() {
   # The daemon may have exited during readiness. Re-checking liveness above makes it safe
   # to clean its stale markers and make one controlled replacement attempt, without ever
   # starting a second daemon while the original is still alive.
-  rm -f "$DOCKER_SOCK" /var/run/docker.pid
+  rm -f "$DOCKER_SOCK" "$DOCKER_PID_FILE"
 
   if start_dockerd_once; then
+    docker_readiness_state_set ready launched
     return 0
   else
     start_rc=$?
   fi
 
-  [ "$start_rc" -eq 2 ] || return 1
+  if [ "$start_rc" -ne 2 ]; then
+    docker_readiness_state_set failed-but-running live-dockerd \
+      "bounded readiness wait expired; see $DOCKERD_LOG"
+    return 1
+  fi
   if docker_daemon_alive; then
-    echo "agentbox: WARNING — inner dockerd state changed during recovery; refusing a duplicate start; see $DOCKERD_LOG" >&2
+    docker_readiness_state_set failed-but-running live-dockerd \
+      "daemon became live during recovery; refusing a duplicate start"
     return 1
   fi
 
-  rm -f "$DOCKER_SOCK" /var/run/docker.pid
+  docker_readiness_state_set failed-and-exited daemon-exited \
+    "daemon exited before readiness; attempting one replacement"
+  rm -f "$DOCKER_SOCK" "$DOCKER_PID_FILE"
+  docker_readiness_replacement_attempted=1
+  docker_readiness_state_set replacement-attempted daemon-exited
   echo "agentbox: retrying inner dockerd once after it exited during readiness..." >&2
   if start_dockerd_once; then
+    docker_readiness_state_set ready replacement
     return 0
+  else
+    start_rc=$?
   fi
+  if [ "$start_rc" -eq 1 ] || docker_daemon_alive; then
+    docker_readiness_state_set failed-but-running live-dockerd \
+      "replacement daemon stayed alive but did not become ready; see $DOCKERD_LOG"
+    return 1
+  fi
+  docker_readiness_terminal_failure=1
+  docker_readiness_state_set failed-and-exited replacement-exited \
+    "replacement daemon exited before readiness; start a fresh outer recovery cycle"
   echo "agentbox: WARNING — inner dockerd did not start after one recovery retry; see $DOCKERD_LOG" >&2
   return 1
 }

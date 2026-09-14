@@ -115,6 +115,13 @@ operation_image_reference=""
 operation_network_outcomes=""
 operation_diagnostic=""
 operation_readiness_result="not-applicable"
+operation_readiness_operation_id=""
+operation_readiness_retryable=""
+operation_readiness_replacement_attempted=""
+operation_readiness_daemon_evidence=""
+operation_readiness_wait_attempts=""
+operation_readiness_wait_bound_seconds=""
+operation_readiness_diagnostic=""
 operation_task_status="fail"
 operation_agent_execution="blocked"
 operation_explicit_exec="blocked"
@@ -142,6 +149,13 @@ operation_state_image_reference=""
 operation_state_named_volumes=""
 operation_state_network_state="none"
 operation_state_readiness_state="not-applicable"
+operation_state_readiness_operation_id=""
+operation_state_readiness_retryable=""
+operation_state_readiness_replacement_attempted=""
+operation_state_readiness_daemon_evidence=""
+operation_state_readiness_wait_attempts=""
+operation_state_readiness_wait_bound_seconds=""
+operation_state_readiness_diagnostic=""
 operation_state_diagnostic=""
 operation_state_retry_command="ab start --apply"
 operation_state_cleanup_allowed=0
@@ -151,6 +165,11 @@ operation_state_update_allowed=1
 operation_state_diagnostic_allowed=0
 operation_state_explicit_exec_mode="blocked"
 operation_state_valid=1
+
+# Entrypoint-owned nested-Docker handoff. The file is root-created but mode 0644, so the host
+# reads it through the ordinary agentbox user without granting the report path a shell or Docker
+# daemon operation. The host validates every field before copying it into the operation state.
+DOCKER_READINESS_STATE_CONTAINER=/var/run/agentbox/nested-docker-state
 
 # Task 6's decision record is the only command-facing policy gate.  Task 7 may populate the
 # operation/readiness overlay before calling policy_decide; the defaults deliberately mean that
@@ -620,6 +639,13 @@ operation_record_reset_result() {
   operation_network_outcomes=""
   operation_diagnostic=""
   operation_readiness_result=not-applicable
+  operation_readiness_operation_id=""
+  operation_readiness_retryable=""
+  operation_readiness_replacement_attempted=""
+  operation_readiness_daemon_evidence=""
+  operation_readiness_wait_attempts=""
+  operation_readiness_wait_bound_seconds=""
+  operation_readiness_diagnostic=""
   operation_task_status=fail
   operation_agent_execution=blocked
   operation_explicit_exec=blocked
@@ -646,6 +672,13 @@ operation_state_reset() {
   operation_state_named_volumes=""
   operation_state_network_state=none
   operation_state_readiness_state=not-applicable
+  operation_state_readiness_operation_id=""
+  operation_state_readiness_retryable=""
+  operation_state_readiness_replacement_attempted=""
+  operation_state_readiness_daemon_evidence=""
+  operation_state_readiness_wait_attempts=""
+  operation_state_readiness_wait_bound_seconds=""
+  operation_state_readiness_diagnostic=""
   operation_state_diagnostic=""
   operation_state_retry_command="ab start --apply"
   operation_state_cleanup_allowed=0
@@ -661,7 +694,12 @@ operation_state_reset() {
 # place where record fields become command permissions; callers must consume these fields rather
 # than deriving their own interpretation from operation_status.
 operation_state_publish() {
-  local status="${policy_operation_status:-none}" readiness="${policy_readiness_result:-${operation_readiness_result:-not-applicable}}"
+  local status="${policy_operation_status:-none}" readiness
+  if [ "${operation_record_active:-0}" = 1 ]; then
+    readiness="${operation_readiness_result:-not-applicable}"
+  else
+    readiness="${policy_readiness_result:-${operation_readiness_result:-not-applicable}}"
+  fi
   if [ "${operation_record_active:-0}" = 1 ] && [ "$status" = none ] && [ -n "$operation_status" ]; then
     status="$operation_status"
   fi
@@ -680,7 +718,14 @@ operation_state_publish() {
     operation_state_network_state=none
   fi
   operation_state_readiness_state="$readiness"
-  operation_state_diagnostic="$operation_diagnostic"
+  operation_state_readiness_operation_id="$operation_readiness_operation_id"
+  operation_state_readiness_retryable="$operation_readiness_retryable"
+  operation_state_readiness_replacement_attempted="$operation_readiness_replacement_attempted"
+  operation_state_readiness_daemon_evidence="$operation_readiness_daemon_evidence"
+  operation_state_readiness_wait_attempts="$operation_readiness_wait_attempts"
+  operation_state_readiness_wait_bound_seconds="$operation_readiness_wait_bound_seconds"
+  operation_state_readiness_diagnostic="$operation_readiness_diagnostic"
+  operation_state_diagnostic="${operation_diagnostic:-$operation_readiness_diagnostic}"
   operation_state_retry_command="${operation_retry_command:-ab start --apply}"
   operation_state_cleanup_allowed=0
   operation_state_execution_allowed=0
@@ -744,6 +789,13 @@ operation_state_record() {
   printf 'named_volumes=%s\n' "$operation_state_named_volumes"
   printf 'network_state=%s\n' "$operation_state_network_state"
   printf 'readiness_state=%s\n' "$operation_state_readiness_state"
+  printf 'readiness_operation_id=%s\n' "$operation_state_readiness_operation_id"
+  printf 'readiness_retryable=%s\n' "$operation_state_readiness_retryable"
+  printf 'readiness_replacement_attempted=%s\n' "$operation_state_readiness_replacement_attempted"
+  printf 'readiness_daemon_evidence=%s\n' "$operation_state_readiness_daemon_evidence"
+  printf 'readiness_wait_attempts=%s\n' "$operation_state_readiness_wait_attempts"
+  printf 'readiness_wait_bound_seconds=%s\n' "$operation_state_readiness_wait_bound_seconds"
+  printf 'readiness_diagnostic=%s\n' "$operation_state_readiness_diagnostic"
   printf 'diagnostic=%s\n' "$operation_state_diagnostic"
   printf 'retry_command=%s\n' "$operation_state_retry_command"
   printf 'cleanup_allowed=%s\n' "$operation_state_cleanup_allowed"
@@ -831,6 +883,13 @@ command_report_emit() {
   printf 'operation_id=%s\n' "$operation_state_operation_id"
   printf 'record_path=%s\n' "$operation_state_record_path"
   printf 'readiness=%s\n' "$operation_state_readiness_state"
+  printf 'readiness_operation_id=%s\n' "$operation_state_readiness_operation_id"
+  printf 'readiness_retryable=%s\n' "$operation_state_readiness_retryable"
+  printf 'readiness_replacement_attempted=%s\n' "$operation_state_readiness_replacement_attempted"
+  printf 'readiness_daemon_evidence=%s\n' "$operation_state_readiness_daemon_evidence"
+  printf 'readiness_wait_attempts=%s\n' "$operation_state_readiness_wait_attempts"
+  printf 'readiness_wait_bound_seconds=%s\n' "$operation_state_readiness_wait_bound_seconds"
+  printf 'readiness_diagnostic=%s\n' "$operation_state_readiness_diagnostic"
   printf 'network=%s\n' "$operation_state_network_state"
   printf 'operation_status=%s\n' "$operation_state_terminal_status"
   printf 'task_status=%s\n' "$operation_task_status"
@@ -935,6 +994,13 @@ operation_record_write() {
     printf 'network_outcomes = "%s"\n' "$(operation_record_safe_value "$operation_network_outcomes")"
     printf 'diagnostic = "%s"\n' "$(operation_record_safe_value "$operation_diagnostic")"
     printf 'readiness_result = "%s"\n' "$(operation_record_safe_value "$operation_readiness_result")"
+    printf 'readiness_operation_id = "%s"\n' "$(operation_record_safe_value "$operation_readiness_operation_id")"
+    printf 'readiness_retryable = "%s"\n' "$(operation_record_safe_value "$operation_readiness_retryable")"
+    printf 'readiness_replacement_attempted = "%s"\n' "$(operation_record_safe_value "$operation_readiness_replacement_attempted")"
+    printf 'readiness_daemon_evidence = "%s"\n' "$(operation_record_safe_value "$operation_readiness_daemon_evidence")"
+    printf 'readiness_wait_attempts = "%s"\n' "$(operation_record_safe_value "$operation_readiness_wait_attempts")"
+    printf 'readiness_wait_bound_seconds = "%s"\n' "$(operation_record_safe_value "$operation_readiness_wait_bound_seconds")"
+    printf 'readiness_diagnostic = "%s"\n' "$(operation_record_safe_value "$operation_readiness_diagnostic")"
     printf 'task_status = "%s"\n' "$(operation_record_safe_value "$operation_task_status")"
     printf 'agent_execution = "%s"\n' "$(operation_record_safe_value "$operation_agent_execution")"
     printf 'explicit_exec = "%s"\n' "$(operation_record_safe_value "$operation_explicit_exec")"
@@ -1103,6 +1169,13 @@ operation_record_load() {
       diagnostic) operation_diagnostic="$value" ;;
       retry_command) operation_retry_command="$value" ;;
       record_cleanup) operation_record_cleanup="$value" ;;
+      readiness_operation_id) operation_readiness_operation_id="$value" ;;
+      readiness_retryable) operation_readiness_retryable="$value" ;;
+      readiness_replacement_attempted) operation_readiness_replacement_attempted="$value" ;;
+      readiness_daemon_evidence) operation_readiness_daemon_evidence="$value" ;;
+      readiness_wait_attempts) operation_readiness_wait_attempts="$value" ;;
+      readiness_wait_bound_seconds) operation_readiness_wait_bound_seconds="$value" ;;
+      readiness_diagnostic) operation_readiness_diagnostic="$value" ;;
       failed_phase) operation_failed_phase="$value" ;;
       task_status) operation_task_status="$value" ;;
       agent_execution) operation_agent_execution="$value" ;;
@@ -1826,29 +1899,212 @@ build_user_image() {
 is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null || true)" = "true" ]; }
 exists() { [ -n "$(docker inspect -f '{{.Id}}' "$cname" 2>/dev/null || true)" ]; }
 
+READINESS_WAIT_ATTEMPTS=60
+READINESS_WAIT_INTERVAL=0.5
+
+readiness_host_sleep() {
+  sleep "$1"
+}
+
 wait_ready() {
-  for _ in $(seq 1 60); do
-    docker exec "$cname" docker info >/dev/null 2>&1 && return 0
-    sleep 0.5
+  local attempt=0
+  while [ "$attempt" -lt "$READINESS_WAIT_ATTEMPTS" ]; do
+    attempt=$((attempt + 1))
+    if docker exec "$cname" docker info >/dev/null 2>&1; then
+      # The API becoming usable is not the complete handoff: the entrypoint must also have
+      # published the terminal state. Keep polling when the producer is between its API probe
+      # and its atomic state write, especially across the one permitted replacement attempt.
+      if readiness_handoff_read; then
+        case "$operation_readiness_handoff_state" in
+          ready) return 0 ;;
+          failed-but-running|failed-and-exited) return 1 ;;
+        esac
+      fi
+    elif readiness_handoff_read; then
+      case "$operation_readiness_handoff_state" in
+        failed-but-running|failed-and-exited) return 1 ;;
+      esac
+    fi
+    if [ "$attempt" -lt "$READINESS_WAIT_ATTEMPTS" ]; then
+      readiness_host_sleep "$READINESS_WAIT_INTERVAL"
+    fi
   done
-  echo "agentbox: WARNING — inner docker not ready yet; try 'ab logs'" >&2
+  # Close the publication boundary once more after the bounded poll. An API response and the
+  # producer's final atomic write can cross the last poll in either order.
+  if docker exec "$cname" docker info >/dev/null 2>&1 && readiness_handoff_read; then
+    [ "$operation_readiness_handoff_state" = ready ] && return 0
+  fi
+  echo "agentbox: WARNING — inner docker handoff did not become ready; try 'ab logs'" >&2
   return 1
 }
 
-# Adapt the bounded nested-Docker hook to the Task 7 operation result. A readiness timeout is
-# classified after the wait, so a daemon that exited during the wait cannot be reported as merely
-# non-ready. The outer container remains available for logs/config/status diagnostics.
+readiness_handoff_reset() {
+  operation_readiness_operation_id=""
+  operation_readiness_retryable=""
+  operation_readiness_replacement_attempted=""
+  operation_readiness_daemon_evidence=""
+  operation_readiness_wait_attempts=""
+  operation_readiness_wait_bound_seconds=""
+  operation_readiness_diagnostic=""
+  operation_readiness_handoff_state=""
+}
+
+readiness_handoff_container_operation_id() {
+  local env_line
+  while IFS= read -r env_line; do
+    case "$env_line" in
+      AGENTBOX_OPERATION_ID=*) printf '%s' "${env_line#AGENTBOX_OPERATION_ID=}"; return 0 ;;
+    esac
+  done < <(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cname" 2>/dev/null || true)
+  return 1
+}
+
+readiness_handoff_fail() {
+  operation_readiness_diagnostic="nested Docker readiness handoff invalid: $1"
+  return 1
+}
+
+# Read and validate the entrypoint's atomic handoff. Values are deliberately a simple key/value
+# protocol: no policy files, credentials, or arbitrary process data cross this boundary. An
+# existing stopped container may retain the operation id from the operation that created it, so
+# that id is also checked against the immutable AGENTBOX_OPERATION_ID in the container config.
+readiness_handoff_read() {
+  local content line key value
+  local -A seen=()
+  readiness_handoff_reset
+  if ! content="$(docker exec --user agentbox "$cname" cat "$DOCKER_READINESS_STATE_CONTAINER" 2>/dev/null)"; then
+    readiness_handoff_fail "state file is missing or unreadable"
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) ;;
+      *) readiness_handoff_fail "malformed line"; return 1 ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      operation_id|state|retryable|replacement_attempted|daemon_evidence|wait_attempts|wait_bound_seconds|diagnostic) ;;
+      *) readiness_handoff_fail "unknown field $key"; return 1 ;;
+    esac
+    [ -z "${seen[$key]+present}" ] || {
+      readiness_handoff_fail "duplicate field $key"
+      return 1
+    }
+    seen["$key"]=1
+    case "$key" in
+      operation_id) operation_readiness_operation_id="$value" ;;
+      state) operation_readiness_handoff_state="$value" ;;
+      retryable) operation_readiness_retryable="$value" ;;
+      replacement_attempted) operation_readiness_replacement_attempted="$value" ;;
+      daemon_evidence) operation_readiness_daemon_evidence="$value" ;;
+      wait_attempts) operation_readiness_wait_attempts="$value" ;;
+      wait_bound_seconds) operation_readiness_wait_bound_seconds="$value" ;;
+      diagnostic) operation_readiness_diagnostic="$value" ;;
+    esac
+  done <<<"$content"
+
+  local required
+  for required in operation_id state retryable replacement_attempted daemon_evidence \
+                  wait_attempts wait_bound_seconds diagnostic; do
+    [ -n "${seen[$required]+present}" ] || {
+      readiness_handoff_fail "missing field $required"
+      return 1
+    }
+  done
+  [ -n "$operation_readiness_operation_id" ] || {
+    readiness_handoff_fail "empty operation_id"
+    return 1
+  }
+  [[ "$operation_readiness_operation_id" =~ ^[A-Za-z0-9_.:-]+$ ]] || {
+    readiness_handoff_fail "invalid operation_id"
+    return 1
+  }
+  case "$operation_readiness_handoff_state" in
+    starting|ready|failed-but-running|failed-and-exited|replacement-attempted) ;;
+    *) readiness_handoff_fail "unknown state $operation_readiness_handoff_state"; return 1 ;;
+  esac
+  case "$operation_readiness_retryable:$operation_readiness_replacement_attempted" in
+    0:0|0:1|1:0|1:1) ;;
+    *) readiness_handoff_fail "invalid retryability fields"; return 1 ;;
+  esac
+  [[ "$operation_readiness_wait_attempts" =~ ^[0-9]+$ ]] || {
+    readiness_handoff_fail "invalid wait_attempts"
+    return 1
+  }
+  [ "${#operation_readiness_wait_attempts}" -le 2 ] &&
+    [ "$operation_readiness_wait_attempts" -le 60 ] || {
+    readiness_handoff_fail "wait_attempts exceed the 30-second bound"
+    return 1
+  }
+  [ "$operation_readiness_wait_bound_seconds" = 30 ] || {
+    readiness_handoff_fail "unexpected readiness bound"
+    return 1
+  }
+  [[ "$operation_readiness_daemon_evidence" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+    readiness_handoff_fail "invalid daemon evidence"
+    return 1
+  }
+  case "$operation_readiness_handoff_state" in
+    ready)
+      [ "$operation_readiness_retryable" = 0 ] || {
+        readiness_handoff_fail "ready state is retryable"
+        return 1
+      }
+      ;;
+    starting|failed-but-running|failed-and-exited|replacement-attempted)
+      [ "$operation_readiness_retryable" = 1 ] || {
+        readiness_handoff_fail "failed state is not retryable"
+        return 1
+      }
+      ;;
+  esac
+  if [ "$operation_readiness_operation_id" != "${operation_id:-}" ]; then
+    local container_operation_id
+    container_operation_id="$(readiness_handoff_container_operation_id || true)"
+    [ "$container_operation_id" = "$operation_readiness_operation_id" ] || {
+      readiness_handoff_fail "operation_id does not match this operation or container"
+      return 1
+    }
+  fi
+  return 0
+}
+
+# Adapt the bounded nested-Docker hook to the Task 7 operation result. The adapter consumes the
+# entrypoint handoff after the API probe, so reports carry daemon evidence and the exact bounded
+# wait outcome. Missing, malformed, stale, or contradictory handoffs fail closed.
 readiness_adapter() {
-  if wait_ready; then
+  local wait_rc=0 outer_state
+  wait_ready || wait_rc=$?
+  if ! readiness_handoff_read; then
+    if is_running; then
+      operation_readiness_result=failed-but-running
+      return 1
+    fi
+    operation_readiness_result=failed-and-exited
+    return 2
+  fi
+  if [ "$wait_rc" -eq 0 ] && [ "$operation_readiness_handoff_state" = ready ]; then
     operation_readiness_result=ready
     return 0
   fi
-  if is_running; then
-    operation_readiness_result=failed-but-running
-    return 1
-  fi
-  operation_readiness_result=failed-and-exited
-  return 2
+  case "$operation_readiness_handoff_state" in
+    failed-but-running)
+      operation_readiness_result=failed-but-running
+      return 1
+      ;;
+    failed-and-exited)
+      operation_readiness_result=failed-and-exited
+      return 2
+      ;;
+    starting|replacement-attempted|ready)
+      if is_running; then outer_state=failed-but-running; else outer_state=failed-and-exited; fi
+      operation_readiness_result="$outer_state"
+      operation_readiness_diagnostic="${operation_readiness_diagnostic:-nested Docker handoff did not reach a terminal state}"
+      if [ "$outer_state" = failed-but-running ]; then return 1; fi
+      return 2
+      ;;
+  esac
 }
 
 # The entrypoint repairs the ownership of the jj state volume as root, but `docker run -d`
@@ -3545,6 +3801,7 @@ cmd_start() {
   require_jj_state_mount
   warn_legacy_files
   local running=0 tag old_id
+  local -a operation_run_args=("${run_args[@]}")
   if is_running; then
     running=1
     if [ "$policy_needs_recreate" = 1 ]; then
@@ -3628,7 +3885,10 @@ cmd_start() {
     operation_phase=creation
     operation_record_update creation in-progress "" || exit 1
     operation_mount_guard
-    if ! docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null; then
+    if [ "${policy_operation_requested:-0}" = 1 ]; then
+      operation_run_args+=(--env "AGENTBOX_OPERATION_ID=$operation_id")
+    fi
+    if ! docker run -d --name "$cname" "${operation_run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null; then
       operation_record_failure absent-after-failure "docker run failed; the named container is absent" || exit 1
     fi
   fi
@@ -3647,7 +3907,7 @@ cmd_start() {
     operation_record_failure absent-after-failure "post-creation policy verification failed" || true
     exit 1
   }
-  operation_phase=required-network
+  operation_phase='required-network'
   operation_record_update required-network in-progress "" || exit 1
   connect_networks   # configured networks are optional post-create attachments
   if [ "$operation_connect_network_status" != ok ]; then
@@ -3664,7 +3924,8 @@ cmd_start() {
     operation_record_failure readiness-failed "jj state is not ready" || exit 1
   fi
   if ! readiness_adapter; then
-    operation_record_failure readiness-failed "nested Docker readiness failed: $operation_readiness_result" || exit 1
+    operation_record_failure readiness-failed \
+      "${operation_readiness_diagnostic:-nested Docker readiness failed: $operation_readiness_result}" || exit 1
   fi
   operation_phase=completion
   operation_record_update completion in-progress "" || exit 1
@@ -4184,7 +4445,8 @@ main() {
     operation_phase=creation
     operation_record_update creation in-progress "" || exit 1
     operation_mount_guard
-    if ! docker run -d --name "$cname" "${run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null; then
+    local -a operation_run_args=("${run_args[@]}" --env "AGENTBOX_OPERATION_ID=$operation_id")
+    if ! docker run -d --name "$cname" "${operation_run_args[@]}" "${grant_labels[@]}" "${mounts[@]}" "$tag" >/dev/null; then
       operation_record_failure absent-after-failure "docker run failed; the named container is absent" || exit 1
     fi
     operation_new_container_id="$(docker inspect -f '{{.Id}}' "$cname" 2>/dev/null || true)"
@@ -4193,7 +4455,7 @@ main() {
       operation_record_failure absent-after-failure "post-creation policy verification failed" || true
       exit 1
     }
-    operation_phase=required-network
+    operation_phase='required-network'
     operation_record_update required-network in-progress "" || exit 1
     connect_networks   # configured networks are optional post-create attachments
     if [ "$operation_connect_network_status" != ok ]; then
@@ -4203,7 +4465,8 @@ main() {
     operation_readiness_result=starting
     operation_record_update nested-readiness in-progress "" || exit 1
     if ! readiness_adapter; then
-      operation_record_failure readiness-failed "nested Docker readiness failed: $operation_readiness_result" || exit 1
+      operation_record_failure readiness-failed \
+        "${operation_readiness_diagnostic:-nested Docker readiness failed: $operation_readiness_result}" || exit 1
     fi
     operation_phase=completion
     operation_record_update completion in-progress "" || exit 1
