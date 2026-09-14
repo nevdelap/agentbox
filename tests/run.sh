@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2119,SC2120,SC2218,SC2032,SC2317,SC2329 # tests use intentional forwarding wrappers and indirect mocks
+# shellcheck disable=SC2119,SC2120,SC2218,SC2032,SC2100,SC2317,SC2329 # tests use intentional forwarding wrappers and indirect mocks
 # Unit tests for agentbox host-side logic:
 #   - bin/ab                :: compute_names, ab_config_candidates, ab_config_file,
 #                              ab_config_container_path, ab_parse_mounts_line, ab_mount_dest_owner,
@@ -901,6 +901,242 @@ assert_eq "reject 0"               "1" "$(b 0)"
 assert_eq "reject 65536 (too big)" "1" "$(b 65536)"
 assert_eq "reject non-numeric"     "1" "$(b ssh)"
 assert_eq "reject huge number"     "1" "$(b 99999999999999999999)"
+
+echo
+echo "nested Docker readiness recovery (agentbox-entrypoint.sh)"
+_saved_task11_ps_fn="$(declare -f ps 2>/dev/null || true)"
+_saved_task11_kill_fn="$(declare -f kill 2>/dev/null || true)"
+_saved_task11_docker_fn="$(declare -f docker 2>/dev/null || true)"
+_saved_task11_daemon_alive_fn="$(declare -f docker_daemon_alive)"
+_saved_task11_launch_alive_fn="$(declare -f docker_readiness_launched_process_alive)"
+_saved_task11_launch_exited_fn="$(declare -f docker_readiness_launched_process_exited)"
+_saved_task11_wait_fn="$(declare -f wait_for_dockerd)"
+_saved_task11_start_fn="$(declare -f start_dockerd_once)"
+_saved_task11_socket_fn="$(declare -f docker_socket_ready)"
+_saved_task11_sleep_fn="$(declare -f readiness_sleep)"
+_saved_task11_sock="$DOCKER_SOCK"; _saved_task11_pid_file="$DOCKER_PID_FILE"
+_saved_task11_state_file="$DOCKER_READINESS_STATE_FILE"
+_saved_task11_operation_id="$docker_readiness_operation_id"
+_saved_task11_attempts="$DOCKER_READINESS_ATTEMPTS"
+_saved_task11_interval="$DOCKER_READINESS_INTERVAL"
+_saved_task11_state="$docker_readiness_state"
+_saved_task11_retryable="$docker_readiness_retryable"
+_saved_task11_replacement="$docker_readiness_replacement_attempted"
+_saved_task11_evidence="$docker_readiness_daemon_evidence"
+_saved_task11_wait_attempts="$docker_readiness_wait_attempts"
+_saved_task11_diagnostic="$docker_readiness_diagnostic"
+_saved_task11_terminal="$docker_readiness_terminal_failure"
+_saved_task11_transitions="$docker_readiness_transition_log"
+_saved_task11_launch_observed="$docker_readiness_launch_observed"
+_saved_task11_launch_pid="$docker_readiness_launch_pid"
+_task11_root="$(mktemp -d)"
+DOCKER_SOCK="$_task11_root/docker.sock"; DOCKER_PID_FILE="$_task11_root/docker.pid"
+DOCKER_READINESS_STATE_FILE="$_task11_root/nested-docker-state"
+docker_readiness_operation_id=task11-test
+DOCKER_READINESS_ATTEMPTS=3; DOCKER_READINESS_INTERVAL=0
+_task11_ps_mode='pid-valid'
+printf '4242\n' >"$DOCKER_PID_FILE"
+ps() {
+  case "$*" in
+    '-o comm= -p 4242')
+      case "$_task11_ps_mode" in
+        pid-valid|pid-zombie) printf 'dockerd\n' ;;
+        *) printf 'containerd\n' ;;
+      esac
+      ;;
+    '-o stat= -p 4242')
+      [ "$_task11_ps_mode" = pid-zombie ] && printf 'Z\n' || printf 'S\n'
+      ;;
+    '-eo pid=,comm=,stat=')
+      [ "$_task11_ps_mode" = process-fallback ] && printf '4242 dockerd S\n'
+      [ "$_task11_ps_mode" = process-zombie ] && printf '4242 dockerd Z\n'
+      ;;
+  esac
+}
+kill() { return 0; }
+assert_eq "valid PID identifies live dockerd" 0 "$(docker_daemon_pid_alive; echo $?)"
+_task11_ps_mode='pid-mismatch'
+assert_eq "mismatched PID is not trusted" 1 "$(docker_daemon_pid_alive; echo $?)"
+_task11_ps_mode='pid-zombie'
+assert_eq "zombie PID is not trusted" 1 "$(docker_daemon_pid_alive; echo $?)"
+_task11_ps_mode='process-fallback'
+assert_eq "process table finds live dockerd without usable PID" 0 "$(docker_daemon_process_alive; echo $?)"
+_task11_ps_mode='process-zombie'
+assert_eq "process table ignores zombie dockerd" 1 "$(docker_daemon_process_alive; echo $?)"
+
+# The wait loop is bounded and injectable: this fixture becomes API-ready on its third poll
+# without sleeping, proving the production 30-second loop has a deterministic test seam.
+_task11_ready_calls=0
+docker_socket_ready() {
+  _task11_ready_calls=$((_task11_ready_calls + 1))
+  [ "$_task11_ready_calls" -ge 3 ]
+}
+docker() { [ "$1" = info ] && return 0; return 0; }
+readiness_sleep() { :; }
+wait_for_dockerd >/dev/null 2>&1; _task11_wait_rc=$?
+assert_eq "readiness wait reaches API" 0 "$_task11_wait_rc"
+assert_eq "readiness wait is bounded and counted" 3 "$docker_readiness_wait_attempts"
+
+# A launched daemon that exits on the second poll leaves one poll in the shared budget. The
+# replacement succeeds on that final poll; a separate per-attempt budget would incorrectly give
+# the replacement a fresh three-poll window.
+DOCKER_READINESS_ATTEMPTS=60; docker_readiness_wait_attempts=0; docker_readiness_launch_observed=1
+docker_socket_ready() { [ "$docker_readiness_wait_attempts" -ge 60 ]; }
+docker() {
+  if [ "$1" = info ] && [ "$docker_readiness_wait_attempts" -ge 60 ]; then return 0; fi
+  return 1
+}
+docker_readiness_launched_process_exited() { [ "$docker_readiness_wait_attempts" -ge 59 ]; }
+readiness_sleep() { :; }
+wait_for_dockerd >/dev/null 2>&1; _task11_first_wait_rc=$?
+assert_eq "exited daemon returns before shared deadline" 2 "$_task11_first_wait_rc"
+assert_eq "first wait consumes most shared budget" 59 "$docker_readiness_wait_attempts"
+wait_for_dockerd >/dev/null 2>&1; _task11_second_wait_rc=$?
+assert_eq "replacement uses remaining shared budget" 0 "$_task11_second_wait_rc"
+assert_eq "replacement total stays within bound" 60 "$docker_readiness_wait_attempts"
+
+# The remaining cases exercise ensure_dockerd's state machine. Docker API, process liveness,
+# launch, socket readiness, and sleep are all seams so no real daemon, socket, or 30-second wait
+# is needed. Marker files are private fixtures, allowing cleanup assertions without /var/run.
+unset -f docker_socket_ready docker readiness_sleep
+eval "$_saved_task11_socket_fn"; eval "$_saved_task11_docker_fn"; eval "$_saved_task11_sleep_fn"
+_task11_info_rc=1; _task11_alive_results=(); _task11_start_results=()
+_task11_alive_calls=0; _task11_start_calls=0
+docker() { [ "$1" = info ] && return "$_task11_info_rc"; return 0; }
+docker_daemon_alive() {
+  _task11_alive_calls=$((_task11_alive_calls + 1))
+  local result="${_task11_alive_results[0]:-false}"
+  _task11_alive_results=("${_task11_alive_results[@]:1}")
+  [ "$result" = true ]
+}
+wait_for_dockerd() { return "${_task11_wait_result:-1}"; }
+start_dockerd_once() {
+  _task11_start_calls=$((_task11_start_calls + 1))
+  local result="${_task11_start_results[0]:-1}"
+  _task11_start_results=("${_task11_start_results[@]:1}")
+  return "$result"
+}
+readiness_sleep() { :; }
+docker_socket_ready() { return 1; }
+
+touch "$DOCKER_SOCK" "$DOCKER_PID_FILE"
+_task11_alive_results=(true); _task11_wait_result=0
+ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
+assert_eq "live daemon with valid evidence becomes ready" 0 "$_task11_rc"
+assert_eq "live daemon is not restarted" 0 "$_task11_start_calls"
+assert_eq "live daemon state is ready" ready "$docker_readiness_state"
+assert_eq "live daemon transition" "starting ready" "$docker_readiness_transition_log"
+assert_eq "live daemon markers are preserved" 2 "$(find "$DOCKER_SOCK" "$DOCKER_PID_FILE" -maxdepth 0 -type f 2>/dev/null | wc -l)"
+
+_task11_alive_results=(true true); _task11_wait_result=1; _task11_start_calls=0
+ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
+assert_eq "persistent live daemon returns failure" 1 "$_task11_rc"
+assert_eq "persistent live daemon is not restarted" 0 "$_task11_start_calls"
+assert_eq "persistent live daemon is failed-but-running" failed-but-running "$docker_readiness_state"
+assert_eq "persistent live daemon is retryable" 1 "$docker_readiness_retryable"
+assert_eq "persistent live daemon markers are preserved" 2 "$(find "$DOCKER_SOCK" "$DOCKER_PID_FILE" -maxdepth 0 -type f 2>/dev/null | wc -l)"
+
+_task11_alive_results=(false); _task11_start_results=(0); _task11_start_calls=0
+ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
+assert_eq "stale markers with no daemon start once" 0 "$_task11_rc"
+assert_eq "stale markers are cleaned before start" 0 "$(find "$DOCKER_SOCK" "$DOCKER_PID_FILE" -maxdepth 0 -type f 2>/dev/null | wc -l)"
+assert_eq "stale marker recovery is ready" ready "$docker_readiness_state"
+
+touch "$DOCKER_SOCK" "$DOCKER_PID_FILE"
+_task11_alive_results=(false false); _task11_start_results=(2 0); _task11_start_calls=0
+ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
+assert_eq "exited daemon gets one replacement" 0 "$_task11_rc"
+assert_eq "replacement starts exactly once" 2 "$_task11_start_calls"
+assert_eq "replacement state returns ready" ready "$docker_readiness_state"
+assert_eq "replacement transition is explicit" \
+  "starting failed-and-exited replacement-attempted ready" "$docker_readiness_transition_log"
+assert_eq "replacement attempt is recorded" 1 "$docker_readiness_replacement_attempted"
+assert_eq "readiness handoff records operation" 1 \
+  "$(grep -c '^operation_id=task11-test$' "$DOCKER_READINESS_STATE_FILE" || true)"
+assert_eq "readiness handoff records state" 1 \
+  "$(grep -c '^state=ready$' "$DOCKER_READINESS_STATE_FILE" || true)"
+assert_eq "readiness handoff records retryability" 1 \
+  "$(grep -c '^retryable=0$' "$DOCKER_READINESS_STATE_FILE" || true)"
+assert_eq "readiness handoff records wait bound" 1 \
+  "$(grep -c '^wait_attempts=' "$DOCKER_READINESS_STATE_FILE" || true)"
+
+_task11_alive_results=(false false false); _task11_start_results=(2 2); _task11_start_calls=0
+ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
+assert_eq "failed replacement returns failure" 1 "$_task11_rc"
+assert_eq "failed replacement is attempted once" 2 "$_task11_start_calls"
+assert_eq "failed replacement is terminal" failed-and-exited "$docker_readiness_state"
+assert_eq "failed replacement is terminally remembered" 1 "$docker_readiness_terminal_failure"
+ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
+assert_eq "terminal replacement does not retry" 1 "$_task11_rc"
+assert_eq "terminal replacement keeps one attempt" 2 "$_task11_start_calls"
+
+# Restore the real launch/wait path for the delayed-process-appearance regression below.
+unset -f docker docker_daemon_alive wait_for_dockerd start_dockerd_once
+[ -n "$_saved_task11_docker_fn" ] && eval "$_saved_task11_docker_fn"
+eval "$_saved_task11_daemon_alive_fn"; eval "$_saved_task11_wait_fn"; eval "$_saved_task11_start_fn"
+
+# A background dockerd can be launched before it is visible through the process-table seam. The
+# launched PID is still considered alive, so the bounded wait must report a running failure and
+# retain the newly written markers rather than authorizing cleanup and a replacement launch.
+_saved_task11_docker_fn="$(declare -f docker)"
+_saved_task11_socket_fn="$(declare -f docker_socket_ready)"
+_saved_task11_sleep_fn="$(declare -f readiness_sleep)"
+_saved_task11_launch_alive_fn="$(declare -f docker_readiness_launched_process_alive)"
+_saved_task11_launch_exited_fn="$(declare -f docker_readiness_launched_process_exited)"
+_saved_task11_launch_pid="$docker_readiness_launch_pid"
+_saved_task11_log="$DOCKERD_LOG"
+_task11_launch_count_file="$_task11_root/launch-count"
+printf '0\n' >"$_task11_launch_count_file"
+docker() { [ "$1" = info ] && return 1; return 0; }
+docker_socket_ready() { return 1; }
+readiness_sleep() { :; }
+dockerd() {
+  local count
+  count=$(<"$_task11_launch_count_file")
+  printf '%s\n' "$((count + 1))" >"$_task11_launch_count_file"
+  touch "$DOCKER_SOCK" "$DOCKER_PID_FILE"
+}
+docker_readiness_launched_process_alive() { return 0; }
+docker_readiness_launched_process_exited() { return 1; }
+DOCKER_READINESS_ATTEMPTS=3; DOCKER_READINESS_INTERVAL=0
+docker_readiness_wait_attempts=0; docker_readiness_launch_pid=""
+docker_readiness_terminal_failure=0
+DOCKERD_LOG="$_task11_root/dockerd.log"
+ensure_dockerd >/dev/null 2>&1; _task11_delayed_process_rc=$?
+assert_eq "delayed process appearance remains running" 1 "$_task11_delayed_process_rc"
+assert_eq "delayed process appearance launches once" 1 "$(<"$_task11_launch_count_file")"
+assert_eq "delayed process appearance keeps socket marker" 1 \
+  "$(find "$DOCKER_SOCK" -maxdepth 0 -type f 2>/dev/null | wc -l)"
+assert_eq "delayed process appearance keeps PID marker" 1 \
+  "$(find "$DOCKER_PID_FILE" -maxdepth 0 -type f 2>/dev/null | wc -l)"
+unset -f docker dockerd docker_socket_ready readiness_sleep
+eval "$_saved_task11_docker_fn"; eval "$_saved_task11_socket_fn"; eval "$_saved_task11_sleep_fn"
+eval "$_saved_task11_launch_alive_fn"; eval "$_saved_task11_launch_exited_fn"
+docker_readiness_launch_pid="$_saved_task11_launch_pid"; DOCKERD_LOG="$_saved_task11_log"
+
+unset -f ps kill docker docker_daemon_alive docker_readiness_launched_process_alive
+unset -f docker_readiness_launched_process_exited wait_for_dockerd start_dockerd_once
+unset -f docker_socket_ready readiness_sleep
+[ -n "$_saved_task11_ps_fn" ] && eval "$_saved_task11_ps_fn"
+[ -n "$_saved_task11_kill_fn" ] && eval "$_saved_task11_kill_fn"
+eval "$_saved_task11_docker_fn"; eval "$_saved_task11_daemon_alive_fn"
+eval "$_saved_task11_launch_alive_fn"; eval "$_saved_task11_launch_exited_fn"
+eval "$_saved_task11_wait_fn"; eval "$_saved_task11_start_fn"
+eval "$_saved_task11_socket_fn"; eval "$_saved_task11_sleep_fn"
+rm -rf "$_task11_root"
+DOCKER_SOCK="$_saved_task11_sock"; DOCKER_PID_FILE="$_saved_task11_pid_file"
+DOCKER_READINESS_STATE_FILE="$_saved_task11_state_file"
+docker_readiness_operation_id="$_saved_task11_operation_id"
+DOCKER_READINESS_ATTEMPTS="$_saved_task11_attempts"; DOCKER_READINESS_INTERVAL="$_saved_task11_interval"
+docker_readiness_state="$_saved_task11_state"; docker_readiness_retryable="$_saved_task11_retryable"
+docker_readiness_replacement_attempted="$_saved_task11_replacement"
+docker_readiness_daemon_evidence="$_saved_task11_evidence"
+docker_readiness_wait_attempts="$_saved_task11_wait_attempts"
+docker_readiness_diagnostic="$_saved_task11_diagnostic"
+docker_readiness_terminal_failure="$_saved_task11_terminal"
+docker_readiness_transition_log="$_saved_task11_transitions"
+docker_readiness_launch_observed="$_saved_task11_launch_observed"
+docker_readiness_launch_pid="$_saved_task11_launch_pid"
 
 echo
 echo "ab_parse_mounts_line (bin/ab)"
@@ -2014,8 +2250,10 @@ rm -f "$_task7_record"
 
 _saved_task7_wait_ready_fn="$(declare -f wait_ready)"
 _saved_task7_running_fn="$(declare -f is_running)"
+_saved_task7_handoff_fn="$(declare -f readiness_handoff_read)"
 wait_ready() { return 1; }
 is_running() { return 0; }
+readiness_handoff_read() { operation_readiness_diagnostic='handoff unavailable'; return 1; }
 readiness_adapter >/dev/null 2>&1; _task7_ready_rc=$?
 assert_eq "readiness reports running timeout" 1 "$_task7_ready_rc"
 assert_eq "readiness running outcome" failed-but-running "$operation_readiness_result"
@@ -2024,7 +2262,292 @@ readiness_adapter >/dev/null 2>&1; _task7_ready_rc=$?
 assert_eq "readiness reports exited timeout" 2 "$_task7_ready_rc"
 assert_eq "readiness exited outcome" failed-and-exited "$operation_readiness_result"
 unset -f wait_ready is_running
-eval "$_saved_task7_wait_ready_fn"; eval "$_saved_task7_running_fn"
+unset -f readiness_handoff_read
+eval "$_saved_task7_wait_ready_fn"; eval "$_saved_task7_running_fn"; eval "$_saved_task7_handoff_fn"
+
+echo
+echo "Task 11 readiness handoff and integrated recovery (bin/ab + entrypoint)"
+# The entrypoint writes the nested-daemon handoff and the host adapter must consume it before
+# recording a terminal result. Exercise valid, malformed, foreign-operation, and every public
+# readiness state without a real Docker daemon, then run cmd_start twice with the real operation
+# record and readiness adapter. The fixture keeps the named volumes and policy/credential mounts
+# constant across both recovery cycles and records every Docker boundary for no-delete assertions.
+_saved_task11_docker_fn="$(declare -f docker 2>/dev/null || true)"
+_saved_task11_wait_ready_fn="$(declare -f wait_ready)"
+_saved_task11_is_running_fn="$(declare -f is_running)"
+_saved_task11_require_sysbox_fn="$(declare -f require_sysbox)"
+_saved_task11_require_jj_fn="$(declare -f require_jj_state_mount)"
+_saved_task11_warn_fn="$(declare -f warn_legacy_files)"
+_saved_task11_exists_fn="$(declare -f exists)"
+_saved_task11_build_fn="$(declare -f build_image)"
+_saved_task11_prepare_fn="$(declare -f prepare_host_state)"
+_saved_task11_policy_mount_fn="$(declare -f add_policy_mounts)"
+_saved_task11_user_mount_fn="$(declare -f build_user_mounts)"
+_saved_task11_wait_jj_fn="$(declare -f wait_jj_state)"
+_saved_task11_verify_fn="$(declare -f policy_verify_applied_state)"
+_saved_task11_connect_fn="$(declare -f connect_networks)"
+_saved_task11_mutation_fn="$(declare -f operation_mutation_guard)"
+_saved_task11_mount_guard_fn="$(declare -f operation_mount_guard)"
+_saved_task11_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task11_grant_validate_fn="$(declare -f grant_sources_validate_snapshot)"
+_saved_task11_grant_recheck_fn="$(declare -f grant_sources_recheck)"
+_saved_task11_state="$(mktemp -d)"
+_saved_task11_xdg="${XDG_STATE_HOME:-}"
+_saved_task11_identity="${lock_identity:-}"
+_saved_task11_cname="$cname"; _saved_task11_dvol="$dvol"; _saved_task11_jvol="$jvol"
+_saved_task11_run_args_decl="$(declare -p run_args)"
+_saved_task11_mounts_decl="$(declare -p mounts)"
+_saved_task11_grant_labels_decl="$(declare -p grant_labels)"
+XDG_STATE_HOME="$_saved_task11_state"
+lock_identity="$(printf task11-host | sha256sum | cut -d' ' -f1)"
+cname=agentbox-task11; dvol=agentbox-docker-task11; jvol=agentbox-jj-task11
+DOCKER_READINESS_STATE_CONTAINER=/var/run/agentbox/nested-docker-state
+operation_id=task11-host-operation
+_task11_handoff_operation_id=task11-host-operation
+_task11_handoff_state=ready
+_task11_handoff_retryable=0
+_task11_handoff_replacement=0
+_task11_handoff_evidence=launched
+_task11_handoff_wait_attempts=4
+_task11_handoff_bound=30
+_task11_handoff_diagnostic=
+_task11_handoff_malformed=0
+docker() {
+  case "${1:-}" in
+    exec)
+      if [ "$_task11_handoff_malformed" = 1 ]; then
+        printf 'not-a-key-value-line\n'
+        return 0
+      fi
+      printf 'operation_id=%s\n' "$_task11_handoff_operation_id"
+      printf 'state=%s\n' "$_task11_handoff_state"
+      printf 'retryable=%s\n' "$_task11_handoff_retryable"
+      printf 'replacement_attempted=%s\n' "$_task11_handoff_replacement"
+      printf 'daemon_evidence=%s\n' "$_task11_handoff_evidence"
+      printf 'wait_attempts=%s\n' "$_task11_handoff_wait_attempts"
+      printf 'wait_bound_seconds=%s\n' "$_task11_handoff_bound"
+      printf 'diagnostic=%s\n' "$_task11_handoff_diagnostic"
+      ;;
+    inspect)
+      printf 'AGENTBOX_OPERATION_ID=task11-container-operation\n'
+      ;;
+    run) : ;;
+  esac
+  return 0
+}
+readiness_handoff_read
+assert_eq "valid handoff operation id" task11-host-operation "$operation_readiness_operation_id"
+assert_eq "valid handoff state" ready "$operation_readiness_handoff_state"
+assert_eq "valid handoff daemon evidence" launched "$operation_readiness_daemon_evidence"
+assert_eq "valid handoff wait bound" 30 "$operation_readiness_wait_bound_seconds"
+wait_ready() { return 0; }
+readiness_adapter >/dev/null 2>&1; _task11_adapter_rc=$?
+assert_eq "valid handoff reaches ready" 0 "$_task11_adapter_rc"
+assert_eq "adapter preserves ready state" ready "$operation_readiness_result"
+eval "$_saved_task11_wait_ready_fn"
+
+# API readiness can precede the atomic producer write. The host must reread the handoff and
+# accept the same startup once the producer publishes ready, rather than recording a false
+# failure from the transient starting snapshot.
+_saved_task11_handoff_docker_fn="$(declare -f docker)"
+_saved_task11_host_sleep_fn="$(declare -f readiness_host_sleep)"
+_saved_task11_host_attempts="$READINESS_WAIT_ATTEMPTS"
+_saved_task11_host_interval="$READINESS_WAIT_INTERVAL"
+_task11_host_state_reads=0
+_task11_host_state_reads_file="$_saved_task11_state/handoff-reads"
+printf '0\n' >"$_task11_host_state_reads_file"
+docker() {
+  if [ "$1" = exec ] && [ "$2" = --user ]; then
+    _task11_host_state_reads=$(<"$_task11_host_state_reads_file")
+    _task11_host_state_reads=$((_task11_host_state_reads + 1))
+    printf '%s\n' "$_task11_host_state_reads" >"$_task11_host_state_reads_file"
+    if [ "$_task11_host_state_reads" -eq 1 ]; then
+      printf 'operation_id=task11-host-operation\nstate=starting\nretryable=1\n'
+      printf 'replacement_attempted=0\ndaemon_evidence=launched\nwait_attempts=4\n'
+    else
+      printf 'operation_id=task11-host-operation\nstate=ready\nretryable=0\n'
+      printf 'replacement_attempted=0\ndaemon_evidence=launched\nwait_attempts=5\n'
+    fi
+    printf 'wait_bound_seconds=30\ndiagnostic=\n'
+    return 0
+  fi
+  [ "$1" = exec ] && return 0
+  return 1
+}
+readiness_host_sleep() { :; }
+READINESS_WAIT_ATTEMPTS=3; READINESS_WAIT_INTERVAL=0
+wait_ready >/dev/null 2>&1; _task11_delayed_ready_rc=$?
+_task11_host_state_reads=$(<"$_task11_host_state_reads_file")
+assert_eq "delayed handoff publication reaches ready" 0 "$_task11_delayed_ready_rc"
+assert_eq "delayed handoff is reread" 2 "$_task11_host_state_reads"
+assert_eq "delayed handoff ends ready" ready "$operation_readiness_handoff_state"
+unset -f docker readiness_host_sleep
+eval "$_saved_task11_handoff_docker_fn"; eval "$_saved_task11_host_sleep_fn"
+READINESS_WAIT_ATTEMPTS="$_saved_task11_host_attempts"
+READINESS_WAIT_INTERVAL="$_saved_task11_host_interval"
+
+_task11_handoff_operation_id=foreign-operation
+_task11_handoff_state=ready
+readiness_adapter >/dev/null 2>&1; _task11_adapter_rc=$?
+assert_eq "foreign handoff fails closed" 2 "$_task11_adapter_rc"
+assert_eq "foreign handoff reports exited" failed-and-exited "$operation_readiness_result"
+assert_eq "foreign handoff is diagnosed" 1 "$(printf '%s' "$operation_readiness_diagnostic" | grep -c 'does not match')"
+
+_task11_handoff_operation_id=task11-host-operation
+_task11_handoff_state=ready
+_task11_handoff_bound=29
+readiness_handoff_read >/dev/null 2>&1; _task11_handoff_rc=$?
+assert_eq "wrong readiness bound fails closed" 1 "$_task11_handoff_rc"
+assert_eq "wrong readiness bound is diagnosed" 1 "$(printf '%s' "$operation_readiness_diagnostic" | grep -c 'unexpected readiness bound')"
+_task11_handoff_bound=30
+_task11_handoff_malformed=1
+readiness_handoff_read >/dev/null 2>&1; _task11_handoff_rc=$?
+assert_eq "malformed handoff fails closed" 1 "$_task11_handoff_rc"
+assert_eq "malformed handoff is diagnosed" 1 "$(printf '%s' "$operation_readiness_diagnostic" | grep -c 'malformed line')"
+_task11_handoff_malformed=0
+
+# Run the real host lifecycle helper twice. The state fixture is emitted by the Docker exec seam
+# exactly as agentbox-entrypoint.sh emits it, while Docker run captures the operation id and all
+# mounts. No volume removal is available in this recovery path, and both named volumes plus the
+# Git/credential policy mounts must be identical on the second operation.
+require_sysbox() { :; }; require_jj_state_mount() { :; }; warn_legacy_files() { :; }
+exists() { return 1; }; is_running() { return 1; }
+build_image() { printf '%s' agentbox:task11-image; }
+prepare_host_state() { :; }; add_policy_mounts() { :; }; build_user_mounts() { :; }
+wait_jj_state() { :; }; policy_verify_applied_state() { return 0; }
+connect_networks() { operation_connect_network_status=ok; return 0; }
+operation_mutation_guard() { return 0; }; operation_mount_guard() { return 0; }
+policy_resolution_recheck() { return 0; }
+grant_sources_validate_snapshot() { return 0; }; grant_sources_recheck() { return 0; }
+wait_ready() { return 0; }
+run_args=(--runtime=sysbox-runc)
+mounts=(-v "$dvol:/var/lib/docker" -v "$jvol:/home/agentbox/.config/jj"
+        -v "/host/gh:/home/agentbox/.config/gh:rw"
+        -v "/host/ssh:/home/agentbox/.ssh:ro")
+grant_labels=()
+policy_operation_requested=1; policy_decision_kind=create; policy_needs_recreate=0
+operation_record_active=0; policy_resolved_effective[digest]=sha256:task11
+_task11_trace="$_saved_task11_state/docker.trace"; : >"$_task11_trace"
+docker() {
+  printf 'docker:%s\n' "$*" >>"$_task11_trace"
+  case "${1:-}" in
+    exec)
+      printf 'operation_id=%s\n' "$operation_id"
+      printf 'state=ready\nretryable=0\nreplacement_attempted=0\n'
+      printf 'daemon_evidence=replacement\nwait_attempts=6\nwait_bound_seconds=30\n'
+      printf 'diagnostic=\n'
+      ;;
+    inspect) printf 'new-task11-container-id\n' ;;
+    run) _task11_run_args=("$@"); ;;
+  esac
+  return 0
+}
+cmd_start >"$_saved_task11_state/first-report" 2>&1; _task11_start_rc=$?
+_task11_first_id="$operation_id"
+assert_eq "integrated recovery succeeds" 0 "$_task11_start_rc"
+assert_eq "integrated report is ready" 1 "$(grep -c '^readiness=ready$' "$_saved_task11_state/first-report")"
+assert_eq "integrated report carries daemon evidence" 1 \
+  "$(grep -c '^readiness_daemon_evidence=replacement$' "$_saved_task11_state/first-report")"
+assert_eq "integrated report carries wait bound" 1 \
+  "$(grep -c '^readiness_wait_bound_seconds=30$' "$_saved_task11_state/first-report")"
+assert_eq "first run passes operation id" 1 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -c "AGENTBOX_OPERATION_ID=$_task11_first_id")"
+assert_eq "first run preserves inner volume" 1 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -c "$dvol:/var/lib/docker")"
+assert_eq "first run preserves jj volume" 1 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -c "$jvol:/home/agentbox/.config/jj")"
+assert_eq "first run preserves GitHub grant mount" 1 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -c '/home/agentbox/.config/gh:rw')"
+assert_eq "first run preserves SSH grant mount" 1 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -c '/home/agentbox/.ssh:ro')"
+
+operation_record_reset_result; policy_operation_requested=1; policy_decision_kind=create
+cmd_start >"$_saved_task11_state/second-report" 2>&1; _task11_start_rc=$?
+_task11_second_id="$operation_id"
+assert_eq "second recovery succeeds" 0 "$_task11_start_rc"
+assert_eq "recovery gets fresh operation id" 1 "$([ "$_task11_first_id" != "$_task11_second_id" ] && echo 1 || echo 0)"
+assert_eq "recovery preserves inner volume" 1 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -c "$dvol:/var/lib/docker")"
+assert_eq "recovery preserves jj volume" 1 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -c "$jvol:/home/agentbox/.config/jj")"
+assert_eq "recovery preserves credential boundaries" 2 \
+  "$(printf '%s\n' "${_task11_run_args[@]}" | grep -Ec '/home/agentbox/\.config/gh:rw|/home/agentbox/\.ssh:ro')"
+assert_eq "recovery performs no volume removal" 0 \
+  "$(grep -Ec 'docker:(volume|rm)' "$_task11_trace" || true)"
+
+# A failed recovery keeps the detailed handoff in the durable Task 7 record, where the Task 8
+# projection and Task 9 report reload it without consulting the private state file again.
+operation_record_reset_result; operation_record_begin
+operation_phase=nested-readiness; operation_readiness_result=failed-and-exited
+operation_readiness_operation_id=task11-failed-container
+operation_readiness_retryable=1; operation_readiness_replacement_attempted=1
+operation_readiness_daemon_evidence=replacement-exited
+operation_readiness_wait_attempts=60; operation_readiness_wait_bound_seconds=30
+operation_readiness_diagnostic="replacement daemon exited before readiness"
+operation_record_failure readiness-failed "$operation_readiness_diagnostic" >/dev/null 2>&1 || true
+operation_record_load
+assert_eq "stored handoff state reloads" failed-and-exited "$operation_state_readiness_state"
+assert_eq "stored handoff evidence reloads" replacement-exited "$operation_state_readiness_daemon_evidence"
+assert_eq "stored handoff retryability reloads" 1 "$operation_state_readiness_retryable"
+assert_eq "stored handoff diagnostic reloads" "$operation_readiness_diagnostic" \
+  "$operation_state_readiness_diagnostic"
+rm -f "$operation_record_path"
+
+# Every readiness enum is carried through the public report vocabulary, not only the ready path.
+for _task11_report_state in starting replacement-attempted ready failed-but-running failed-and-exited; do
+  operation_state_reset
+  policy_operation_mode=status; operation_record_active=1
+  operation_record_path="$_saved_task11_state/report.toml"; operation_id=task11-report
+  operation_record_container_name="$cname"; operation_record_inner_docker_volume="$dvol"
+  operation_record_jj_volume="$jvol"; operation_readiness_result="$_task11_report_state"
+  operation_readiness_operation_id=task11-report
+  operation_readiness_retryable=1; operation_readiness_replacement_attempted=0
+  operation_readiness_daemon_evidence=live-dockerd
+  operation_readiness_wait_attempts=60; operation_readiness_wait_bound_seconds=30
+  operation_readiness_diagnostic="state fixture"
+  case "$_task11_report_state" in
+    ready)
+      operation_status=complete; operation_task_status=pass; operation_phase=completion
+      operation_agent_execution=allowed; operation_explicit_exec=allowed
+      operation_record_cleanup=permitted; operation_readiness_result=ready
+      operation_readiness_retryable=0
+      ;;
+    starting|replacement-attempted)
+      operation_status=in-progress; operation_task_status=fail; operation_phase=nested-readiness
+      operation_agent_execution=blocked; operation_explicit_exec=blocked
+      operation_record_cleanup=forbidden
+      ;;
+    *)
+      operation_status=readiness-failed; operation_task_status=fail; operation_phase=nested-readiness
+      operation_agent_execution=blocked; operation_explicit_exec=diagnostic-only
+      operation_record_cleanup=forbidden
+      ;;
+  esac
+  policy_operation_status="$operation_status"; policy_readiness_result="$operation_readiness_result"
+  _task11_public_report="$(operation_result_record)"
+  assert_eq "public report exposes $_task11_report_state" 1 \
+    "$(printf '%s\n' "$_task11_public_report" | grep -c "^readiness=$_task11_report_state$")"
+  assert_eq "public report keeps $_task11_report_state evidence" 1 \
+    "$(printf '%s\n' "$_task11_public_report" | grep -c '^readiness_daemon_evidence=live-dockerd$')"
+done
+operation_state_reset
+
+unset -f docker wait_ready is_running exists require_sysbox require_jj_state_mount warn_legacy_files
+unset -f build_image prepare_host_state add_policy_mounts build_user_mounts wait_jj_state
+unset -f policy_verify_applied_state connect_networks operation_mutation_guard operation_mount_guard
+unset -f policy_resolution_recheck grant_sources_validate_snapshot grant_sources_recheck
+eval "$_saved_task11_docker_fn"; eval "$_saved_task11_wait_ready_fn"; eval "$_saved_task11_is_running_fn"
+eval "$_saved_task11_require_sysbox_fn"; eval "$_saved_task11_require_jj_fn"; eval "$_saved_task11_warn_fn"
+eval "$_saved_task11_exists_fn"; eval "$_saved_task11_build_fn"; eval "$_saved_task11_prepare_fn"
+eval "$_saved_task11_policy_mount_fn"; eval "$_saved_task11_user_mount_fn"; eval "$_saved_task11_wait_jj_fn"
+eval "$_saved_task11_verify_fn"; eval "$_saved_task11_connect_fn"; eval "$_saved_task11_mutation_fn"
+eval "$_saved_task11_mount_guard_fn"
+eval "$_saved_task11_recheck_fn"; eval "$_saved_task11_grant_validate_fn"; eval "$_saved_task11_grant_recheck_fn"
+rm -rf "$_saved_task11_state"
+if [ -n "$_saved_task11_xdg" ]; then XDG_STATE_HOME="$_saved_task11_xdg"; else unset XDG_STATE_HOME; fi
+lock_identity="$_saved_task11_identity"; cname="$_saved_task11_cname"
+dvol="$_saved_task11_dvol"; jvol="$_saved_task11_jvol"
+eval "$_saved_task11_run_args_decl"; eval "$_saved_task11_mounts_decl"; eval "$_saved_task11_grant_labels_decl"
 
 _task7_networks="$(mktemp)"
 printf '%s\n' optional-net >"$_task7_networks"
