@@ -46,7 +46,7 @@ declare slug nocache operation_readiness_handoff_state operation_state_readiness
 declare operation_state_readiness_retryable operation_state_readiness_diagnostic
 declare operation_state_named_volumes operation_state_old_container_id operation_state_container_id
 declare operation_state_cleanup_allowed operation_state_retry_command operation_state_diagnostic
-declare policy_retry_reconcile
+declare policy_retry_reconcile policy_git_source command_report_result command_report_exit_status
 declare -a policy_snapshot_paths protected_mount_destinations
 declare -A grant_source_snapshot policy_tier_git_enabled policy_tier_grant_all_of_dot_ssh
 declare -A policy_tier_updates_check policy_resolved_source policy_resolved_labels
@@ -4313,6 +4313,268 @@ if [ -n "$_saved_task10_retry_state" ]; then XDG_STATE_HOME="$_saved_task10_retr
 AB_CFG_ROOT="$_saved_task10_retry_cfg_root"; PROJECT_DIR="$_saved_task10_retry_project"
 MACHINE="$_saved_task10_retry_machine"; cname="$_saved_task10_retry_cname"
 dvol="$_saved_task10_retry_dvol"; jvol="$_saved_task10_retry_jvol"
+
+echo
+echo "Task 12 focused regression coverage (bin/ab)"
+
+echo "T12-01 invalid policy input"
+# An invalid environment boolean must fail during argument parsing for every launcher family.
+# Keep all later boundaries mocked so this row proves the failure happens before resolution,
+# update, Docker, image build, network, or container work.
+_saved_t12_invalid_begin_fn="$(declare -f policy_operation_begin)"
+_saved_t12_invalid_load_fn="$(declare -f policy_load_host)"
+_saved_t12_invalid_preflight_fn="$(declare -f policy_preflight)"
+_saved_t12_invalid_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_t12_invalid_update_fn="$(declare -f check_for_update)"
+_saved_t12_invalid_docker_fn="$(declare -f docker)"
+_saved_t12_invalid_build_fn="$(declare -f build_image)"
+_saved_t12_invalid_network_fn="$(declare -f connect_networks)"
+_saved_t12_invalid_start_fn="$(declare -f cmd_start)"
+_saved_t12_invalid_exec_fn="$(declare -f cmd_exec)"
+_saved_t12_invalid_config_fn="$(declare -f cmd_config)"
+_saved_t12_invalid_init_fn="$(declare -f cmd_config_init)"
+_task12_invalid_trace="$(mktemp)"
+policy_operation_begin() { printf 'operation\n' >>"$_task12_invalid_trace"; return 0; }
+policy_load_host() { printf 'policy-load\n' >>"$_task12_invalid_trace"; return 0; }
+policy_preflight() { printf 'preflight\n' >>"$_task12_invalid_trace"; return 0; }
+policy_resolution_recheck() { printf 'recheck\n' >>"$_task12_invalid_trace"; return 0; }
+check_for_update() { printf 'update\n' >>"$_task12_invalid_trace"; return 0; }
+docker() { printf 'docker\n' >>"$_task12_invalid_trace"; return 0; }
+build_image() { printf 'build\n' >>"$_task12_invalid_trace"; return 0; }
+connect_networks() { printf 'network\n' >>"$_task12_invalid_trace"; return 0; }
+cmd_start() { printf 'start\n' >>"$_task12_invalid_trace"; return 0; }
+cmd_exec() { printf 'exec\n' >>"$_task12_invalid_trace"; return 0; }
+cmd_config() { printf 'config\n' >>"$_task12_invalid_trace"; return 0; }
+cmd_config_init() { printf 'config-init\n' >>"$_task12_invalid_trace"; return 0; }
+export AGENTBOX_GRANT_GH=not-a-boolean
+for _task12_invalid_spec in start:start build:build rebuild:rebuild claude:claude codex:codex bash:bash exec:exec; do
+  IFS=: read -r _task12_invalid_command _task12_invalid_label <<<"$_task12_invalid_spec"
+  : >"$_task12_invalid_trace"
+  case "$_task12_invalid_command" in
+    start|build|rebuild)
+      _task12_invalid_output="$( ( main "$_task12_invalid_command" ) 2>&1 )"; _task12_invalid_rc=$?
+      ;;
+    exec)
+      _task12_invalid_output="$( ( main exec -- true ) 2>&1 )"; _task12_invalid_rc=$?
+      ;;
+    *)
+      _task12_invalid_output="$( ( main "$_task12_invalid_command" --test ) 2>&1 )"; _task12_invalid_rc=$?
+      ;;
+  esac
+  assert_eq "invalid policy $_task12_invalid_label exits before resolution" 2 "$_task12_invalid_rc"
+  assert_eq "invalid policy $_task12_invalid_label reports invalid input" 1 \
+    "$(printf '%s\n' "$_task12_invalid_output" | grep -c '^reason=invalid-input$' || true)"
+  assert_eq "invalid policy $_task12_invalid_label has no side effects" 0 \
+    "$(grep -Ec '^(operation|policy-load|preflight|recheck|update|docker|build|network|start|exec|config|config-init)$' "$_task12_invalid_trace" || true)"
+done
+unset AGENTBOX_GRANT_GH
+unset -f policy_operation_begin policy_load_host policy_preflight policy_resolution_recheck
+unset -f check_for_update docker build_image connect_networks cmd_start cmd_exec cmd_config cmd_config_init
+eval "$_saved_t12_invalid_begin_fn"; eval "$_saved_t12_invalid_load_fn"
+eval "$_saved_t12_invalid_preflight_fn"; eval "$_saved_t12_invalid_recheck_fn"
+eval "$_saved_t12_invalid_update_fn"; eval "$_saved_t12_invalid_docker_fn"
+eval "$_saved_t12_invalid_build_fn"; eval "$_saved_t12_invalid_network_fn"
+eval "$_saved_t12_invalid_start_fn"; eval "$_saved_t12_invalid_exec_fn"
+eval "$_saved_t12_invalid_config_fn"; eval "$_saved_t12_invalid_init_fn"
+rm -f "$_task12_invalid_trace"
+
+echo "T12-02 mount snapshot race"
+# A source change after policy snapshot must refuse before custom mounts are appended. Run this
+# for both Git policy states and separately exercise the protected-destination and credential
+# source guards; all cases retain the pre-race mount array.
+_saved_t12_mount_home="$HOME"; _saved_t12_mount_cfg="$cfg_mounts"
+_saved_t12_mounts_decl="$(declare -p mounts)"
+_saved_t12_mount_git="$policy_git_enabled"; _saved_t12_mount_gh="$policy_grant_gh"
+_saved_t12_mount_ssh="$policy_grant_all_of_dot_ssh"; _saved_t12_mount_blocker="$GIT_BLOCKER"
+_task12_mount_root="$(mktemp -d)"; HOME="$_task12_mount_root/home"
+mkdir -p "$HOME/.config/git" "$HOME/.ssh"
+printf '[user]\n\tname = Task Twelve\n' >"$HOME/.gitconfig"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$_task12_mount_root/git-blocker"
+chmod 755 "$_task12_mount_root/git-blocker"
+GIT_BLOCKER="$_task12_mount_root/git-blocker"
+_task12_mount_source_a="$_task12_mount_root/source-a"
+_task12_mount_source_b="$_task12_mount_root/source-b"
+printf 'a\n' >"$_task12_mount_source_a"; printf 'b\n' >"$_task12_mount_source_b"
+_task12_mount_file="$_task12_mount_root/mounts"
+for _task12_mount_git_enabled in 0 1; do
+  policy_git_enabled="$_task12_mount_git_enabled"
+  policy_grant_gh=0; policy_grant_all_of_dot_ssh=0
+  assert_eq "mount race policy $_task12_mount_git_enabled assembles policy mounts" 0 \
+    "$(mount_spec_build >/dev/null 2>&1; echo $?)"
+  printf '%s\n' "$_task12_mount_source_a /home/agentbox/data rw" >"$_task12_mount_file"
+  cfg_mounts="$_task12_mount_file"
+  mounts=(-v /sentinel:/workspace)
+  custom_mounts_snapshot_take
+  printf '%s\n' "$_task12_mount_source_b /home/agentbox/data rw" >"$_task12_mount_file"
+  _task12_mounts_before="${mounts[*]}"
+  build_user_mounts >/dev/null 2>&1; _task12_mount_rc=$?
+  assert_eq "mount race policy $_task12_mount_git_enabled refuses" 1 "$_task12_mount_rc"
+  assert_eq "mount race policy $_task12_mount_git_enabled preserves mounts" \
+    "$_task12_mounts_before" "${mounts[*]}"
+done
+printf '%s\n' "$_task12_mount_source_a /workspace rw" >"$_task12_mount_file"
+cfg_mounts="$_task12_mount_file"; mounts=(-v /sentinel:/workspace)
+custom_mounts_snapshot_take
+_task12_mounts_before="${mounts[*]}"
+build_user_mounts >/dev/null 2>&1; _task12_mount_rc=$?
+assert_eq "protected mount race refuses" 1 "$_task12_mount_rc"
+assert_eq "protected mount race preserves mounts" "$_task12_mounts_before" "${mounts[*]}"
+mkdir -p "$HOME/.ssh"; printf 'host key\n' >"$HOME/.ssh/known_hosts"; chmod 600 "$HOME/.ssh/known_hosts"
+policy_grant_all_of_dot_ssh=1
+grant_sources_snapshot
+printf 'changed host key\n' >"$HOME/.ssh/known_hosts"
+assert_eq "credential source race refuses" 1 "$(grant_sources_recheck >/dev/null 2>&1; echo $?)"
+eval "$_saved_t12_mounts_decl"
+HOME="$_saved_t12_mount_home"; cfg_mounts="$_saved_t12_mount_cfg"
+policy_git_enabled="$_saved_t12_mount_git"; policy_grant_gh="$_saved_t12_mount_gh"
+policy_grant_all_of_dot_ssh="$_saved_t12_mount_ssh"; GIT_BLOCKER="$_saved_t12_mount_blocker"
+rm -rf "$_task12_mount_root"
+
+echo "T12-03 command-state matrix"
+# Keep the public command families explicit while using the shared pure decision function. The
+# expected permissions include the retry/apply direction and update eligibility, not just kind.
+task12_decision_case() {
+  local name="$1" classification="$2" lifecycle="$3" mode="$4" source="${5:-default}"
+  local expected_kind="$6" expected_mutation="$7" expected_execution="$8"
+  local expected_update="$9" expected_apply="${10}" expected_reason="${11}"
+  decision_fixture
+  operation_record_active=0; operation_status=""; operation_explicit_exec=allowed
+  operation_state_reset
+  policy_recorded_classification="$classification"; policy_recorded_status="$classification"
+  policy_recorded_lifecycle_state="$lifecycle"; policy_git_source="$source"
+  assert_eq "$name source" "$source" "$policy_git_source"
+  if [ "$classification" = valid ] || [ "$classification" = legacy ]; then
+    policy_recorded_git_enabled=1; policy_recorded_grant_gh=0
+    policy_recorded_grant_all_of_dot_ssh=0
+    policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+  fi
+  policy_decide "$mode"
+  assert_eq "$name kind" "$expected_kind" "$policy_decision_kind"
+  assert_eq "$name mutation" "$expected_mutation" "$policy_decision_mutation_allowed"
+  assert_eq "$name execution" "$expected_execution" "$policy_decision_execution_allowed"
+  assert_eq "$name update" "$expected_update" "$policy_decision_update_allowed"
+  assert_eq "$name apply" "$expected_apply" "$policy_decision_explicit_apply_required"
+  assert_eq "$name reason" "$expected_reason" "$policy_decision_reason_code"
+}
+task12_decision_case "absent start" absent absent start default create 1 1 1 0 container-absent
+task12_decision_case "absent convenience" absent absent exec default create 1 1 1 0 container-absent
+task12_decision_case "absent build" absent absent build default build-recreate 1 0 1 0 explicit-rebuild
+task12_decision_case "matching stopped start" valid stopped start default start-in-place 1 1 1 0 policy-matches-recorded
+task12_decision_case "matching running exec" valid running exec default start-in-place 0 1 1 0 policy-matches-recorded
+task12_decision_case "stale start" stale stopped start default refuse 0 0 0 1 stale-recorded-state
+task12_decision_case "stale exec" stale stopped exec default refuse 0 0 0 1 stale-recorded-state
+task12_decision_case "stale rebuild" stale stopped rebuild default refuse 0 0 0 1 ambiguous-git-state
+task12_decision_case "stale rebuild explicit Git" stale stopped rebuild cli build-recreate 1 0 1 0 explicit-git-reconciliation
+task12_decision_case "invalid start" invalid stopped start default refuse 0 0 0 1 invalid-recorded-state
+task12_decision_case "legacy stopped start" legacy stopped start default reconcile-stopped 1 1 1 0 legacy-state
+task12_decision_case "legacy running convenience" legacy running exec default start-in-place 0 1 1 0 legacy-mounts-match
+task12_decision_case "contradictory exec" invalid running exec default refuse 0 0 0 1 invalid-recorded-state
+
+echo "T12-04 recovery permission matrix"
+# Project the complete status vocabulary without a live daemon. These rows pin permissions,
+# diagnostic identity, retry direction, cleanup, and named-volume retention together.
+_saved_t12_operation_status="$policy_operation_status"
+_saved_t12_readiness="$policy_readiness_result"
+_saved_t12_record_active="$operation_record_active"
+_saved_t12_old_id="$operation_old_container_id"
+_saved_t12_operation_path="$operation_record_path"
+_task12_operation_path="$(mktemp)"; rm -f "$_task12_operation_path"
+task12_operation_case() {
+  local status="$1" readiness="$2" explicit="$3" expected_exec="$4" expected_mutation="$5"
+  local expected_update="$6" expected_diag="$7" expected_cleanup="$8" expected_mode="$9"
+  operation_state_reset
+  policy_operation_status="$status"; policy_readiness_result="$readiness"
+  operation_explicit_exec="$explicit"; operation_record_active=0
+  assert_eq "$status explicit mode input" "$explicit" "$operation_explicit_exec"
+  operation_record_path="$_task12_operation_path"; operation_old_container_id=t12-old
+  operation_record_inner_docker_volume=t12-docker; operation_record_jj_volume=t12-jj
+  operation_state_publish
+  assert_eq "$status execution" "$expected_exec" "$operation_state_execution_allowed"
+  assert_eq "$status mutation" "$expected_mutation" "$operation_state_mutation_allowed"
+  assert_eq "$status update" "$expected_update" "$operation_state_update_allowed"
+  assert_eq "$status diagnostic" "$expected_diag" "$operation_state_diagnostic_allowed"
+  assert_eq "$status cleanup" "$expected_cleanup" "$operation_state_cleanup_allowed"
+  assert_eq "$status exec mode" "$expected_mode" "$operation_state_explicit_exec_mode"
+  assert_eq "$status retry" "ab start --apply" "$operation_state_retry_command"
+  assert_eq "$status volumes" "inner_docker=t12-docker;jj=t12-jj" "$operation_state_named_volumes"
+}
+task12_operation_case none not-applicable allowed 1 1 1 0 0 allowed
+task12_operation_case in-progress starting blocked 0 0 0 0 0 blocked
+task12_operation_case removal-failed not-applicable blocked 0 0 0 0 0 blocked
+task12_operation_case absent-after-failure not-applicable blocked 0 0 0 0 0 blocked
+task12_operation_case network-degraded not-applicable diagnostic-only 0 0 0 1 0 diagnostic-only
+task12_operation_case readiness-failed failed-and-exited diagnostic-only 0 0 0 1 0 diagnostic-only
+task12_operation_case complete ready allowed 1 1 1 0 1 allowed
+task12_operation_case invalid-record not-applicable blocked 0 0 0 0 0 blocked
+policy_operation_status="$_saved_t12_operation_status"; policy_readiness_result="$_saved_t12_readiness"
+operation_record_active="$_saved_t12_record_active"; operation_old_container_id="$_saved_t12_old_id"
+operation_record_path="$_saved_t12_operation_path"; rm -f "$_task12_operation_path"
+
+echo "T12-05 read-only report matrix"
+# Report derivation is checked for every public state while Docker/network/update boundaries are
+# absent. The existing Task 8 dispatch loop covers command invocation; these rows pin the result
+# categories that config/status/logs/stop must expose consistently.
+for _task12_report_state in none complete in-progress network-degraded readiness-failed invalid-record; do
+  operation_state_reset
+  operation_record_active=0; operation_status=""
+  policy_operation_status="$_task12_report_state"
+  policy_readiness_result=not-applicable
+  operation_state_publish
+  for _task12_report_command in config status logs stop; do
+    policy_operation_mode="$_task12_report_command"
+    command_report_derive
+    if [ "$_task12_report_state" = invalid-record ]; then
+      _task12_expected_result=invalid-state; _task12_expected_rc=2
+    elif [ "$_task12_report_command" = stop ]; then
+      _task12_expected_result=success; _task12_expected_rc=0
+    else
+      _task12_expected_result=report-only; _task12_expected_rc=0
+    fi
+    assert_eq "report $_task12_report_state/$_task12_report_command result" \
+      "$_task12_expected_result" "$command_report_result"
+    assert_eq "report $_task12_report_state/$_task12_report_command exit" \
+      "$_task12_expected_rc" "$command_report_exit_status"
+  done
+done
+
+echo "T12-07 readiness permission matrix"
+# Readiness transitions are consumed by generic exec and by the convenience launchers through the
+# same decision layer. Running failures permit diagnostics only; stopped failures remain blocked.
+for _task12_readiness in starting replacement-attempted ready failed-but-running failed-and-exited; do
+  decision_fixture
+  operation_record_active=0; operation_status=""
+  operation_state_reset
+  policy_recorded_status=valid; policy_recorded_classification=valid
+  policy_recorded_lifecycle_state=running; policy_recorded_git_enabled=1
+  policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+  policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+  assert_eq "readiness $_task12_readiness GitHub grant" 0 "$policy_recorded_grant_gh"
+  assert_eq "readiness $_task12_readiness SSH grant" 0 "$policy_recorded_grant_all_of_dot_ssh"
+  assert_eq "readiness $_task12_readiness digest" \
+    "sha256:$(policy_digest_for 1 0 0)" "$policy_recorded_digest"
+  policy_readiness_result="$_task12_readiness"
+  policy_operation_status=none
+  policy_decide exec
+  case "$_task12_readiness" in
+    starting|replacement-attempted)
+      _task12_expected_mode=blocked; _task12_expected_update=0 ;;
+    ready)
+      _task12_expected_mode=allowed; _task12_expected_update=1 ;;
+    *)
+      _task12_expected_mode=diagnostic-only; _task12_expected_update=0 ;;
+  esac
+  assert_eq "readiness $_task12_readiness running mode" "$_task12_expected_mode" \
+    "$policy_decision_explicit_exec_mode"
+  assert_eq "readiness $_task12_readiness running update" "$_task12_expected_update" \
+    "$policy_decision_update_allowed"
+  policy_recorded_lifecycle_state=stopped
+  policy_decide exec
+  case "$_task12_readiness" in
+    ready) _task12_expected_mode=allowed ;; *) _task12_expected_mode=blocked ;;
+  esac
+  assert_eq "readiness $_task12_readiness stopped mode" "$_task12_expected_mode" \
+    "$policy_decision_explicit_exec_mode"
+done
 
 echo
 if [ "$FAIL" -eq 0 ]; then
