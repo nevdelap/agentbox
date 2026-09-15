@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Task 15 lifecycle ownership</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; line-height: 1.4; margin: 2rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #bbb; padding: .35rem .5rem; text-align: left; vertical-align: top; }
+    th { background: #eee; }
+    code { white-space: nowrap; }
+    .note { background: #f5f5f5; padding: .7rem; }
+  </style>
+</head>
+<body>
+  <h1>Task 15 — lifecycle ownership and projection</h1>
+  <p class="note">This is the authoritative Task 15 inventory for <code>bin/ab</code>. Durable
+  durable operation fields are written by the record lifecycle, command-local lifecycle fields
+  remain process-only, projection fields are written only by <code>operation_state_reset</code>/
+  <code>operation_state_publish</code>, policy decision fields are produced by the decision layer,
+  and report fields are command-local outputs. The projection is the only handoff consumed by
+  operation-state output and command reports.</p>
+  <p class="note"><code>tests/contracts/lifecycle_ownership.contract</code> is the permanent
+  machine-readable
+  source for this table. The Task 15 regression requires every HTML row to match that contract
+  exactly and requires both inventories to match the lifecycle fields declared in
+  <code>bin/ab</code>.</p>
+
+  <table>
+    <thead><tr><th>field</th><th>owner</th><th>writers</th><th>readers</th><th>persistence</th><th>projection_path</th><th>approved_exception</th></tr></thead>
+    <tbody>
+      <tr><td><code>operation_record_path</code></td><td>durable operation record</td><td>prepare/begin/load</td><td>codec, projection</td><td>host path, transient</td><td>operation_state_record_path</td><td>none</td></tr>
+      <tr><td><code>operation_record_dir</code></td><td>durable operation record</td><td>prepare</td><td>codec</td><td>host path, transient</td><td>none; codec-only metadata</td><td>none</td></tr>
+      <tr><td><code>operation_id</code></td><td>durable operation record</td><td>begin/load</td><td>codec, projection</td><td>record</td><td>operation_state_operation_id</td><td>none</td></tr>
+      <tr><td><code>operation_phase</code></td><td>durable operation record</td><td>begin/update/terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_phase</td><td>none</td></tr>
+      <tr><td><code>operation_status</code></td><td>durable operation record</td><td>begin/update/terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_terminal_status</td><td>none</td></tr>
+      <tr><td><code>operation_started_at</code></td><td>durable operation record</td><td>begin/load</td><td>codec</td><td>record</td><td>none; durable metadata only</td><td>none</td></tr>
+      <tr><td><code>operation_completed_at</code></td><td>durable operation record</td><td>terminal/load</td><td>codec</td><td>record</td><td>none; durable metadata only</td><td>none</td></tr>
+      <tr><td><code>operation_old_container_id</code></td><td>durable operation record</td><td>lifecycle/load</td><td>codec, projection</td><td>record</td><td>operation_state_old_container_id</td><td>none</td></tr>
+      <tr><td><code>operation_new_container_id</code></td><td>durable operation record</td><td>lifecycle/load</td><td>codec, projection</td><td>record</td><td>operation_state_new_container_id</td><td>none</td></tr>
+      <tr><td><code>operation_record_container_name</code></td><td>durable operation record</td><td>begin/load</td><td>codec, projection</td><td>record</td><td>operation_state_container_name</td><td>none</td></tr>
+      <tr><td><code>operation_record_policy_digest</code></td><td>durable operation record</td><td>begin/load</td><td>codec, projection</td><td>record</td><td>operation_state_policy_digest</td><td>none</td></tr>
+      <tr><td><code>operation_record_inner_docker_volume</code></td><td>durable operation record</td><td>begin/load</td><td>codec, projection</td><td>record</td><td>operation_state_named_volumes</td><td>none</td></tr>
+      <tr><td><code>operation_record_jj_volume</code></td><td>durable operation record</td><td>begin/load</td><td>codec, projection</td><td>record</td><td>operation_state_named_volumes</td><td>none</td></tr>
+      <tr><td><code>operation_image_reference</code></td><td>durable operation record</td><td>lifecycle/load</td><td>codec, projection</td><td>record</td><td>operation_state_image_reference</td><td>none</td></tr>
+      <tr><td><code>operation_network_outcomes</code></td><td>durable operation record</td><td>network lifecycle/load</td><td>codec, projection</td><td>record</td><td>operation_state_network_state</td><td>none</td></tr>
+      <tr><td><code>operation_diagnostic</code></td><td>durable operation record</td><td>update/terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_diagnostic</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_result</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_state</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_operation_id</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_operation_id</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_retryable</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_retryable</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_replacement_attempted</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_replacement_attempted</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_daemon_evidence</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_daemon_evidence</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_wait_attempts</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_wait_attempts</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_wait_bound_seconds</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_wait_bound_seconds</td><td>none</td></tr>
+      <tr><td><code>operation_readiness_diagnostic</code></td><td>durable operation record</td><td>readiness/load</td><td>codec, projection</td><td>record</td><td>operation_state_readiness_diagnostic</td><td>none</td></tr>
+      <tr><td><code>operation_task_status</code></td><td>durable operation record</td><td>terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_task_status</td><td>none</td></tr>
+      <tr><td><code>operation_agent_execution</code></td><td>durable operation record</td><td>terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_agent_execution</td><td>none</td></tr>
+      <tr><td><code>operation_explicit_exec</code></td><td>durable operation record</td><td>terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_explicit_exec</td><td>none</td></tr>
+      <tr><td><code>operation_retry_command</code></td><td>durable operation record</td><td>begin/terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_retry_command</td><td>none</td></tr>
+      <tr><td><code>operation_record_cleanup</code></td><td>durable operation record</td><td>terminal/load</td><td>codec, projection</td><td>record</td><td>operation_state_record_cleanup</td><td>none</td></tr>
+      <tr><td><code>operation_failed_phase</code></td><td>durable operation record</td><td>failure/load</td><td>codec, projection</td><td>record</td><td>operation_state_failed_phase</td><td>none</td></tr>
+      <tr><td><code>operation_connect_network_status</code></td><td>command-local operation lifecycle</td><td>network lifecycle</td><td>lifecycle diagnostics</td><td>process only</td><td>none; not part of the report handoff</td><td>none</td></tr>
+      <tr><td><code>operation_record_active</code></td><td>command-local operation lifecycle</td><td>begin/reset</td><td>projection</td><td>process only</td><td>operation_state_record_active; distinguishes current begin from loaded record</td><td>none</td></tr>
+
+      <tr><td><code>operation_state_record_path</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_operation_id</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_phase</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_terminal_status</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_container_name</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_outer_lifecycle</code></td><td>operation-state projection</td><td>reset/command inspection</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_container_id</code></td><td>operation-state projection</td><td>publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_old_container_id</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_new_container_id</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_policy_digest</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_image_reference</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_named_volumes</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_network_state</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_state</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_operation_id</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_retryable</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_replacement_attempted</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_daemon_evidence</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_wait_attempts</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_wait_bound_seconds</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_readiness_diagnostic</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_diagnostic</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_retry_command</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_cleanup_allowed</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_execution_allowed</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_mutation_allowed</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_update_allowed</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_diagnostic_allowed</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_explicit_exec_mode</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_valid</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection source</td><td>none</td></tr>
+      <tr><td><code>operation_state_task_status</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection of operation_task_status</td><td>none</td></tr>
+      <tr><td><code>operation_state_agent_execution</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection of operation_agent_execution</td><td>none</td></tr>
+      <tr><td><code>operation_state_explicit_exec</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection of operation_explicit_exec</td><td>none</td></tr>
+      <tr><td><code>operation_state_record_cleanup</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection of operation_record_cleanup</td><td>none</td></tr>
+      <tr><td><code>operation_state_failed_phase</code></td><td>operation-state projection</td><td>reset/publish</td><td>state/report consumers</td><td>process only</td><td>projection of operation_failed_phase</td><td>none</td></tr>
+      <tr><td><code>operation_state_record_active</code></td><td>operation-state projection</td><td>reset/publish</td><td>report derivation</td><td>process only</td><td>projection of operation_record_active</td><td>none</td></tr>
+      <tr><td><code>operation_state_command_mode</code></td><td>operation-state projection</td><td>reset/publish</td><td>report derivation</td><td>process only</td><td>current command input</td><td>none</td></tr>
+      <tr><td><code>operation_state_policy_decision_kind</code></td><td>operation-state projection</td><td>reset/publish</td><td>report derivation</td><td>process only</td><td>projection of policy_decision_kind</td><td>none</td></tr>
+      <tr><td><code>operation_state_policy_decision_reason_code</code></td><td>operation-state projection</td><td>reset/publish</td><td>report derivation</td><td>process only</td><td>projection of policy_decision_reason_code</td><td>none</td></tr>
+      <tr><td><code>operation_state_policy_decision_explicit_exec_mode</code></td><td>operation-state projection</td><td>reset/publish</td><td>report derivation</td><td>process only</td><td>projection of policy_decision_explicit_exec_mode</td><td>none</td></tr>
+      <tr><td><code>operation_state_policy_explicit_exec_command</code></td><td>operation-state projection</td><td>reset/publish</td><td>report derivation</td><td>process only</td><td>projection of policy_explicit_exec_command</td><td>none</td></tr>
+
+      <tr><td><code>policy_operation_status</code></td><td>policy decision</td><td>policy preflight/decision</td><td>projection input</td><td>process only</td><td>operation_state_terminal_status</td><td>none</td></tr>
+      <tr><td><code>policy_readiness_result</code></td><td>policy decision</td><td>policy preflight/decision</td><td>projection input</td><td>process only</td><td>operation_state_readiness_state</td><td>none</td></tr>
+      <tr><td><code>policy_decision_kind</code></td><td>policy decision</td><td>policy_decide</td><td>projection input</td><td>process only</td><td>operation_state_policy_decision_kind</td><td>none</td></tr>
+      <tr><td><code>policy_decision_reason_code</code></td><td>policy decision</td><td>policy_decide</td><td>projection input</td><td>process only</td><td>operation_state_policy_decision_reason_code</td><td>none</td></tr>
+      <tr><td><code>policy_decision_mutation_allowed</code></td><td>policy decision</td><td>policy_decide</td><td>dispatch/require</td><td>process only</td><td>none; command gate, not report state</td><td>none</td></tr>
+      <tr><td><code>policy_decision_execution_allowed</code></td><td>policy decision</td><td>policy_decide</td><td>dispatch/require</td><td>process only</td><td>none; command gate, not report state</td><td>none</td></tr>
+      <tr><td><code>policy_decision_explicit_exec_mode</code></td><td>policy decision</td><td>policy_decide</td><td>projection input</td><td>process only</td><td>operation_state_policy_decision_explicit_exec_mode</td><td>none</td></tr>
+      <tr><td><code>policy_decision_update_allowed</code></td><td>policy decision</td><td>policy_decide</td><td>dispatch/update gate</td><td>process only</td><td>none; command gate, not report state</td><td>none</td></tr>
+      <tr><td><code>policy_decision_explicit_apply_required</code></td><td>policy decision</td><td>policy_decide</td><td>dispatch</td><td>process only</td><td>none; dispatch-only gate</td><td>none</td></tr>
+
+      <tr><td><code>command_report_result</code></td><td>command report</td><td>reset/derive/emit</td><td>stdout/lifecycle trap</td><td>none</td><td>command-local output</td><td>none</td></tr>
+      <tr><td><code>command_report_reason</code></td><td>command report</td><td>reset/derive/emit</td><td>stdout/lifecycle trap</td><td>none</td><td>command-local output</td><td>none</td></tr>
+      <tr><td><code>command_report_exit_status</code></td><td>command report</td><td>reset/derive/emit</td><td>caller/exit trap</td><td>none</td><td>command-local output</td><td>none</td></tr>
+      <tr><td><code>command_report_emitted</code></td><td>command report</td><td>emit/lifecycle guard</td><td>lifecycle trap</td><td>process only</td><td>command-local output</td><td>none</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Ownership rules</h2>
+  <ul>
+    <li><code>operation_state_publish</code> is the sole record/policy-to-projection conversion
+    path. It is called after record loads and lifecycle updates before consumers run.</li>
+    <li><code>operation_state_record</code> and <code>command_report_emit</code> consume projection
+    fields. They do not parse the record, infer permissions from a status, or rewrite durable state.</li>
+    <li><code>operation_record_active</code> is an ephemeral current-process flag: begin marks the
+    current operation active, while loading an existing record leaves it inactive. Its projection
+    copy lets report derivation preserve that distinction without treating the flag as persisted.</li>
+    <li>No approved exceptions are present. A future exception must name a written review finding
+    and explicit human authorization in the table; prose alone is not an approval.</li>
+  </ul>
+</body>
+</html>

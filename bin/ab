@@ -169,6 +169,17 @@ operation_state_readiness_wait_bound_seconds=""
 operation_state_readiness_diagnostic=""
 operation_state_diagnostic=""
 operation_state_retry_command="ab start --apply"
+operation_state_task_status="fail"
+operation_state_agent_execution="blocked"
+operation_state_explicit_exec="blocked"
+operation_state_record_cleanup="forbidden"
+operation_state_failed_phase=""
+operation_state_record_active=0
+operation_state_command_mode=""
+operation_state_policy_decision_kind=""
+operation_state_policy_decision_reason_code=""
+operation_state_policy_decision_explicit_exec_mode="blocked"
+operation_state_policy_explicit_exec_command=0
 operation_state_cleanup_allowed=0
 operation_state_execution_allowed=1
 operation_state_mutation_allowed=1
@@ -765,6 +776,17 @@ operation_state_reset() {
   operation_state_readiness_diagnostic=""
   operation_state_diagnostic=""
   operation_state_retry_command="ab start --apply"
+  operation_state_task_status=fail
+  operation_state_agent_execution=blocked
+  operation_state_explicit_exec=blocked
+  operation_state_record_cleanup=forbidden
+  operation_state_failed_phase=""
+  operation_state_record_active=0
+  operation_state_command_mode=""
+  operation_state_policy_decision_kind=""
+  operation_state_policy_decision_reason_code=""
+  operation_state_policy_decision_explicit_exec_mode=blocked
+  operation_state_policy_explicit_exec_command=0
   operation_state_cleanup_allowed=0
   operation_state_execution_allowed=1
   operation_state_mutation_allowed=1
@@ -784,7 +806,9 @@ operation_state_publish() {
   else
     readiness="${policy_readiness_result:-${operation_readiness_result:-not-applicable}}"
   fi
-  if [ "${operation_record_active:-0}" = 1 ] && [ "$status" = none ] && [ -n "$operation_status" ]; then
+  if [ "$status" = invalid-record ]; then
+    status="invalid-record"
+  elif [ "${operation_record_active:-0}" = 1 ] && [ -n "$operation_status" ]; then
     status="$operation_status"
   fi
   operation_state_record_path="$operation_record_path"
@@ -811,6 +835,17 @@ operation_state_publish() {
   operation_state_readiness_diagnostic="$operation_readiness_diagnostic"
   operation_state_diagnostic="${operation_diagnostic:-$operation_readiness_diagnostic}"
   operation_state_retry_command="${operation_retry_command:-ab start --apply}"
+  operation_state_task_status="${operation_task_status:-fail}"
+  operation_state_agent_execution="${operation_agent_execution:-blocked}"
+  operation_state_explicit_exec="${operation_explicit_exec:-blocked}"
+  operation_state_record_cleanup="${operation_record_cleanup:-forbidden}"
+  operation_state_failed_phase="${operation_failed_phase:-}"
+  operation_state_record_active="${operation_record_active:-0}"
+  operation_state_command_mode="${policy_operation_mode:-}"
+  operation_state_policy_decision_kind="${policy_decision_kind:-}"
+  operation_state_policy_decision_reason_code="${policy_decision_reason_code:-}"
+  operation_state_policy_decision_explicit_exec_mode="${policy_decision_explicit_exec_mode:-blocked}"
+  operation_state_policy_explicit_exec_command="${policy_explicit_exec_command:-0}"
   operation_state_cleanup_allowed=0
   operation_state_execution_allowed=0
   operation_state_mutation_allowed=0
@@ -881,6 +916,11 @@ operation_state_record() {
   printf 'readiness_wait_bound_seconds=%s\n' "$operation_state_readiness_wait_bound_seconds"
   printf 'readiness_diagnostic=%s\n' "$operation_state_readiness_diagnostic"
   printf 'diagnostic=%s\n' "$operation_state_diagnostic"
+  printf 'task_status=%s\n' "$operation_state_task_status"
+  printf 'agent_execution=%s\n' "$operation_state_agent_execution"
+  printf 'explicit_exec=%s\n' "$operation_state_explicit_exec"
+  printf 'record_cleanup=%s\n' "$operation_state_record_cleanup"
+  printf 'failed_phase=%s\n' "$operation_state_failed_phase"
   printf 'retry_command=%s\n' "$operation_state_retry_command"
   printf 'cleanup_allowed=%s\n' "$operation_state_cleanup_allowed"
   printf 'execution_allowed=%s\n' "$operation_state_execution_allowed"
@@ -900,33 +940,33 @@ command_report_reset() {
 }
 
 command_report_derive() {
-  local status="${operation_state_terminal_status:-none}" mode="${policy_operation_mode:-unknown}"
+  local status="${operation_state_terminal_status:-none}" mode="${operation_state_command_mode:-unknown}"
   command_report_reset
   if [ "${operation_state_valid:-0}" != 1 ] || [ "$status" = invalid-record ]; then
     command_report_result="invalid-state"
     command_report_reason="invalid-operation-record"
     command_report_exit_status=2
-  elif [ "${operation_record_active:-0}" = 1 ] && [ "$operation_status" != complete ] &&
-       [ "$operation_status" != in-progress ] && [ -n "$operation_status" ]; then
+  elif [ "${operation_state_record_active:-0}" = 1 ] && [ "$status" != complete ] &&
+       [ "$status" != in-progress ] && [ -n "$status" ]; then
     command_report_result=failed
-    command_report_reason="operation-$operation_status"
+    command_report_reason="operation-$status"
     command_report_exit_status=1
-    [ "$operation_task_status" = degraded-fail ] && command_report_result=degraded
+    [ "$operation_state_task_status" = degraded-fail ] && command_report_result=degraded
   elif [ "$mode" = status ] || [ "$mode" = logs ] || [ "$mode" = config ]; then
     command_report_result=report-only
     command_report_reason="report-$status"
   elif [ "$mode" = stop ]; then
     command_report_result=success
     command_report_reason=stop-complete
-  elif [ "${policy_decision_kind:-}" = refuse ]; then
-    if [ "${policy_decision_explicit_exec_mode:-blocked}" = diagnostic-only ] &&
-       [ "${policy_explicit_exec_command:-0}" = 1 ] &&
+  elif [ "${operation_state_policy_decision_kind:-}" = refuse ]; then
+    if [ "${operation_state_policy_decision_explicit_exec_mode:-blocked}" = diagnostic-only ] &&
+       [ "${operation_state_policy_explicit_exec_command:-0}" = 1 ] &&
        { [ "$status" = network-degraded ] || [ "$status" = readiness-failed ]; }; then
       command_report_result=success
       command_report_reason="diagnostic-only"
     else
       command_report_result=refused
-      command_report_reason="${policy_decision_reason_code:-policy-refused}"
+      command_report_reason="${operation_state_policy_decision_reason_code:-policy-refused}"
       command_report_exit_status=2
     fi
   elif [ "$status" = in-progress ] || [ "$status" = removal-failed ] ||
@@ -981,13 +1021,13 @@ command_report_emit() {
   printf 'readiness_diagnostic=%s\n' "$operation_state_readiness_diagnostic"
   printf 'network=%s\n' "$operation_state_network_state"
   printf 'operation_status=%s\n' "$operation_state_terminal_status"
-  printf 'task_status=%s\n' "$operation_task_status"
-  printf 'agent_execution=%s\n' "$operation_agent_execution"
-  printf 'explicit_exec=%s\n' "$operation_explicit_exec"
-  printf 'record_cleanup=%s\n' "$operation_record_cleanup"
+  printf 'task_status=%s\n' "$operation_state_task_status"
+  printf 'agent_execution=%s\n' "$operation_state_agent_execution"
+  printf 'explicit_exec=%s\n' "$operation_state_explicit_exec"
+  printf 'record_cleanup=%s\n' "$operation_state_record_cleanup"
   printf 'image_reference=%s\n' "$operation_state_image_reference"
   printf 'named_volumes=%s\n' "$operation_state_named_volumes"
-  printf 'failed_phase=%s\n' "$operation_failed_phase"
+  printf 'failed_phase=%s\n' "$operation_state_failed_phase"
   printf 'retry_command=%s\n' "$operation_state_retry_command"
   printf 'cleanup_allowed=%s\n' "$operation_state_cleanup_allowed"
   printf 'execution_allowed=%s\n' "$operation_state_execution_allowed"
@@ -1009,7 +1049,7 @@ command_report_preflight_failure() {
   command_report_derive
   if [ "$command_report_exit_status" = 0 ]; then
     command_report_result=refused
-    command_report_reason="${policy_decision_reason_code:-policy-preflight-failed}"
+    command_report_reason="${operation_state_policy_decision_reason_code:-policy-preflight-failed}"
     command_report_exit_status=2
   fi
   command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
@@ -4471,6 +4511,7 @@ main() {
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
+    operation_state_publish
     command_report_derive
     if [ "$command_report_exit_status" != 0 ]; then
       command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
@@ -4602,6 +4643,7 @@ main() {
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
+    operation_state_publish
     command_report_derive
     if [ "$command_report_exit_status" != 0 ]; then
       command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"

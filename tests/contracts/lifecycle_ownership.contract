@@ -1,0 +1,89 @@
+field|owner|writers|readers|persistence|projection_path|approved_exception
+operation_record_path|durable operation record|prepare/begin/load|codec, projection|host path, transient|operation_state_record_path|none
+operation_record_dir|durable operation record|prepare|codec|host path, transient|none; codec-only metadata|none
+operation_id|durable operation record|begin/load|codec, projection|record|operation_state_operation_id|none
+operation_phase|durable operation record|begin/update/terminal/load|codec, projection|record|operation_state_phase|none
+operation_status|durable operation record|begin/update/terminal/load|codec, projection|record|operation_state_terminal_status|none
+operation_started_at|durable operation record|begin/load|codec|record|none; durable metadata only|none
+operation_completed_at|durable operation record|terminal/load|codec|record|none; durable metadata only|none
+operation_old_container_id|durable operation record|lifecycle/load|codec, projection|record|operation_state_old_container_id|none
+operation_new_container_id|durable operation record|lifecycle/load|codec, projection|record|operation_state_new_container_id|none
+operation_record_container_name|durable operation record|begin/load|codec, projection|record|operation_state_container_name|none
+operation_record_policy_digest|durable operation record|begin/load|codec, projection|record|operation_state_policy_digest|none
+operation_record_inner_docker_volume|durable operation record|begin/load|codec, projection|record|operation_state_named_volumes|none
+operation_record_jj_volume|durable operation record|begin/load|codec, projection|record|operation_state_named_volumes|none
+operation_image_reference|durable operation record|lifecycle/load|codec, projection|record|operation_state_image_reference|none
+operation_network_outcomes|durable operation record|network lifecycle/load|codec, projection|record|operation_state_network_state|none
+operation_diagnostic|durable operation record|update/terminal/load|codec, projection|record|operation_state_diagnostic|none
+operation_readiness_result|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_state|none
+operation_readiness_operation_id|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_operation_id|none
+operation_readiness_retryable|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_retryable|none
+operation_readiness_replacement_attempted|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_replacement_attempted|none
+operation_readiness_daemon_evidence|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_daemon_evidence|none
+operation_readiness_wait_attempts|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_wait_attempts|none
+operation_readiness_wait_bound_seconds|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_wait_bound_seconds|none
+operation_readiness_diagnostic|durable operation record|readiness/load|codec, projection|record|operation_state_readiness_diagnostic|none
+operation_task_status|durable operation record|terminal/load|codec, projection|record|operation_state_task_status|none
+operation_agent_execution|durable operation record|terminal/load|codec, projection|record|operation_state_agent_execution|none
+operation_explicit_exec|durable operation record|terminal/load|codec, projection|record|operation_state_explicit_exec|none
+operation_retry_command|durable operation record|begin/terminal/load|codec, projection|record|operation_state_retry_command|none
+operation_record_cleanup|durable operation record|terminal/load|codec, projection|record|operation_state_record_cleanup|none
+operation_failed_phase|durable operation record|failure/load|codec, projection|record|operation_state_failed_phase|none
+operation_connect_network_status|command-local operation lifecycle|network lifecycle|lifecycle diagnostics|process only|none; not part of the report handoff|none
+operation_record_active|command-local operation lifecycle|begin/reset|projection|process only|operation_state_record_active; distinguishes current begin from loaded record|none
+operation_state_record_path|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_operation_id|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_phase|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_terminal_status|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_container_name|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_outer_lifecycle|operation-state projection|reset/command inspection|state/report consumers|process only|projection source|none
+operation_state_container_id|operation-state projection|publish|state/report consumers|process only|projection source|none
+operation_state_old_container_id|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_new_container_id|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_policy_digest|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_image_reference|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_named_volumes|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_network_state|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_state|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_operation_id|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_retryable|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_replacement_attempted|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_daemon_evidence|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_wait_attempts|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_wait_bound_seconds|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_readiness_diagnostic|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_diagnostic|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_retry_command|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_cleanup_allowed|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_execution_allowed|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_mutation_allowed|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_update_allowed|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_diagnostic_allowed|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_explicit_exec_mode|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_valid|operation-state projection|reset/publish|state/report consumers|process only|projection source|none
+operation_state_task_status|operation-state projection|reset/publish|state/report consumers|process only|projection of operation_task_status|none
+operation_state_agent_execution|operation-state projection|reset/publish|state/report consumers|process only|projection of operation_agent_execution|none
+operation_state_explicit_exec|operation-state projection|reset/publish|state/report consumers|process only|projection of operation_explicit_exec|none
+operation_state_record_cleanup|operation-state projection|reset/publish|state/report consumers|process only|projection of operation_record_cleanup|none
+operation_state_failed_phase|operation-state projection|reset/publish|state/report consumers|process only|projection of operation_failed_phase|none
+operation_state_record_active|operation-state projection|reset/publish|report derivation|process only|projection of operation_record_active|none
+operation_state_command_mode|operation-state projection|reset/publish|report derivation|process only|current command input|none
+operation_state_policy_decision_kind|operation-state projection|reset/publish|report derivation|process only|projection of policy_decision_kind|none
+operation_state_policy_decision_reason_code|operation-state projection|reset/publish|report derivation|process only|projection of policy_decision_reason_code|none
+operation_state_policy_decision_explicit_exec_mode|operation-state projection|reset/publish|report derivation|process only|projection of policy_decision_explicit_exec_mode|none
+operation_state_policy_explicit_exec_command|operation-state projection|reset/publish|report derivation|process only|projection of policy_explicit_exec_command|none
+policy_operation_status|policy decision|policy preflight/decision|projection input|process only|operation_state_terminal_status|none
+policy_readiness_result|policy decision|policy preflight/decision|projection input|process only|operation_state_readiness_state|none
+policy_decision_kind|policy decision|policy_decide|projection input|process only|operation_state_policy_decision_kind|none
+policy_decision_reason_code|policy decision|policy_decide|projection input|process only|operation_state_policy_decision_reason_code|none
+policy_decision_mutation_allowed|policy decision|policy_decide|dispatch/require|process only|none; command gate, not report state|none
+policy_decision_execution_allowed|policy decision|policy_decide|dispatch/require|process only|none; command gate, not report state|none
+policy_decision_explicit_exec_mode|policy decision|policy_decide|projection input|process only|operation_state_policy_decision_explicit_exec_mode|none
+policy_decision_update_allowed|policy decision|policy_decide|dispatch/update gate|process only|none; command gate, not report state|none
+policy_decision_explicit_apply_required|policy decision|policy_decide|dispatch|process only|none; dispatch-only gate|none
+command_report_result|command report|reset/derive/emit|stdout/lifecycle trap|none|command-local output|none
+command_report_reason|command report|reset/derive/emit|stdout/lifecycle trap|none|command-local output|none
+command_report_exit_status|command report|reset/derive/emit|caller/exit trap|none|command-local output|none
+command_report_emitted|command report|emit/lifecycle guard|lifecycle trap|process only|command-local output|none
+
+
