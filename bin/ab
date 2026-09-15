@@ -31,7 +31,7 @@
 #   ab --version             print the agentbox version
 #
 # Structured command reports are disabled by default. Set AGENTBOX_REPORT=1 to append the
-# stable key/value report to stdout (AGENTBOX_REPORT=0 disables it explicitly); accepted true
+# diagnostic key/value report to stdout (AGENTBOX_REPORT=0 disables it explicitly); accepted true
 # values are 1, true, yes, and on, and all other values disable reporting.
 # Reports begin with a blank line and use result/reason/exit_status plus lifecycle, operation,
 # readiness, retry, cleanup, and permission fields. Exit status 0 means success or report-only,
@@ -142,7 +142,6 @@ operation_record_cleanup="forbidden"
 operation_failed_phase=""
 operation_connect_network_status=ok
 operation_record_active=0
-operation_record_sequence=0
 
 # Task 8's single read-only projection.  Keep the Task 7 producer fields above for lifecycle
 # writes, but make consumers use this stable vocabulary instead of inferring permissions from a
@@ -436,7 +435,7 @@ policy_file_safe() {
 
 # Immutable policy-source snapshot. Absent paths are recorded as well, so a file created during
 # resolution is detected before Docker mutation.
-declare -A policy_snapshot_state=() policy_snapshot_size=() policy_snapshot_identity=()
+declare -A policy_snapshot_state=() policy_snapshot_identity=()
 declare -A policy_snapshot_hash=() policy_snapshot_content=()
 policy_snapshot_paths=()
 policy_snapshot_ready=0
@@ -448,7 +447,8 @@ policy_root_snapshot_target=""
 policy_root_snapshot_ready=0
 
 policy_source_identity() {
-  stat -c '%F|%d|%i|%a|%s|%Y' -- "$1" 2>/dev/null
+  # Content hashes already encode file size; keep only filesystem identity and metadata here.
+  stat -c '%F|%d|%i|%a|%Y' -- "$1" 2>/dev/null
 }
 
 policy_root_snapshot_reset() {
@@ -521,7 +521,6 @@ policy_root_snapshot_recheck() {
 
 policy_snapshot_reset() {
   policy_snapshot_state=()
-  policy_snapshot_size=()
   policy_snapshot_identity=()
   policy_snapshot_hash=()
   policy_snapshot_content=()
@@ -532,7 +531,7 @@ policy_snapshot_reset() {
 }
 
 policy_snapshot_take() {
-  local file content size identity hash
+  local file content identity hash
   policy_snapshot_reset
   policy_root_snapshot_take || return 1
   while IFS= read -r file; do
@@ -550,11 +549,9 @@ policy_snapshot_take() {
         return 1
       }
       content="$(<"$file")"
-      size="$(wc -c <"$file")"; size="${size//[[:space:]]/}"
       identity="$(policy_source_identity "$file")" || return 1
       hash="$(sha256sum -- "$file" | cut -d' ' -f1)"
       policy_snapshot_state["$file"]=regular
-      policy_snapshot_size["$file"]="$size"
       policy_snapshot_identity["$file"]="$identity"
       policy_snapshot_hash["$file"]="$hash"
       policy_snapshot_content["$file"]="$content"
@@ -564,7 +561,7 @@ policy_snapshot_take() {
 }
 
 policy_snapshot_recheck() {
-  local file state content size identity hash
+  local file state content identity hash
   [ "$policy_snapshot_ready" = 1 ] || return 0
   policy_snapshot_changed_path=""
   policy_root_snapshot_recheck || return 1
@@ -580,11 +577,9 @@ policy_snapshot_recheck() {
     if [ "$state" != regular ]; then policy_snapshot_changed_path="$file"; return 1; fi
     if ! policy_file_safe "$file"; then policy_snapshot_changed_path="$file"; return 1; fi
     content="$(<"$file")"
-    size="$(wc -c <"$file")"; size="${size//[[:space:]]/}"
     identity="$(policy_source_identity "$file")" || { policy_snapshot_changed_path="$file"; return 1; }
     hash="$(sha256sum -- "$file" | cut -d' ' -f1)"
-    if [ "$size" != "${policy_snapshot_size[$file]}" ] ||
-       [ "$identity" != "${policy_snapshot_identity[$file]}" ] ||
+    if [ "$identity" != "${policy_snapshot_identity[$file]}" ] ||
        [ "$hash" != "${policy_snapshot_hash[$file]}" ]; then
       policy_snapshot_changed_path="$file"; return 1
     fi
@@ -895,9 +890,9 @@ operation_state_record() {
   printf 'explicit_exec_mode=%s\n' "$operation_state_explicit_exec_mode"
 }
 
-# Task 9's command-facing result contract.  Every command report carries the same Task 8
-# projection, so human-readable output and the stable key/value form cannot disagree about the
-# operation, retry, readiness, or cleanup state.
+# Task 9's internal command-facing result contract. Every command report carries the same Task 8
+# projection, so human-readable output and the diagnostic key/value form cannot disagree about the
+# operation, retry, readiness, or cleanup state. This is not a versioned external API.
 command_report_reset() {
   command_report_result="success"
   command_report_reason="command-allowed"
@@ -1124,8 +1119,7 @@ operation_record_begin() {
   operation_record_inner_docker_volume="$dvol"
   operation_record_jj_volume="$jvol"
   operation_record_policy_digest="${policy_resolved_effective[digest]:-sha256:unknown}"
-  operation_record_sequence=$((operation_record_sequence + 1))
-  operation_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$operation_record_sequence"
+  operation_id="$(date -u +%Y%m%dT%H%M%S%N)-$$"
   operation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   operation_phase=preflight
   operation_status=in-progress
@@ -3455,12 +3449,6 @@ policy_decide() {
     policy_decision_explicit_exec_mode=allowed
   fi
   policy_decision_apply_overlay
-}
-
-# Keep the handoff name readable to later task owners while retaining policy_decide as the
-# implementation name used by the launcher. Both entry points produce the same one-record result.
-policy_decision() {
-  policy_decide "$@"
 }
 
 policy_decision_require() {

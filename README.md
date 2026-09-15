@@ -175,14 +175,15 @@ the report, or set it to `0`, `false`, `no`, or `off` to suppress it. Unknown
 values suppress the report. The report is written to stdout; ordinary
 diagnostics remain on stderr.
 
-The stable report starts with `result`, `reason`, and `exit_status`, followed by
-the command phase, container identity, operation record, nested-Docker
-readiness, network state, retry command, cleanup permission, and execution or
-mutation permissions. `ab config` additionally prints `effective.*`, `source.*`,
-each policy tier, `recorded_state.*`, and the exact delta between effective and
-recorded policy. Values such as `readiness=failed-and-exited`,
-`operation_status=absent-after-failure`, and `record_cleanup=forbidden` are
-diagnostics, not permission to improvise a recovery.
+The diagnostic report starts with `result`, `reason`, and `exit_status`,
+followed by the command phase, container identity, operation record,
+nested-Docker readiness, network state, retry command, cleanup permission, and
+execution or mutation permissions. `ab config` additionally prints
+`effective.*`, `source.*`, each policy tier, `recorded_state.*`, and the exact
+delta between effective and recorded policy. Values such as
+`readiness=failed-and-exited`, `operation_status=absent-after-failure`, and
+`record_cleanup=forbidden` are diagnostics, not permission to improvise a
+recovery.
 
 The exit categories are fixed: `0` is success or report-only, `1` is an
 operational/degraded failure, and `2` is refusal, invalid input, or invalid
@@ -224,11 +225,12 @@ Environment variables:
 
 Structured command reports are opt-in. Interactive commands and scripts receive
 their normal human-readable output and diagnostics by default; use
-`AGENTBOX_REPORT=1 ab status` (or another `ab` command) to append the stable
+`AGENTBOX_REPORT=1 ab status` (or another `ab` command) to append the diagnostic
 key/value report to stdout, separated by a blank line. Set `AGENTBOX_REPORT=0`
 to suppress it explicitly. Unrecognized values are treated as disabled. The
 report is never written to stderr, and disabling it does not suppress ordinary
-command errors.
+command errors. This is an internal diagnostic interface, not a versioned
+scripting API; scripts must not rely on its field set for compatibility.
 
 Migration note: `AGENTBOX_SSH=1` is no longer supported and is silently ignored.
 Use `ab start --grant-all-of-dot-ssh` (or `ab rebuild --grant-all-of-dot-ssh`)
