@@ -65,7 +65,7 @@
     </header>
 
     <section class="callout">
-      <strong>Implementation status (historical):</strong> The policy resolver, preflight plumbing, labels, blocker asset, README, and unit coverage are implemented in this change. Full Docker lifecycle coverage remains to be exercised on a Sysbox host.
+      <strong>Implementation status (updated 2026-09-15):</strong> Tasks 1–13 are merged. Tasks 1–12 have deterministic source-based coverage, and Task 13 has a passing supported-runtime matrix covering policy transitions, grants, reports, nested readiness, retries, named volumes, network accounting, and cleanup. Task 14 is the active documentation and release-cleanup task; its repository-gate and final-tree evidence are recorded in <a href="../RELEASE_CHECKLIST.md">RELEASE_CHECKLIST.md</a>. This status does not claim that a release tag or published artifact exists.
     </section>
 
     <section class="callout">
@@ -354,18 +354,18 @@ ssh_grant_all=false
     <p>The readiness state machine is: <code>starting</code> (a launch has been requested), <code>ready</code> (the Docker API answers), <code>failed-but-running</code> (a matching non-zombie <code>dockerd</code> remains but the bounded readiness wait expired), <code>failed-and-exited</code> (the attempted daemon is gone before readiness), and <code>replacement-attempted</code> (the one permitted retry has been launched and classified). The outer container remains running in every failure state so that <code>status</code>, <code>logs</code>, <code>config</code>, and <code>stop</code> remain available. <code>status</code> reports the outer state, nested readiness state, operation id, and retryability; <code>logs</code> exposes the entrypoint/nested-daemon diagnostic and failed phase; <code>config</code> reports the operation record, policy snapshot hash, and exact retry command. Generic <code>ab exec</code> is not blocked by nested readiness, but commands that require the inner Docker API return a distinct “nested Docker not ready” diagnostic.</p>
     <p>The bounded readiness wait is 30 seconds. The recovery path first handles <code>starting</code> to <code>ready</code>, or to <code>failed-but-running</code>/<code>failed-and-exited</code>. Only <code>failed-and-exited</code> permits stale-marker cleanup and one synchronous replacement attempt; a live-but-never-ready daemon never permits a duplicate. After <code>replacement-attempted</code> reaches a terminal failure, a later outer <code>ab start</code> reports the stored state rather than spawning another daemon; an explicit outer stop/start is required for a fresh recovery cycle. The focused acceptance cases are live daemon with a valid PID file, live daemon with no usable PID file, stale socket/PID markers with no daemon, daemon exit during readiness, and persistent non-ready daemon. Each case must prove at most one nested <code>dockerd</code> is started, that the API becomes usable when recovery succeeds, and that the named Docker volume and existing inner-Docker state remain intact.</p>
 
-    <h2>Resolved review questions and remaining implementation work</h2>
+    <h2>Resolved review questions and implementation status</h2>
     <ul>
       <li>Existing persisted Git state and GitHub/SSH grants are preserved when an ordinary policy-free <code>ab start</code> has no explicit value; policy-free <code>ab build</code>/<code>ab rebuild</code> preserve Git state but retain the established grant reset/revoke behavior. Explicit values override the recorded state.</li>
       <li>No positive <code>--git</code> flag will be added. More-specific configuration or <code>AGENTBOX_NO_GIT=0</code> is the documented re-enable path.</li>
       <li>A running container is never stopped silently for policy reconciliation. A normal <code>ab start</code> reports the mismatch and refuses; <code>ab start --apply</code> is the explicit, potentially disruptive stop/recreate operation.</li>
       <li>The blocker source, permissions, validation, and context-independent path are fixed by the mount contract above.</li>
       <li>Policy validation is host-side and precedes update/network/Docker work; existing-container label inspection is read-only and precedes any mutation. This shared preflight is required by <code>ab start</code>, <code>ab build</code>, <code>ab rebuild</code>, <code>ab claude</code>, <code>ab codex</code>, <code>ab bash</code>, and <code>ab exec</code>.</li>
-      <li>Host-side mocked lifecycle coverage now exercises inspect/mount classification, running-container refusal/apply, stopped-container reconciliation, legacy migration, policy-only apply image reuse, and repeated diagnostic inspection. Runtime finding <code>R1</code> has recorded evidence above, with an independent rerun still environmental. For the latest review’s <code>R2</code>, the nested-Docker recovery path now has the required process-table fallback, exact <code>dockerd</code> identity check, and one controlled replacement attempt after readiness exit; focused daemon-liveness coverage remains pending.</li>
+      <li>Host-side mocked lifecycle coverage exercises inspect/mount classification, running-container refusal/apply, stopped-container reconciliation, legacy migration, policy-only apply image reuse, and repeated diagnostic inspection. Task 13’s latest authorized run recorded all rows <code>P13-01</code> through <code>P13-08</code> as passing on Docker 29.7.2/Sysbox 0.7.0, including nested-Docker readiness/retry, reports, volume preservation, network accounting, and cleanup. The exact audit record is identified in <code>RELEASE_CHECKLIST.md</code>; it remains external runtime evidence rather than a generated repository file.</li>
     </ul>
 
     <h3>Recorded runtime validation</h3>
-    <p>An authorized validation run on 2026-09-12 recorded the following results before the later readiness-exit retry refinement:</p>
+    <p>An earlier authorized validation run on 2026-09-12 recorded the following results before the later readiness-exit retry refinement:</p>
     <pre><code>docker info                                  PASS (Docker 29.7.2; sysbox-runc 0.7.0)
 docker run --runtime=sysbox-runc hello-world  PASS
 default ab start + Git/jj                   PASS
@@ -377,9 +377,10 @@ GitHub/SSH grant mounts                     PASS
 stopped start and outer restart              PASS
 named Docker/jj volumes and state            PASS
 workspace .git visibility                    PASS</code></pre>
-    <p>This is recorded evidence, not a substitute for rerunning the matrix after the readiness-exit retry change. The current review environment cannot independently access the Docker API.</p>
+    <p>This historical record is retained for traceability. The later Task 13 matrix rerun passed after the readiness-exit retry change; its result record is intentionally kept outside the repository because it contains host-specific paths and runtime identifiers.</p>
 
-    <h3>Previous implementation-review disposition</h3>
+    <h3>Historical implementation-review disposition</h3>
+    <p>These rows preserve the review-time follow-up wording for traceability. The current implementation status and the later Task 13 evidence are recorded above.</p>
     <table>
       <thead><tr><th>Finding</th><th>Design status</th><th>Remaining implementation/evidence</th></tr></thead>
       <tbody>
@@ -392,7 +393,7 @@ workspace .git visibility                    PASS</code></pre>
       </tbody>
     </table>
 
-    <h3>Latest specification-review disposition</h3>
+    <h3>Historical specification-review disposition</h3>
     <p>The latest review’s S1–S7 findings are addressed as design requirements in the normative body above. The remaining work below is implementation/evidence follow-up; it is not an authority to weaken or reinterpret those requirements.</p>
     <table>
       <thead><tr><th>Finding</th><th>Normative resolution</th><th>Follow-up</th></tr></thead>
@@ -407,7 +408,7 @@ workspace .git visibility                    PASS</code></pre>
       </tbody>
     </table>
 
-    <h3>Follow-up implementation plan</h3>
+    <h3>Historical follow-up implementation plan</h3>
     <ol>
       <li><strong>R1 — runtime proof:</strong> rerun the recorded Sysbox matrix after the latest entrypoint change. Capture the exact Docker/Sysbox versions, container IDs, mount inspection, direct <code>git</code>/<code>gh</code>/<code>jj</code> results, policy transitions, named-volume identities/content, and cleanup result in a follow-up review.</li>
       <li><strong>R2 — nested daemon:</strong> retain the PID-file plus process-table identity check and one controlled readiness-exit replacement. Add focused host-side coverage for live-without-PID, stale markers, daemon exit during readiness, persistent non-ready daemon, and the one-daemon invariant.</li>

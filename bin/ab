@@ -21,6 +21,7 @@
 #   ab codex  [args...]      docker exec codex
 #   ab bash                  docker exec bash
 #   ab exec <cmd...>         docker exec an arbitrary command (as agentbox)
+#   ab --help                print this command summary
 #   ab build   [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]
 #   ab rebuild [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh]  (synonym for build)
 #                            build or rebuild the image and recreate the running container (--no-cache
@@ -32,6 +33,13 @@
 # Structured command reports are disabled by default. Set AGENTBOX_REPORT=1 to append the
 # stable key/value report to stdout (AGENTBOX_REPORT=0 disables it explicitly); accepted true
 # values are 1, true, yes, and on, and all other values disable reporting.
+# Reports begin with a blank line and use result/reason/exit_status plus lifecycle, operation,
+# readiness, retry, cleanup, and permission fields. Exit status 0 means success or report-only,
+# 1 means an operational/degraded failure, and 2 means refusal, invalid input, or invalid state.
+# Failed apply/rebuild state is retained for diagnostics; use the reported `ab start --apply` or
+# `ab rebuild` retry command. Only an explicit recovery path may mutate that failed state.
+# `ab config` is read-only and shows policy tiers, effective values and sources, recorded state,
+# operation records, and exact effective-versus-recorded deltas.
 #
 # Each project path gets its own container (and its own inner-docker data root), so
 # per-container state — notably CARGO_TARGET_DIR=/tmp/target — persists across ab
