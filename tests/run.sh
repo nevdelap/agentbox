@@ -46,6 +46,8 @@ declare slug nocache operation_readiness_handoff_state operation_state_readiness
 declare operation_state_readiness_retryable operation_state_readiness_diagnostic
 declare operation_state_named_volumes operation_state_old_container_id operation_state_container_id
 declare operation_state_cleanup_allowed operation_state_retry_command operation_state_diagnostic
+declare operation_state_task_status operation_state_agent_execution operation_state_explicit_exec
+declare operation_state_record_cleanup operation_state_failed_phase operation_state_record_active
 declare policy_retry_reconcile policy_git_source command_report_result command_report_exit_status
 declare -a policy_snapshot_paths protected_mount_destinations
 declare -A grant_source_snapshot policy_tier_git_enabled policy_tier_grant_all_of_dot_ssh
@@ -3020,6 +3022,8 @@ _task8_record="$operation_record_path"
 printf 'stable operation record\n' >"$_task8_record"
 _task8_dispatch_state=removal-failed
 policy_operation_begin() {
+  operation_record_active=0
+  operation_status=""
   operation_state_terminal_status=""
   case "$_task8_dispatch_state" in
     in-progress)
@@ -4012,6 +4016,7 @@ mkdir -p "$AB_CFG_ROOT" "$HOME" "$PROJECT_DIR"
 : >"$_task10_public_trace"
 policy_operation_begin() {
   policy_operation_requested=1; policy_operation_status=none
+  operation_record_active=0; operation_status=""
   policy_readiness_result=not-applicable; operation_state_reset
   operation_state_update_allowed=1; operation_state_valid=1
   return 0
@@ -4174,6 +4179,7 @@ _task10_reentrant_trace="$_task10_lock2_root/reentrant.trace"
 policy_lock_acquire() { printf 'lock\n' >>"$_task10_reentrant_trace"; return 0; }
 policy_operation_begin() {
   policy_operation_requested=1; policy_operation_status=none
+  operation_record_active=0; operation_status=""
   policy_readiness_result=not-applicable; operation_state_reset
   operation_state_update_allowed=1; policy_lock_acquire
 }
@@ -4500,6 +4506,7 @@ for _task12_report_state in none complete in-progress network-degraded readiness
   operation_state_publish
   for _task12_report_command in config status logs stop; do
     policy_operation_mode="$_task12_report_command"
+    operation_state_publish
     command_report_derive
     if [ "$_task12_report_state" = invalid-record ]; then
       _task12_expected_result=invalid-state; _task12_expected_rc=2
@@ -4703,6 +4710,186 @@ assert_eq "matching fixture ledger keeps owned ID" "$fixture_mock_id" \
   "${RESOURCE_IDS[$_fixture_resource_index]}"
 assert_eq "matching fixture removal is ledgered" removed \
   "${RESOURCE_CLEANUP[$_fixture_resource_index]}"
+
+echo "Task 15 lifecycle ownership and projection"
+_task15_ownership="$REPO/design_docs/task15_lifecycle_ownership.html"
+_task15_contract="$REPO/tests/contracts/lifecycle_ownership.contract"
+assert_eq "ownership table has required columns" 1 \
+  "$(grep -F -c '<th>field</th><th>owner</th><th>writers</th><th>readers</th><th>persistence</th><th>projection_path</th><th>approved_exception</th>' "$_task15_ownership")"
+assert_eq "ownership contract has required columns" 1 \
+  "$(grep -F -c 'field|owner|writers|readers|persistence|projection_path|approved_exception' "$_task15_contract")"
+_task15_source_fields="$({
+  sed -n "/^# Task 7 durable lifecycle handoff\./,/^# Task 8's single read-only projection\./p" "$REPO/bin/ab"
+  sed -n "/^# Task 8's single read-only projection\./,/^# Entrypoint-owned nested-Docker handoff\./p" "$REPO/bin/ab"
+  sed -n "/^# Task 6's decision record/,/^# Task 2's raw host-policy record/p" "$REPO/bin/ab"
+  sed -n '/^command_report_reset() {/,/^}/p' "$REPO/bin/ab"
+  sed -n '/^command_report_emit() {/,/^}/p' "$REPO/bin/ab"
+} | sed -n 's/^[[:space:]]*\([a-z_][a-z0-9_]*\)=.*/\1/p' | sort -u)"
+declare -A _task15_source_rows=() _task15_contract_rows=() _task15_artifact_rows=()
+_task15_source_count=0
+while IFS= read -r _task15_field; do
+  [ -n "$_task15_field" ] || continue
+  _task15_source_rows["${_task15_field}"]=1
+  _task15_source_count=$((_task15_source_count + 1))
+done <<<"$_task15_source_fields"
+
+_task15_contract_count=0
+while IFS='|' read -r _task15_field _task15_owner _task15_writers _task15_readers \
+  _task15_persistence _task15_projection _task15_exception; do
+  [ "$_task15_field" != field ] || continue
+  [ -n "$_task15_field" ] || continue
+  _task15_contract_row="$_task15_field|$_task15_owner|$_task15_writers|$_task15_readers|$_task15_persistence|$_task15_projection|$_task15_exception"
+  _task15_previous="${_task15_contract_rows[$_task15_field]:-}"
+  assert_eq "ownership contract row $_task15_field is unique" "" "$_task15_previous"
+  _task15_contract_rows["${_task15_field}"]="$_task15_contract_row"
+  _task15_contract_count=$((_task15_contract_count + 1))
+  assert_eq "ownership contract row $_task15_field has no exception" none "$_task15_exception"
+  _task15_metadata_valid=1
+  [ -n "$_task15_owner" ] || _task15_metadata_valid=0
+  [ -n "$_task15_writers" ] || _task15_metadata_valid=0
+  [ -n "$_task15_readers" ] || _task15_metadata_valid=0
+  [ -n "$_task15_persistence" ] || _task15_metadata_valid=0
+  [ -n "$_task15_projection" ] || _task15_metadata_valid=0
+  assert_eq "ownership contract row $_task15_field has metadata" 1 "$_task15_metadata_valid"
+  assert_eq "ownership contract row $_task15_field is sourced" 1 \
+    "${_task15_source_rows[$_task15_field]:-0}"
+  while IFS= read -r _task15_projection_field; do
+    [ -n "$_task15_projection_field" ] || continue
+    assert_eq "contract projection path $_task15_projection_field is inventoried" 1 \
+      "${_task15_source_rows[$_task15_projection_field]:-0}"
+  done < <(printf '%s\n' "$_task15_projection" | grep -o 'operation_state_[a-z0-9_]*' | sort -u)
+done < "$_task15_contract"
+
+_task15_artifact_count=0
+while IFS= read -r _task15_row; do
+  [ -n "$_task15_row" ] || continue
+  _task15_artifact_count=$((_task15_artifact_count + 1))
+  _task15_cell_count="$(printf '%s\n' "$_task15_row" | grep -o '<td>' | wc -l)"
+  assert_eq "ownership row has seven cells" 7 "$_task15_cell_count"
+  _task15_cells="$(printf '%s\n' "$_task15_row" | sed -n 's#.*<td><code>\([^<]*\)</code></td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td></tr>#\1\t\2\t\3\t\4\t\5\t\6\t\7#p')"
+  if [ -z "$_task15_cells" ]; then
+    fail "ownership row parses" "seven cells" "unparseable"
+    continue
+  fi
+  IFS=$'\t' read -r _task15_field _task15_owner _task15_writers _task15_readers \
+    _task15_persistence _task15_projection _task15_exception <<<"$_task15_cells"
+  _task15_previous="${_task15_artifact_rows[$_task15_field]:-0}"
+  assert_eq "ownership row $_task15_field is unique" 0 "$_task15_previous"
+  _task15_artifact_rows["${_task15_field}"]=$((_task15_previous + 1))
+  _task15_artifact_contract_row="$_task15_field|$_task15_owner|$_task15_writers|$_task15_readers|$_task15_persistence|$_task15_projection|$_task15_exception"
+  assert_eq "ownership row $_task15_field matches contract" \
+    "${_task15_contract_rows[$_task15_field]:-}" "$_task15_artifact_contract_row"
+  assert_eq "ownership row $_task15_field is sourced" 1 \
+    "${_task15_source_rows[$_task15_field]:-0}"
+done < <(grep -F '<tr><td><code>' "$_task15_ownership")
+assert_eq "ownership contract count matches source inventory" "$_task15_source_count" "$_task15_contract_count"
+assert_eq "ownership row count matches contract" "$_task15_contract_count" "$_task15_artifact_count"
+for _task15_field in "${!_task15_source_rows[@]}"; do
+  assert_eq "source field $_task15_field has one contract row" 1 \
+    "${_task15_contract_rows[$_task15_field]+1}"
+  assert_eq "source field $_task15_field has one artifact row" 1 \
+    "${_task15_artifact_rows[$_task15_field]:-0}"
+done
+for _task15_field in "${!_task15_contract_rows[@]}"; do
+  assert_eq "contract field $_task15_field is in source inventory" 1 \
+    "${_task15_source_rows[$_task15_field]:-0}"
+  assert_eq "contract field $_task15_field has one artifact row" 1 \
+    "${_task15_artifact_rows[$_task15_field]:-0}"
+done
+
+_saved_task15_xdg_state_home="${XDG_STATE_HOME:-}"
+_saved_task15_lock_identity="$lock_identity"
+_saved_task15_cname="$cname"
+_saved_task15_dvol="$dvol"
+_saved_task15_jvol="$jvol"
+_saved_task15_operation_requested="$policy_operation_requested"
+_task15_state="$(mktemp -d)"
+XDG_STATE_HOME="$_task15_state"
+lock_identity=task15-lifecycle
+cname=agentbox-task15-lifecycle
+dvol=agentbox-task15-docker
+jvol=agentbox-task15-jj
+policy_operation_requested=1
+operation_record_active=0
+policy_operation_mode=start
+policy_resolved_effective[digest]=sha256:task15
+operation_record_begin
+_task15_record="$operation_record_path"
+assert_eq "begin marks operation record active" 1 "$operation_record_active"
+assert_eq "active flag is not serialized" 0 "$(grep -c '^record_active' "$_task15_record" || true)"
+operation_record_load
+assert_eq "load leaves current operation inactive" 0 "$operation_record_active"
+assert_eq "load still projects valid record" 1 "$operation_state_valid"
+rm -rf "$_task15_state"
+if [ -n "$_saved_task15_xdg_state_home" ]; then
+  XDG_STATE_HOME="$_saved_task15_xdg_state_home"
+else
+  unset XDG_STATE_HOME
+fi
+lock_identity="$_saved_task15_lock_identity"
+cname="$_saved_task15_cname"
+dvol="$_saved_task15_dvol"
+jvol="$_saved_task15_jvol"
+policy_operation_requested="$_saved_task15_operation_requested"
+
+# The report derivation must trust the projection even when producer fields disagree. This is a
+# direct field-to-projection trace, independent of the command-dispatch matrix owned by Task 16.
+operation_state_reset
+operation_state_record_active=1
+operation_state_terminal_status=network-degraded
+operation_state_task_status=degraded-fail
+operation_state_command_mode="exec"
+operation_state_valid=1
+operation_status=complete
+operation_task_status=pass
+command_report_derive
+assert_eq "report derivation uses projected status" degraded "$command_report_result"
+assert_eq "report derivation uses projected task status" 1 "$([ "$command_report_result" = degraded ] && echo 1 || echo 0)"
+
+# Replace the projection producer with a pure fixture and poison every durable/report producer
+# value. If rendering reads a producer directly, this fixture exposes it in the emitted report.
+_saved_task15_publish="$(declare -f operation_state_publish)"
+# Human-authorized exception: this fixture replaces the projection boundary to prove report reads.
+# shellcheck disable=SC2034
+operation_state_publish() {
+  operation_state_reset
+  operation_state_record_active=0
+  operation_state_terminal_status=complete
+  operation_state_command_mode=status
+  operation_state_record_path=/tmp/task15-projection.toml
+  operation_state_operation_id=projected-operation
+  operation_state_phase=completion
+  operation_state_container_name=projected-container
+  operation_state_agent_execution=projected-agent
+  operation_state_task_status=projected-pass
+  operation_state_explicit_exec=projected-exec
+  operation_state_record_cleanup=projected-cleanup
+  operation_state_failed_phase=projected-phase
+  operation_state_retry_command="projected retry"
+  operation_state_valid=1
+}
+operation_record_active=1
+operation_status=network-degraded
+operation_task_status=degraded-fail
+operation_agent_execution="poison-agent"
+operation_explicit_exec=poison-exec
+operation_record_cleanup=poison-cleanup
+operation_failed_phase="poison-phase"
+policy_operation_mode="exec"
+_task15_report="$(command_report_emit)"
+assert_eq "report calls projection" 1 \
+  "$(printf '%s\n' "$_task15_report" | grep -c '^result=report-only$')"
+assert_eq "report uses projected task status" 1 \
+  "$(printf '%s\n' "$_task15_report" | grep -c '^task_status=projected-pass$')"
+assert_eq "report ignores producer task status" 0 \
+  "$(printf '%s\n' "$_task15_report" | grep -c '^task_status=degraded-fail$')"
+assert_eq "report uses projected execution" 1 \
+  "$(printf '%s\n' "$_task15_report" | grep -c '^agent_execution=projected-agent$')"
+assert_eq "report ignores producer execution" 0 \
+  "$(printf '%s\n' "$_task15_report" | grep -c '^agent_execution=poison-agent$')"
+assert_eq "producer execution remains untouched" poison-agent "$operation_agent_execution"
+assert_eq "producer failed phase remains untouched" poison-phase "$operation_failed_phase"
+eval "$_saved_task15_publish"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

@@ -35,13 +35,13 @@
     <header>
       <div class="eyebrow">RUFUS CONSOLIDATED REVIEW</div>
       <h1>Tasks 1–14 — remaining review items</h1>
-      <p class="meta">Consolidated 2026-09-15 · reviewed implementation baseline <code>096f3140</code> (Task 14) · through review round 9</p>
+      <p class="meta">Consolidated 2026-09-16 · reviewed implementation baseline <code>096f3140</code> (Task 14) · Task 15 change <code>40b2b485</code> · through review round 15</p>
     </header>
 
     <section class="hero">
       <strong>Disposition: two active findings; historical task reviews closed.</strong>
-      <p>This document replaces the task-by-task, planning, interim, architecture, and test-coverage review artifacts formerly held in <code>review_docs/</code>. Every historical task finding was reviewed: the task reviews are accepted and their findings are resolved. The current implementation change resolves the duplicate decision-table, repeated readiness-fixture, runtime-forwarding, helper-container ownership, ownership-guard coverage, and report-boundary findings. It also removes redundant policy-source size state. The new Tasks 15–16 follow-up plan addresses L-1/L-2 in principle and now has concrete ownership, acceptance, baseline-gate, and non-duplicating test boundaries.</p>
-      <p><strong>Current quality grade: B+</strong> <span>(A+–F scale)</span>. The completed system has strong safety and lifecycle evidence, and the runtime fixture now follows the exact-identity cleanup contract. L-1/L-2 remain deferred implementation findings; the follow-up plan is accepted for that work.</p>
+      <p>This document replaces the task-by-task, planning, interim, architecture, and test-coverage review artifacts formerly held in <code>review_docs/</code>. Every historical task finding was reviewed: the task reviews are accepted and their findings are resolved. The current implementation change resolves the duplicate decision-table, repeated readiness-fixture, runtime-forwarding, helper-container ownership, ownership-guard coverage, and report-boundary findings. It also removes redundant policy-source size state. Task 15 now routes command reports through the projection, adds the required ownership artifact, and uses a machine-readable contract to keep the artifact and tests aligned.</p>
+      <p><strong>Current quality grade: B+</strong> <span>(A+–F scale)</span>. The source suite and static shell checks pass, and the projection boundary is materially clearer. L-1/L-2 remain deferred implementation findings; Task 15’s review findings are resolved.</p>
     </section>
 
     <h2>Findings and resolution status</h2>
@@ -116,6 +116,31 @@
       </tbody>
     </table>
 
+    <h2>Task 15 implementation review</h2>
+    <section class="callout">
+      <p>Task 15 makes the intended architectural move: <code>operation_state_publish</code> is the single record/policy-to-projection path, operation-state output and command reports consume projection fields, and the existing lifecycle vocabulary and shell execution model remain intact. The implementation is materially improved; T15-1, T15-2, and T15-3 are resolved.</p>
+    </section>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Finding and required correction</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>T15-1</td><td class="pass">Resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:4714–4798</code></a>, <a href="../design_docs/task15_lifecycle_ownership.html"><code>task15_lifecycle_ownership.html:23–115</code></a></td>
+          <td>The test now derives the field set from the relevant <code>bin/ab</code> assignments, validates row uniqueness and source/artifact completeness, and checks the expected owner, writer, reader, persistence, and projection metadata for every ownership row.</td>
+        </tr>
+        <tr>
+          <td>T15-2</td><td class="pass">Resolved</td>
+          <td><a href="../design_docs/task15_lifecycle_ownership.html"><code>task15_lifecycle_ownership.html:56–57</code></a>, <a href="../bin/ab"><code>bin/ab:177, 784, 843</code></a></td>
+          <td><code>operation_record_active</code> is now correctly classified as command-local process state, with an explicit distinction between a fresh begin and loading an existing record. The new tests confirm it is not serialized and that begin/load preserve the intended distinction.</td>
+        </tr>
+        <tr>
+          <td>T15-3</td><td class="pass">Resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:4714–4798</code></a>, <a href="../tests/contracts/lifecycle_ownership.contract"><code>lifecycle_ownership.contract</code></a>, <a href="../design_docs/task15_lifecycle_ownership.html"><code>task15_lifecycle_ownership.html:23–115</code></a></td>
+          <td>The ownership metadata is now held in a machine-readable contract. The test parses that contract, checks source-field and projection-path coverage, and requires every HTML row to match exactly, removing the duplicated Bash <code>case</code> oracle. The source scan remains intentionally focused on exhaustive field presence; behavior tests cover the projection/report boundary.</td>
+        </tr>
+      </tbody>
+    </table>
+
     <h2>Durable guardrails</h2>
     <section class="callout">
       <p>Keep the product local: one host, one project/machine identity, the existing container and named-volume lifecycle, and the existing nested Docker runtime. Do not turn reports into a public compatibility protocol, or add distributed coordination, a workflow engine, a general process supervisor, an event store, or an unbounded history model.</p>
@@ -131,6 +156,7 @@
         <tr><td>Tasks 1–14 scope review and Tasks 8–11 / 12–14 planning reviews</td><td class="pass">Planning findings closed in the completed plan</td><td>Only the local-scope, finite-matrix, no-second-lifecycle, and ownership guardrails above remain relevant.</td></tr>
         <tr><td>Architecture-weight and test-coverage reviews</td><td>Superseded by this document</td><td>L-1 and L-2 remain active; L-3 through L-9 are resolved by the current reviewed change.</td></tr>
         <tr><td>Tasks 15–16 deferred architecture plan</td><td class="pass">Accepted for implementation</td><td>The sequencing, ownership artifact, bounded exception rule, baseline gates, and test boundaries are sound. PL-1 and PL-2 are resolved; L-1/L-2 remain the deferred implementation work.</td></tr>
+        <tr><td>Task 15 lifecycle ownership and projection implementation</td><td class="pass">Accepted</td><td>The projection/report boundary is materially improved and the source suite passes. T15-1, T15-2, and T15-3 are resolved.</td></tr>
       </tbody>
     </table>
 
@@ -147,6 +173,12 @@
         <tr><td>7</td><td><code>fe12321e</code> — Tasks 15–16 architecture follow-up plan</td><td>Plan direction and sequencing accepted; PL-1 opened for an unspecified ownership-map deliverable and unenforced overlap exceptions. PL-2 opened for overlapping test scopes and omitted mandatory baseline commands. Changes requested before implementation.</td></tr>
         <tr><td>8</td><td><code>007bad8d</code> — clarified Task 15/16 artifacts, inventories, and gates</td><td>PL-1 resolved: the ownership artifact, exhaustive schema, bounded exceptions, and baseline commands are explicit. PL-2 partially resolved: task boundaries are clearer, but the report-only projection call-trace proof remains duplicated. Changes requested before implementation.</td></tr>
         <tr><td>9</td><td><code>2a64f133</code> — separated Task 16 interface-routing tests</td><td>PL-2 resolved: Task 15 retains semantic projection/ownership tracing, while Task 16 verifies interface routing, side-effect contracts, and compatibility without repeating the field matrix. Tasks 15–16 are accepted as the plan for deferred L-1/L-2 implementation.</td></tr>
+        <tr><td>10</td><td><code>a92f10d2</code> — Task 15 lifecycle ownership and projection</td><td>Projection/report routing and source coverage reviewed. T15-1 opened for token-presence/field-list test duplication that does not validate ownership semantics; T15-2 opened for the ephemeral <code>operation_record_active</code> owner classification. Changes requested.</td></tr>
+        <tr><td>11</td><td><code>7e421637</code> — strengthened Task 15 ownership inventory tests</td><td>T15-2 resolved: the process-local record-active distinction is documented and tested. T15-1 partially resolved: source completeness and structural validation now exist, but declared ownership/projection metadata is not semantically checked. Changes requested for the remaining low-severity gap.</td></tr>
+        <tr><td>12</td><td><code>aeb09083</code> — Task 15 follow-up</td><td>Re-review confirms the stronger source-derived inventory, artifact completeness checks, record-active begin/load coverage, and projection/report poisoning tests. No new implementation defect found. T15-1 remains partially resolved because metadata can still be changed to an arbitrary non-empty value within the permitted categories without failing the test.</td></tr>
+        <tr><td>13</td><td><code>6e4ab873</code> — Task 15 semantic ownership checks</td><td>T15-1 resolved: every ownership row now has expected semantic metadata assertions, and T15-2 remains resolved. T15-3 opened as a low-severity maintainability concern because the expected matrix is duplicated in Bash and HTML and is not tied to the source’s actual writer/reader paths. Changes requested for the follow-up.</td></tr>
+        <tr><td>14</td><td><code>c382b3a5</code> — Task 15 machine-readable ownership contract</td><td>T15-3 resolved: the expected ownership matrix moved to <code>task15_lifecycle_ownership.contract</code>, the HTML artifact is checked against it, and the source suite still passes. Task 15 is accepted; only deferred L-1/L-2 architecture findings remain.</td></tr>
+        <tr><td>15</td><td><code>40b2b485</code> — relocated lifecycle ownership contract</td><td>Re-review confirms the contract now lives under <code>tests/contracts/</code>, the test points to the relocated path, the HTML artifact documents the source, and all contract/artifact/source cardinality checks pass. No new implementation defect found.</td></tr>
       </tbody>
     </table>
 
@@ -154,7 +186,7 @@
     <table>
       <thead><tr><th>Evidence</th><th>Result</th></tr></thead>
       <tbody>
-        <tr><td><code>bash tests/run.sh</code></td><td>Pass on the current reviewed change: <code>PASS: all 1846 tests passed</code>.</td></tr>
+        <tr><td><code>bash tests/run.sh</code></td><td>Pass on the current reviewed change: <code>PASS: all 2928 tests passed</code>.</td></tr>
         <tr><td><code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh tests/runtime_matrix.sh</code></td><td>Pass.</td></tr>
         <tr><td><code>shellcheck bin/ab agentbox-entrypoint.sh tests/runtime_matrix.sh</code></td><td>Pass.</td></tr>
         <tr><td>Round 3 runtime-harness review</td><td>Static inspection confirms P13-09 records a blocked row for unavailable bridge reachability and records exact fixture ownership/removal. The reviewer did not invoke Docker/Sysbox because it is an external supported-runtime environment.</td></tr>
@@ -164,6 +196,12 @@
         <tr><td>Round 7 deferred-plan review</td><td>Static review: Tasks 15–16 preserve the required architecture boundaries and dependency order, but the ownership artifact/acceptance rules and test/gate boundaries need clarification. No implementation or runtime execution was performed.</td></tr>
         <tr><td>Round 8 deferred-plan follow-up</td><td>Static review: the named exhaustive ownership artifact, bounded exception rule, separated test scopes, and mandatory gates are now explicit. One overlapping report call-trace assertion remains between Tasks 15 and 16; no implementation or runtime execution was performed.</td></tr>
         <tr><td>Round 9 deferred-plan follow-up</td><td>Static review: the remaining tracing requirement is now split by purpose—Task 15 proves projection semantics, and Task 16 proves interface routing and compatibility. The plan is accepted for implementation; no implementation or runtime execution was performed.</td></tr>
+        <tr><td>Round 10 Task 15 implementation review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 1942 tests passed</code>; <code>bash -n</code> and ShellCheck pass. Static review confirms the projection boundary, but the ownership artifact test is not semantic and <code>operation_record_active</code> is misclassified. Changes requested.</td></tr>
+        <tr><td>Round 11 Task 15 follow-up review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2549 tests passed</code>; <code>bash -n</code> and ShellCheck pass. Source/artifact completeness and record-active coverage are now present. One low-severity gap remains because metadata correctness is not asserted.</td></tr>
+        <tr><td>Round 12 Task 15 follow-up review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2549 tests passed</code>; <code>bash -n</code> and ShellCheck pass. The latest coverage is sufficient to prevent missing/duplicate rows and to exercise the begin/load active-state distinction, but it still does not assert the semantic correctness of each ownership mapping.</td></tr>
+        <tr><td>Round 13 Task 15 semantic ownership review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2840 tests passed</code>; <code>bash -n</code> and ShellCheck pass. T15-1 is resolved by per-row expected metadata checks. A low-severity maintainability gap remains because the expected matrix is duplicated in the test and artifact and the source scan does not verify actual writer/reader paths.</td></tr>
+        <tr><td>Round 14 Task 15 contract follow-up review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2928 tests passed</code>; <code>bash -n</code> and ShellCheck pass. The 86-row machine-readable contract is checked against the HTML artifact and source inventory, resolving T15-3. No new implementation defect found.</td></tr>
+        <tr><td>Round 15 Task 15 contract relocation review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2928 tests passed</code>; <code>bash -n</code> and ShellCheck pass. The contract relocation is internally consistent, and no new implementation defect was found.</td></tr>
         <tr><td>Supported runtime record</td><td><a href="../RELEASE_CHECKLIST.md"><code>RELEASE_CHECKLIST.md</code></a> records an authorized Task 13 run with P13-01 through P13-08 passing, verified resource inventory, and cleanup.</td></tr>
         <tr><td>Repository review history</td><td>All former review documents were read during this consolidation. Their resolved findings are intentionally not reproduced as active defects.</td></tr>
       </tbody>
