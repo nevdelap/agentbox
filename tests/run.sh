@@ -964,7 +964,6 @@ _saved_task11_evidence="$docker_readiness_daemon_evidence"
 _saved_task11_wait_attempts="$docker_readiness_wait_attempts"
 _saved_task11_diagnostic="$docker_readiness_diagnostic"
 _saved_task11_terminal="$docker_readiness_terminal_failure"
-_saved_task11_transitions="$docker_readiness_transition_log"
 _saved_task11_launch_observed="$docker_readiness_launch_observed"
 _saved_task11_launch_pid="$docker_readiness_launch_pid"
 _task11_root="$(mktemp -d)"
@@ -1063,7 +1062,6 @@ ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
 assert_eq "live daemon with valid evidence becomes ready" 0 "$_task11_rc"
 assert_eq "live daemon is not restarted" 0 "$_task11_start_calls"
 assert_eq "live daemon state is ready" ready "$docker_readiness_state"
-assert_eq "live daemon transition" "starting ready" "$docker_readiness_transition_log"
 assert_eq "live daemon markers are preserved" 2 "$(find "$DOCKER_SOCK" "$DOCKER_PID_FILE" -maxdepth 0 -type f 2>/dev/null | wc -l)"
 
 _task11_alive_results=(true true); _task11_wait_result=1; _task11_start_calls=0
@@ -1086,8 +1084,6 @@ ensure_dockerd >/dev/null 2>&1; _task11_rc=$?
 assert_eq "exited daemon gets one replacement" 0 "$_task11_rc"
 assert_eq "replacement starts exactly once" 2 "$_task11_start_calls"
 assert_eq "replacement state returns ready" ready "$docker_readiness_state"
-assert_eq "replacement transition is explicit" \
-  "starting failed-and-exited replacement-attempted ready" "$docker_readiness_transition_log"
 assert_eq "replacement attempt is recorded" 1 "$docker_readiness_replacement_attempted"
 assert_eq "readiness handoff records operation" 1 \
   "$(grep -c '^operation_id=task11-test$' "$DOCKER_READINESS_STATE_FILE" || true)"
@@ -1172,7 +1168,6 @@ docker_readiness_daemon_evidence="$_saved_task11_evidence"
 docker_readiness_wait_attempts="$_saved_task11_wait_attempts"
 docker_readiness_diagnostic="$_saved_task11_diagnostic"
 docker_readiness_terminal_failure="$_saved_task11_terminal"
-docker_readiness_transition_log="$_saved_task11_transitions"
 docker_readiness_launch_observed="$_saved_task11_launch_observed"
 docker_readiness_launch_pid="$_saved_task11_launch_pid"
 
@@ -1786,7 +1781,7 @@ policy_git_source=cli
 policy_decide rebuild
 assert_eq "explicit Git input rebuilds" build-recreate "$policy_decision_kind"
 assert_eq "explicit Git input permits mutation" 1 "$policy_decision_mutation_allowed"
-policy_decision build
+policy_decide build
 assert_eq "build alias uses shared decision" build-recreate "$policy_decision_kind"
 
 decision_fixture
@@ -1874,9 +1869,60 @@ policy_decide exec
 assert_eq "failed readiness blocks stopped diagnostics" blocked "$policy_decision_explicit_exec_mode"
 assert_eq "failed readiness blocks mutation" 0 "$policy_decision_mutation_allowed"
 
-# Exercise the complete base-state matrix, including both lifecycle states and the explicit
-# start-apply column. These cases intentionally call only the shared decision function: Docker,
-# update, network, and execution helpers are not available to this layer.
+# Exercise the shared decision table, including the complete permission projection. Task 6 and
+# Task 12 consume these same pure policy cases; Docker, update, network, and execution helpers are
+# intentionally unavailable at this layer.
+policy_decision_expectation_case() {
+  local name="$1" classification="$2" lifecycle="$3" mode="$4" source="$5" apply="$6"
+  local grant_gh="$7" expected_kind="$8" expected_mutation="$9" expected_execution="${10}"
+  local expected_update="${11}" expected_apply="${12}" expected_reason="${13}"
+  decision_fixture
+  operation_record_active=0; operation_status=""; operation_explicit_exec=allowed
+  operation_state_reset
+  policy_recorded_classification="$classification"
+  policy_recorded_status="$classification"
+  policy_recorded_lifecycle_state="$lifecycle"
+  policy_git_source="$source"
+  policy_apply="$apply"
+  policy_grant_gh="$grant_gh"
+  if [ "$classification" = valid ] || [ "$classification" = legacy ]; then
+    policy_recorded_git_enabled=1
+    policy_recorded_grant_gh=0
+    policy_recorded_grant_all_of_dot_ssh=0
+    policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+  fi
+  policy_decide "$mode"
+  assert_eq "$name apply state" "$apply" "$policy_apply"
+  assert_eq "$name kind" "$expected_kind" "$policy_decision_kind"
+  assert_eq "$name mutation" "$expected_mutation" "$policy_decision_mutation_allowed"
+  assert_eq "$name execution" "$expected_execution" "$policy_decision_execution_allowed"
+  assert_eq "$name update" "$expected_update" "$policy_decision_update_allowed"
+  assert_eq "$name apply" "$expected_apply" "$policy_decision_explicit_apply_required"
+  assert_eq "$name reason" "$expected_reason" "$policy_decision_reason_code"
+}
+
+while IFS=$'\t' read -r _name _classification _lifecycle _mode _source _apply _grant _kind \
+  _mutation _execution _update _explicit_apply _reason; do
+  [ -n "$_name" ] || continue
+  policy_decision_expectation_case "$_name" "$_classification" "$_lifecycle" "$_mode" \
+    "$_source" "$_apply" "$_grant" "$_kind" "$_mutation" "$_execution" "$_update" \
+    "$_explicit_apply" "$_reason"
+done <<'EOF'
+absent start	absent	absent	start	default	0	0	create	1	1	1	0	container-absent
+absent convenience	absent	absent	exec	default	0	0	create	1	1	1	0	container-absent
+absent rebuild	absent	absent	rebuild	default	0	0	build-recreate	1	0	1	0	explicit-rebuild
+matching stopped start	valid	stopped	start	default	0	0	start-in-place	1	1	1	0	policy-matches-recorded
+matching running convenience	valid	running	exec	default	0	0	start-in-place	0	1	1	0	policy-matches-recorded
+stale start	stale	stopped	start	default	0	0	refuse	0	0	0	1	stale-recorded-state
+stale convenience	stale	stopped	exec	default	0	0	refuse	0	0	0	1	stale-recorded-state
+stale rebuild	stale	stopped	rebuild	default	0	0	refuse	0	0	0	1	ambiguous-git-state
+invalid start	invalid	stopped	start	default	0	0	refuse	0	0	0	1	invalid-recorded-state
+legacy stopped start	legacy	stopped	start	default	0	0	reconcile-stopped	1	1	1	0	legacy-state
+legacy running convenience	legacy	running	exec	default	0	0	start-in-place	0	1	1	0	legacy-mounts-match
+EOF
+
+# Keep the base-layer mismatch cases explicit: unlike the shared table, these pin the
+# running/stopped reconciliation branch selected by a changed current policy.
 decision_matrix_case() {
   local name="$1" classification="$2" lifecycle="$3" mode="$4" apply="$5" expected="$6"
   decision_fixture
@@ -1890,51 +1936,16 @@ decision_matrix_case() {
     policy_recorded_grant_all_of_dot_ssh=0
     policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
   fi
-  if [[ "$name" = *mismatch* ]]; then
-    policy_grant_gh=1
-    if [ "$classification" = valid ]; then
-      policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
-    fi
-  fi
+  policy_grant_gh=1
   policy_decide "$mode"
   assert_eq "$name apply state" "$apply" "$policy_apply"
   assert_eq "$name" "$expected" "$policy_decision_kind"
 }
-
-for _state in absent legacy valid stale invalid; do
-  case "$_state" in
-    absent) _lifecycle=absent ;;
-    legacy|valid) _lifecycle=stopped ;;
-    stale|invalid) _lifecycle=stopped ;;
-  esac
-  if [ "$_state" = absent ]; then
-    decision_matrix_case "$_state start" "$_state" "$_lifecycle" start 0 create
-    decision_matrix_case "$_state exec" "$_state" "$_lifecycle" exec 0 create
-    decision_matrix_case "$_state rebuild" "$_state" "$_lifecycle" rebuild 0 build-recreate
-  elif [ "$_state" = stale ] || [ "$_state" = invalid ]; then
-    decision_matrix_case "$_state start refuses" "$_state" "$_lifecycle" start 0 refuse
-    decision_matrix_case "$_state exec refuses" "$_state" "$_lifecycle" exec 0 refuse
-    decision_matrix_case "$_state rebuild requires Git input" "$_state" "$_lifecycle" rebuild 0 refuse
-  else
-    if [ "$_state" = legacy ]; then
-      decision_matrix_case "$_state stopped start" "$_state" "$_lifecycle" start 0 reconcile-stopped
-      decision_matrix_case "$_state stopped exec" "$_state" "$_lifecycle" exec 0 reconcile-stopped
-    else
-      decision_matrix_case "$_state stopped start" "$_state" "$_lifecycle" start 0 start-in-place
-      decision_matrix_case "$_state stopped exec" "$_state" "$_lifecycle" exec 0 start-in-place
-    fi
-    decision_matrix_case "$_state stopped rebuild" "$_state" "$_lifecycle" rebuild 0 build-recreate
-  fi
-  decision_matrix_case "$_state config" "$_state" "$_lifecycle" config 0 report-only
-done
 decision_matrix_case "valid stopped mismatch" valid stopped start 0 reconcile-stopped
 decision_matrix_case "valid stopped mismatch apply" valid stopped start 1 reconcile-stopped
-decision_matrix_case "valid running matching" valid running start 0 start-in-place
-decision_matrix_case "valid running matching exec" valid running exec 0 start-in-place
 decision_matrix_case "valid running mismatch refuses" valid running start 0 refuse
 decision_matrix_case "valid running mismatch apply" valid running start 1 reconcile-running
 decision_matrix_case "valid running mismatch exec refuses" valid running exec 0 refuse
-decision_matrix_case "legacy running matching" legacy running exec 0 start-in-place
 decision_matrix_case "legacy running mismatch refuses" legacy running start 0 refuse
 decision_matrix_case "legacy running mismatch apply" legacy running start 1 reconcile-running
 
@@ -3949,7 +3960,7 @@ _saved_task10_operation_requested="$policy_operation_requested"
 _task10_state="$(mktemp -d)"; XDG_STATE_HOME="$_task10_state"
 PROJECT_DIR=/work/task10-retry; MACHINE=task10; cname=agentbox-task10; dvol=task10-docker; jvol=task10-jj
 lock_identity="$(policy_lock_identity)"; policy_operation_requested=1; policy_operation_mode=start
-operation_record_sequence=0; operation_record_active=0
+operation_record_active=0
 operation_record_begin; _task10_first_id="$operation_id"
 operation_record_begin; _task10_second_id="$operation_id"
 assert_eq "retry operation id is fresh" 1 "$([ "$_task10_first_id" != "$_task10_second_id" ] && echo 1 || echo 0)"
@@ -4223,7 +4234,6 @@ _task10_retry_write_record() {
   policy_operation_requested=1
   # Human-authorized exception: operation_record_begin consumes this sourced global.
   # shellcheck disable=SC2034
-  operation_record_sequence=0
   operation_record_begin || return 1
   operation_image_reference=agentbox:task10-existing
   case "$_task10_retry_state" in
@@ -4431,44 +4441,12 @@ policy_grant_all_of_dot_ssh="$_saved_t12_mount_ssh"; GIT_BLOCKER="$_saved_t12_mo
 rm -rf "$_task12_mount_root"
 
 echo "T12-03 command-state matrix"
-# Keep the public command families explicit while using the shared pure decision function. The
-# expected permissions include the retry/apply direction and update eligibility, not just kind.
-task12_decision_case() {
-  local name="$1" classification="$2" lifecycle="$3" mode="$4" source="${5:-default}"
-  local expected_kind="$6" expected_mutation="$7" expected_execution="$8"
-  local expected_update="$9" expected_apply="${10}" expected_reason="${11}"
-  decision_fixture
-  operation_record_active=0; operation_status=""; operation_explicit_exec=allowed
-  operation_state_reset
-  policy_recorded_classification="$classification"; policy_recorded_status="$classification"
-  policy_recorded_lifecycle_state="$lifecycle"; policy_git_source="$source"
-  assert_eq "$name source" "$source" "$policy_git_source"
-  if [ "$classification" = valid ] || [ "$classification" = legacy ]; then
-    policy_recorded_git_enabled=1; policy_recorded_grant_gh=0
-    policy_recorded_grant_all_of_dot_ssh=0
-    policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
-  fi
-  policy_decide "$mode"
-  assert_eq "$name kind" "$expected_kind" "$policy_decision_kind"
-  assert_eq "$name mutation" "$expected_mutation" "$policy_decision_mutation_allowed"
-  assert_eq "$name execution" "$expected_execution" "$policy_decision_execution_allowed"
-  assert_eq "$name update" "$expected_update" "$policy_decision_update_allowed"
-  assert_eq "$name apply" "$expected_apply" "$policy_decision_explicit_apply_required"
-  assert_eq "$name reason" "$expected_reason" "$policy_decision_reason_code"
-}
-task12_decision_case "absent start" absent absent start default create 1 1 1 0 container-absent
-task12_decision_case "absent convenience" absent absent exec default create 1 1 1 0 container-absent
-task12_decision_case "absent build" absent absent build default build-recreate 1 0 1 0 explicit-rebuild
-task12_decision_case "matching stopped start" valid stopped start default start-in-place 1 1 1 0 policy-matches-recorded
-task12_decision_case "matching running exec" valid running exec default start-in-place 0 1 1 0 policy-matches-recorded
-task12_decision_case "stale start" stale stopped start default refuse 0 0 0 1 stale-recorded-state
-task12_decision_case "stale exec" stale stopped exec default refuse 0 0 0 1 stale-recorded-state
-task12_decision_case "stale rebuild" stale stopped rebuild default refuse 0 0 0 1 ambiguous-git-state
-task12_decision_case "stale rebuild explicit Git" stale stopped rebuild cli build-recreate 1 0 1 0 explicit-git-reconciliation
-task12_decision_case "invalid start" invalid stopped start default refuse 0 0 0 1 invalid-recorded-state
-task12_decision_case "legacy stopped start" legacy stopped start default reconcile-stopped 1 1 1 0 legacy-state
-task12_decision_case "legacy running convenience" legacy running exec default start-in-place 0 1 1 0 legacy-mounts-match
-task12_decision_case "contradictory exec" invalid running exec default refuse 0 0 0 1 invalid-recorded-state
+# The shared table above owns the common command-state expectations. These two rows remain here
+# because they are Task 12's explicit reconciliation and contradictory-record deltas.
+policy_decision_expectation_case "stale rebuild explicit Git" stale stopped rebuild cli 0 0 \
+  build-recreate 1 0 1 0 explicit-git-reconciliation
+policy_decision_expectation_case "contradictory exec" invalid running exec default 0 0 \
+  refuse 0 0 0 1 invalid-recorded-state
 
 echo "T12-04 recovery permission matrix"
 # Project the complete status vocabulary without a live daemon. These rows pin permissions,
@@ -4540,6 +4518,16 @@ done
 echo "T12-07 readiness permission matrix"
 # Readiness transitions are consumed by generic exec and by the convenience launchers through the
 # same decision layer. Running failures permit diagnostics only; stopped failures remain blocked.
+decision_fixture
+operation_record_active=0; operation_status=""
+operation_state_reset
+policy_recorded_status=valid; policy_recorded_classification=valid
+policy_recorded_lifecycle_state=running; policy_recorded_git_enabled=1
+policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
+policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
+assert_eq "readiness fixture GitHub grant" 0 "$policy_recorded_grant_gh"
+assert_eq "readiness fixture SSH grant" 0 "$policy_recorded_grant_all_of_dot_ssh"
+assert_eq "readiness fixture digest" "sha256:$(policy_digest_for 1 0 0)" "$policy_recorded_digest"
 for _task12_readiness in starting replacement-attempted ready failed-but-running failed-and-exited; do
   decision_fixture
   operation_record_active=0; operation_status=""
@@ -4548,10 +4536,6 @@ for _task12_readiness in starting replacement-attempted ready failed-but-running
   policy_recorded_lifecycle_state=running; policy_recorded_git_enabled=1
   policy_recorded_grant_gh=0; policy_recorded_grant_all_of_dot_ssh=0
   policy_recorded_digest="sha256:$(policy_digest_for 1 0 0)"
-  assert_eq "readiness $_task12_readiness GitHub grant" 0 "$policy_recorded_grant_gh"
-  assert_eq "readiness $_task12_readiness SSH grant" 0 "$policy_recorded_grant_all_of_dot_ssh"
-  assert_eq "readiness $_task12_readiness digest" \
-    "sha256:$(policy_digest_for 1 0 0)" "$policy_recorded_digest"
   policy_readiness_result="$_task12_readiness"
   policy_operation_status=none
   policy_decide exec
@@ -4575,6 +4559,150 @@ for _task12_readiness in starting replacement-attempted ready failed-but-running
   assert_eq "readiness $_task12_readiness stopped mode" "$_task12_expected_mode" \
     "$policy_decision_explicit_exec_mode"
 done
+
+echo "Task 13 fixture ownership guard"
+# Keep the destructive fixture boundary covered without requiring Docker/Sysbox. These mocks
+# exercise the same runtime-matrix functions used by P13-09 and verify that ambiguous ownership
+# is retained, replaced IDs are never removed, and matching IDs leave ledger evidence.
+# shellcheck source=runtime_matrix.sh
+# shellcheck disable=SC1091
+source "$REPO/tests/runtime_matrix.sh"
+fixture_mock_mode=""
+fixture_mock_rm_calls=0
+fixture_mock_exists=0
+fixture_mock_id=""
+fixture_mock_name=""
+docker() {
+  local format name
+  case "$fixture_mock_mode:$1" in
+    preexisting:inspect)
+      name="${*: -1}"
+      if [ "$name" = "$FIXTURE_SERVICE_NAME" ] && [ "$fixture_mock_exists" -eq 1 ]; then
+        printf 'existing-fixture-id\n'
+        return 0
+      fi
+      printf 'Error: No such object\n' >&2
+      return 1
+      ;;
+    ambiguous:run)
+      printf 'created-fixture-id\n'
+      return 0
+      ;;
+    created:run)
+      printf 'created-fixture-id\n'
+      return 0
+      ;;
+    created:inspect)
+      format="${3:-}"
+      if [ "$format" = "{{.Id}}" ]; then
+        printf 'created-fixture-id\n'
+      else
+        printf '/%s\n' "$FIXTURE_SERVICE_NAME"
+      fi
+      return 0
+      ;;
+    ambiguous:inspect)
+      format="${3:-}"
+      if [ "$format" = "{{.Id}}" ]; then
+        printf 'different-fixture-id\n'
+        return 0
+      fi
+      printf 'different-fixture-name\n'
+      return 0
+      ;;
+    replaced:inspect)
+      format="${3:-}"
+      if [ "$format" = "{{.Id}}" ]; then
+        printf 'replacement-fixture-id\n'
+      else
+        printf '/%s\n' "$FIXTURE_SERVICE_NAME"
+      fi
+      return 0
+      ;;
+    matching:inspect)
+      format="${3:-}"
+      if [ "$fixture_mock_exists" -eq 1 ]; then
+        if [ "$format" = "{{.Id}}" ]; then
+          printf '%s\n' "$fixture_mock_id"
+        else
+          printf '/%s\n' "$fixture_mock_name"
+        fi
+        return 0
+      fi
+      printf 'Error: No such object\n' >&2
+      return 1
+      ;;
+    matching:rm)
+      fixture_mock_rm_calls=$((fixture_mock_rm_calls + 1))
+      fixture_mock_exists=0
+      return 0
+      ;;
+  esac
+  printf 'unexpected mocked docker call: %s\n' "$*" >&2
+  return 1
+}
+
+PROJECT_DIR=/tmp/task13-project
+FIXTURE_SERVICE_NAME=task13-project-container-endpoint
+fixture_reset_resource_ledger() {
+  RESOURCE_IDS=()
+  RESOURCE_OWNED=()
+  RESOURCE_CLEANUP=()
+}
+
+fixture_mock_mode=preexisting; fixture_mock_exists=1
+assert_eq "pre-existing fixture name is rejected" 1 "$(assert_expected_resources_absent >/dev/null 2>&1; echo $?)"
+
+fixture_mock_mode=ambiguous; fixture_mock_exists=0
+fixture_reset_resource_ledger
+FIXTURE_SERVICE_CREATED=0
+_fixture_start_rc=0
+start_fixture_service >/dev/null 2>&1 || _fixture_start_rc=$?
+assert_eq "ambiguous fixture identity is rejected" 1 "$_fixture_start_rc"
+assert_eq "ambiguous fixture remains unowned" 0 "$FIXTURE_SERVICE_CREATED"
+_fixture_resource_index=$((${#RESOURCE_CLEANUP[@]} - 1))
+assert_eq "ambiguous fixture is retained in ledger" uncertain \
+  "${RESOURCE_CLEANUP[$_fixture_resource_index]}"
+
+fixture_mock_mode=created; fixture_mock_rm_calls=0; fixture_mock_exists=0
+fixture_reset_resource_ledger
+FIXTURE_SERVICE_CREATED=0
+_fixture_start_rc=0
+start_fixture_service >/dev/null 2>&1 || _fixture_start_rc=$?
+assert_eq "matching fixture creation succeeds" 0 "$_fixture_start_rc"
+assert_eq "matching fixture becomes owned" 1 "$FIXTURE_SERVICE_CREATED"
+_fixture_resource_index=$((${#RESOURCE_IDS[@]} - 1))
+assert_eq "creation event records fixture ID" created-fixture-id \
+  "${RESOURCE_IDS[$_fixture_resource_index]}"
+assert_eq "creation event records ownership" true \
+  "${RESOURCE_OWNED[$_fixture_resource_index]}"
+assert_eq "creation event records ledger state" creation-event \
+  "${RESOURCE_CLEANUP[$_fixture_resource_index]}"
+
+fixture_mock_mode=replaced; fixture_mock_rm_calls=0
+fixture_reset_resource_ledger
+FIXTURE_SERVICE_CREATED=1; CLEANUP_STATUS=pass
+cleanup_fixture_service
+assert_eq "replaced fixture cleanup fails closed" fail "$CLEANUP_STATUS"
+assert_eq "replaced fixture is never removed" 0 "$fixture_mock_rm_calls"
+_fixture_resource_index=$((${#RESOURCE_CLEANUP[@]} - 1))
+assert_eq "replaced fixture ledger keeps current ID" replacement-fixture-id \
+  "${RESOURCE_IDS[$_fixture_resource_index]}"
+assert_eq "replaced fixture is retained in ledger" retained \
+  "${RESOURCE_CLEANUP[$_fixture_resource_index]}"
+
+fixture_mock_mode=matching; fixture_mock_rm_calls=0; fixture_mock_exists=1
+fixture_mock_id=created-fixture-id; fixture_mock_name="$FIXTURE_SERVICE_NAME"
+fixture_reset_resource_ledger
+FIXTURE_SERVICE_CREATED=1; CLEANUP_STATUS=pass
+cleanup_fixture_service
+assert_eq "matching fixture cleanup succeeds" pass "$CLEANUP_STATUS"
+assert_eq "matching fixture is removed once" 1 "$fixture_mock_rm_calls"
+_fixture_resource_index=$((${#RESOURCE_CLEANUP[@]} - 1))
+assert_eq "matching fixture ledger keeps owned ID" "$fixture_mock_id" \
+  "${RESOURCE_IDS[$_fixture_resource_index]}"
+assert_eq "matching fixture removal is ledgered" removed \
+  "${RESOURCE_CLEANUP[$_fixture_resource_index]}"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

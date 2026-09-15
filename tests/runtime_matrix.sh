@@ -39,6 +39,11 @@ CONTEXT_CHANGED=0
 DOCKER_INFO_STATUS="unavailable"
 OPERATION_ID=""
 OPERATION_NEW_CONTAINER_ID=""
+FIXTURE_SERVICE_NAME=""
+FIXTURE_SERVICE_ID=""
+FIXTURE_SERVICE_CREATED=0
+FIXTURE_PORT=""
+FIXTURE_MOUNT_SOURCE=""
 
 declare -a ROW_IDS=()
 declare -a ROW_STATUSES=()
@@ -587,6 +592,86 @@ fixture_setup() {
   chmod 600 "$ssh_dir/known_hosts"
 }
 
+runtime_fixture_setup() {
+  local config_root port_hex
+  config_root="$HOME/.config/agentbox"
+  mkdir -p "$config_root" "$TEST_ROOT/fixtures/custom-mount"
+  FIXTURE_MOUNT_SOURCE="$TEST_ROOT/fixtures/custom-mount"
+  chmod 777 "$FIXTURE_MOUNT_SOURCE"
+  printf '%s\n' 'task13-mounted-fixture' >"$FIXTURE_MOUNT_SOURCE/value"
+  chmod 666 "$FIXTURE_MOUNT_SOURCE/value"
+  printf '%s\n' 'TASK13_FIXTURE_ENV=task13-env-value' >"$config_root/env"
+  printf '%s\n' "$FIXTURE_MOUNT_SOURCE /home/agentbox/task13-custom rw" >"$config_root/mounts"
+  port_hex="$(printf '%s' "$TEST_ROOT" | sha256sum | cut -c1-4)"
+  FIXTURE_PORT=$((16#$port_hex % 1000 + 49152))
+  printf '%s\n' "$FIXTURE_PORT" >"$config_root/ports"
+  cat >"$config_root/setup.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' task13-setup-ran >/tmp/agentbox-task13-setup-marker
+EOF
+  chmod 755 "$config_root/setup.sh"
+  FIXTURE_SERVICE_NAME="${CNAME}-endpoint"
+}
+
+start_fixture_service() {
+  local run_id actual_id
+  if ! run_id="$(docker run -d --network host --name "$FIXTURE_SERVICE_NAME" \
+    --entrypoint /usr/bin/socat "$IMAGE_REFERENCE" \
+    "TCP-LISTEN:$FIXTURE_PORT,bind=0.0.0.0,fork,reuseaddr" \
+    'SYSTEM:printf task13-forwarded' 2>/dev/null)"; then
+    actual_id="$(docker inspect -f '{{.Id}}' "$FIXTURE_SERVICE_NAME" 2>/dev/null || true)"
+    if [ -n "$actual_id" ]; then
+      record_resource container "$FIXTURE_SERVICE_NAME" "$actual_id" false uncertain
+    else
+      record_resource container "$FIXTURE_SERVICE_NAME" "$run_id" false uncertain
+    fi
+    ROW_DIAGNOSTIC="could not start or identify deterministic host endpoint"
+    return 1
+  fi
+  actual_id="$(docker inspect -f '{{.Id}}' "$FIXTURE_SERVICE_NAME" 2>/dev/null || true)"
+  if [ -z "$actual_id" ] || [[ "$actual_id" != "$run_id"* ]]; then
+    [ -n "$actual_id" ] && record_resource container "$FIXTURE_SERVICE_NAME" "$actual_id" false uncertain
+    [ -n "$actual_id" ] || record_resource container "$FIXTURE_SERVICE_NAME" "$run_id" false uncertain
+    ROW_DIAGNOSTIC="deterministic host endpoint identity could not be confirmed"
+    return 1
+  fi
+  FIXTURE_SERVICE_ID="$actual_id"
+  FIXTURE_SERVICE_CREATED=1
+  record_resource container "$FIXTURE_SERVICE_NAME" "$FIXTURE_SERVICE_ID" true creation-event
+}
+
+cleanup_fixture_service() {
+  local actual_id actual_name
+  [ "$FIXTURE_SERVICE_CREATED" -eq 1 ] || return 0
+  actual_id="$(docker inspect -f '{{.Id}}' "$FIXTURE_SERVICE_NAME" 2>/dev/null || true)"
+  actual_name="$(docker inspect -f '{{.Name}}' "$FIXTURE_SERVICE_NAME" 2>/dev/null || true)"
+  if [ -z "$actual_id" ]; then
+    resource_confirm_absent container "$FIXTURE_SERVICE_NAME" || {
+      CLEANUP_STATUS=fail
+      CLEANUP_DIAGNOSTIC="fixture endpoint inspection failed during cleanup"
+    }
+    return 0
+  fi
+  if [ "$actual_id" != "$FIXTURE_SERVICE_ID" ] || [ "$actual_name" != "/$FIXTURE_SERVICE_NAME" ]; then
+    CLEANUP_STATUS=fail
+    CLEANUP_DIAGNOSTIC="fixture endpoint identity changed; refused removal"
+    record_resource container "$FIXTURE_SERVICE_NAME" "$actual_id" false retained
+    return 0
+  fi
+  if docker rm -f "$FIXTURE_SERVICE_NAME" >/dev/null 2>&1; then
+    record_resource container "$FIXTURE_SERVICE_NAME" "$FIXTURE_SERVICE_ID" true removed
+  else
+    CLEANUP_STATUS=fail
+    CLEANUP_DIAGNOSTIC="exact fixture endpoint removal failed"
+    return 0
+  fi
+  if ! resource_confirm_absent container "$FIXTURE_SERVICE_NAME"; then
+    CLEANUP_STATUS=fail
+    CLEANUP_DIAGNOSTIC="fixture endpoint remains after cleanup"
+  fi
+}
+
 row_baseline() {
   local marker run_rc capture_rc
   AB_ENV=()
@@ -637,6 +722,43 @@ row_baseline() {
     "$(docker exec --user agentbox "$CNAME" cat /home/agentbox/.config/jj/.task13-jj-state)" || return 1
   assert_equal "inner Docker marker survives restart" task13-docker-state \
     "$(docker exec --user root "$CNAME" cat /var/lib/docker/.task13-docker-state)" || return 1
+}
+
+row_config_fixture() {
+  local marker forwarder host_response container_response
+  start_fixture_service || return 1
+  host_response="$(docker run --rm --network host --entrypoint /bin/bash "$IMAGE_REFERENCE" -c \
+    "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$FIXTURE_PORT; head -c 16 <&3'" \
+    2>/dev/null || true)"
+  assert_equal "fixture host endpoint responds" task13-forwarded "$host_response" || return 1
+  run_ab exec printenv TASK13_FIXTURE_ENV || {
+    ROW_DIAGNOSTIC="fixture env file was not applied"
+    return 1
+  }
+  assert_equal "fixture environment reaches container" task13-env-value \
+    "$(printf '%s\n' "$LAST_OUTPUT" | sed -n '1p')" || return 1
+  for _ in $(seq 1 30); do
+    marker="$(docker exec --user agentbox "$CNAME" cat /tmp/agentbox-task13-setup-marker 2>/dev/null || true)"
+    [ "$marker" = task13-setup-ran ] && break
+    sleep 1
+  done
+  assert_equal "fixture setup marker" task13-setup-ran "$marker" || return 1
+  assert_equal "fixture custom mount content" task13-mounted-fixture \
+    "$(docker exec --user agentbox "$CNAME" cat /home/agentbox/task13-custom/value 2>/dev/null || true)" || return 1
+  assert_equal "fixture custom mount writable" true \
+    "$(docker exec --user agentbox "$CNAME" test -w /home/agentbox/task13-custom && echo true || echo false)" || return 1
+  forwarder="$(docker exec --user agentbox "$CNAME" bash -c \
+    "ps -eo args 2>/dev/null | grep -F '[s]ocat' | grep -F ':$FIXTURE_PORT'" 2>/dev/null || true)"
+  assert_equal "fixture port forwarder is running" true "$([ -n "$forwarder" ] && echo true || echo false)" || return 1
+  assert_contains "fixture forwarding target is recorded" "$(docker logs "$CNAME" 2>&1 || true)" \
+    "forwarding container 127.0.0.1:$FIXTURE_PORT -> host.docker.internal:$FIXTURE_PORT" || return 1
+  container_response="$(docker exec --user agentbox "$CNAME" bash -c \
+    "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$FIXTURE_PORT; head -c 16 <&3'" \
+    2>/dev/null || true)"
+  if [ "$container_response" != task13-forwarded ]; then
+    ROW_DIAGNOSTIC="project-container bridge-to-host forwarding prerequisite unavailable"
+    return 3
+  fi
 }
 
 row_no_git() {
@@ -961,6 +1083,12 @@ run_row() {
   kill "$ROW_TIMER_PID" 2>/dev/null || true
   wait "$ROW_TIMER_PID" 2>/dev/null || true
   ROW_TIMER_PID=""
+  if [ "$rc" -eq 3 ]; then
+    PREREQUISITES_BLOCKED=1
+    CURRENT_DIAGNOSTIC="${ROW_DIAGNOSTIC:-row prerequisite unavailable}"
+    record_row "$id" blocked "$CURRENT_DIAGNOSTIC"
+    return 0
+  fi
   if [ "$rc" -eq 0 ] && [ "$ROW_FAILURE" -eq 0 ]; then
     CURRENT_DIAGNOSTIC=""
     record_row "$id" pass none
@@ -973,7 +1101,7 @@ run_row() {
 
 mark_remaining_blocked() {
   local id
-  for id in P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08; do
+  for id in P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08 P13-09; do
     if [[ " ${ROW_IDS[*]} " != *" $id "* ]]; then
       record_row "$id" blocked "prerequisite row P13-01 was blocked"
     fi
@@ -1022,6 +1150,14 @@ assert_expected_resources_absent() {
     }
     record_resource "$kind" "$name" "" false preflight-absent
   done
+  if [ -n "$FIXTURE_SERVICE_NAME" ]; then
+    resource_confirm_absent container "$FIXTURE_SERVICE_NAME" || {
+      rc=$?
+      [ "$rc" -eq 1 ] || CURRENT_DIAGNOSTIC="preflight inspection failed for $FIXTURE_SERVICE_NAME"
+      return 1
+    }
+    record_resource container "$FIXTURE_SERVICE_NAME" "" false preflight-absent
+  fi
   PRECHECK_COMPLETE=1
 }
 
@@ -1105,6 +1241,9 @@ verify_final_inventory() {
   if [ "$CONTAINER_CREATED_BY_RUN" -eq 1 ]; then
     resource_confirm_absent container "$CNAME" || return 1
   fi
+  if [ "$FIXTURE_SERVICE_CREATED" -eq 1 ]; then
+    resource_confirm_absent container "$FIXTURE_SERVICE_NAME" || return 1
+  fi
   for volume in "$DVOL" "$JVOL"; do
     if [ "${VOLUME_CREATED_BY_RUN[$volume]:-0}" -eq 1 ]; then
       resource_confirm_absent volume "$volume" || return 1
@@ -1124,16 +1263,16 @@ verify_result_record() {
   grep -q '^networks_accounted = \(true\|false\)$' "$RESULT_FILE" || return 1
   grep -q '^network_inventory = "' "$RESULT_FILE" || return 1
   row_count="$(grep -c '^\[\[rows\]\]$' "$RESULT_FILE" || true)"
-  [ "$row_count" -eq 8 ] || return 1
-  for expected in P13-01 P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08; do
+  [ "$row_count" -eq 9 ] || return 1
+  for expected in P13-01 P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08 P13-09; do
     [ "$(grep -c "^id = \"$expected\"$" "$RESULT_FILE" || true)" -eq 1 ] || return 1
   done
   result_status="$(sed -n 's/^status = "\([^"]*\)"$/\1/p' "$RESULT_FILE" | sed -n '1p')"
-  for expected in P13-01 P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08; do
+  for expected in P13-01 P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08 P13-09; do
     row_block="$(sed -n "/^id = \"$expected\"$/,/^diagnostic =/p" "$RESULT_FILE")"
     case "$result_status" in
       pass) printf '%s\n' "$row_block" | grep -qx 'status = "pass"' || return 1 ;;
-      blocked) printf '%s\n' "$row_block" | grep -qx 'status = "blocked"' || return 1 ;;
+      blocked) printf '%s\n' "$row_block" | grep -Eq '^status = "(pass|blocked)"$' || return 1 ;;
       fail) : ;;
       *) return 1 ;;
     esac
@@ -1144,7 +1283,7 @@ verify_result_record() {
     if [ "$current_row" = setup ]; then
       [ -n "$current_diagnostic" ] || return 1
       blocked_rows="$(sed -n '/^id = /,/^diagnostic =/p' "$RESULT_FILE" | grep -c '^status = "blocked"$' || true)"
-      [ "$blocked_rows" -eq 8 ] || return 1
+      [ "$blocked_rows" -eq 9 ] || return 1
     else
       grep -q '^status = "fail"$' "$RESULT_FILE" || return 1
       sed -n '/^id = /,/^diagnostic =/p' "$RESULT_FILE" | grep -q '^status = "fail"$' || return 1
@@ -1157,7 +1296,7 @@ verify_result_record() {
 
 ensure_all_rows_recorded() {
   local expected
-  for expected in P13-01 P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08; do
+  for expected in P13-01 P13-02 P13-03 P13-04 P13-05 P13-06 P13-07 P13-08 P13-09; do
     if ! printf '%s\n' "${ROW_IDS[@]}" | grep -Fxq "$expected"; then
       record_row "$expected" blocked "not run because $CURRENT_ROW failed"
     fi
@@ -1179,9 +1318,11 @@ finish() {
   fi
   if [ "$rc" -eq 0 ] && [ "$CONTEXT_CHANGED" -eq 0 ]; then
     cleanup_exact
+    cleanup_fixture_service
     [ "$CLEANUP_STATUS" = pass ] || OVERALL_STATUS=fail
   else
     cleanup_exact
+    cleanup_fixture_service
   fi
   if ! verify_final_inventory; then
     OVERALL_STATUS=fail
@@ -1330,6 +1471,11 @@ main() {
     return 1
   fi
   compute_names "$PROJECT_DIR"
+  if ! runtime_fixture_setup; then
+    OVERALL_STATUS=fail
+    record_row P13-09 fail "$ROW_DIAGNOSTIC"
+    return 1
+  fi
   if ! assert_expected_resources_absent; then
     OVERALL_STATUS=fail
     record_row P13-02 fail "$CURRENT_DIAGNOSTIC"
@@ -1342,6 +1488,7 @@ main() {
   if ! run_row P13-06 row_recovery_reports; then OVERALL_STATUS=fail; return 1; fi
   if ! run_row P13-07 row_nested_readiness; then OVERALL_STATUS=fail; return 1; fi
   if ! run_row P13-08 row_retry_cleanup; then OVERALL_STATUS=fail; return 1; fi
+  if ! run_row P13-09 row_config_fixture; then OVERALL_STATUS=fail; return 1; fi
   context_verify_unchanged || { OVERALL_STATUS=fail; return 1; }
   OVERALL_STATUS=pass
   rc=0

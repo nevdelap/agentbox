@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rufus Review — Tasks 1–14 leftovers</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); --warn: light-dark(#8a5a00, #f3c76d); --good: light-dark(#176b3a, #8be0aa); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1120px; margin: 0 auto; padding: 44px 24px 76px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0 10px; font-size: clamp(2.1rem, 5vw, 3.5rem); letter-spacing: -.045em; }
+    h2 { margin: 42px 0 14px; font-size: 1.5rem; }
+    .eyebrow, .meta { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .76rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .hero, .callout, table { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .hero { padding: 20px 22px; border-left: 5px solid var(--warn); }
+    .hero strong { color: var(--warn); font-size: 1.08rem; }
+    .callout { padding: 16px 18px; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    code { font: .91em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--accent); }
+    .pass { color: var(--good); font-weight: 700; }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 700px) { main { padding: 30px 15px 55px; } th, td { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">RUFUS CONSOLIDATED REVIEW</div>
+      <h1>Tasks 1–14 — remaining review items</h1>
+      <p class="meta">Consolidated 2026-09-15 · reviewed implementation baseline <code>096f3140</code> (Task 14) · through review round 6</p>
+    </header>
+
+    <section class="hero">
+      <strong>Disposition: two active findings; historical task reviews closed.</strong>
+      <p>This document replaces the task-by-task, planning, interim, architecture, and test-coverage review artifacts formerly held in <code>review_docs/</code>. Every historical task finding was reviewed: the task reviews are accepted and their findings are resolved. The current implementation change resolves the duplicate decision-table, repeated readiness-fixture, runtime-forwarding, helper-container ownership, ownership-guard coverage, and report-boundary findings. It also removes redundant policy-source size state.</p>
+      <p><strong>Current quality grade: B+</strong> <span>(A+–F scale)</span>. The completed system has strong safety and lifecycle evidence, and the runtime fixture now follows the exact-identity cleanup contract. The remaining work is the two separately planned lifecycle-maintenance items.</p>
+    </section>
+
+    <h2>Findings and resolution status</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Finding and required correction</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>L-1</td><td>Medium</td>
+          <td><a href="../bin/ab"><code>bin/ab:111–197, 948–1355</code></a></td>
+          <td>The lifecycle has overlapping mutable producer fields, durable-record fields, operation-state fields, decision fields, and report fields. Keep one authoritative durable record and one derived projection; have reports consume that projection. Do not introduce another lifecycle vocabulary, record, lock, or supervisor.</td>
+        </tr>
+        <tr>
+          <td>L-2</td><td>Medium</td>
+          <td><a href="../bin/ab"><code>bin/ab</code></a></td>
+          <td>The 4,639-line global Bash program makes stateful changes difficult to reason about. Do not rewrite it merely to split files. Before the next material feature, isolate the record codec, decision projection, and report rendering behind narrow interfaces.</td>
+        </tr>
+        <tr>
+          <td>L-3</td><td class="pass">Resolved</td>
+          <td><a href="../bin/ab"><code>bin/ab:438–585, 893–895</code></a>, <a href="../README.md"><code>README.md:178, 227</code></a></td>
+          <td>The current change removes the readiness transition log, per-process operation sequence, decision alias, and redundant policy-source size state. Code, design, and README now consistently define the report as an internal diagnostic interface rather than a versioned scripting API.</td>
+        </tr>
+        <tr>
+          <td>L-4</td><td class="pass">Resolved</td>
+          <td><a href="../justfile"><code>justfile:70–82</code></a>, <a href="../tests/smoke.sh"><code>tests/smoke.sh:91–247</code></a>, <a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh</code></a></td>
+          <td>P13-09 now sends a request from the project container through <code>127.0.0.1:&lt;port&gt;</code> and requires the fixture response. An unavailable bridge returns the harness’s distinct blocked-prerequisite status rather than passing without the round-trip evidence.</td>
+        </tr>
+        <tr>
+          <td>L-7</td><td class="pass">Resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:42, 612, 615–620, 676–682, 1249–1254</code></a></td>
+          <td>The fixture name is preflighted, the created container ID is recorded in the resource ledger, and cleanup removes only a container whose current name and ID still match. Creation ambiguity and identity replacement are retained and reported instead of being deleted.</td>
+        </tr>
+        <tr>
+          <td>L-8</td><td class="pass">Resolved</td>
+          <td><a href="../tests/runtime_matrix.sh"><code>tests/runtime_matrix.sh:617–672</code></a>, <a href="../tests/run.sh"><code>tests/run.sh</code></a></td>
+          <td>The source suite now covers pre-existing fixture-name rejection, ambiguous create/inspect ownership, replaced-ID cleanup refusal with no <code>docker rm</code>, and matching-ID removal with a removal ledger entry. These isolated mocks exercise the P13-09 functions without requiring Docker/Sysbox and do not duplicate the live runtime row.</td>
+        </tr>
+        <tr>
+          <td>L-9</td><td class="pass">Resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:4650–4668</code></a></td>
+          <td>The source mocks now assert the successful creation-event ID, replacement ID retained in the ledger, and owned ID recorded on successful removal. The assertions therefore verify production ledger output rather than merely re-checking test setup.</td>
+        </tr>
+        <tr>
+          <td>L-5</td><td class="pass">Resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:1880–1939, 4436–4471</code></a></td>
+          <td>The common Task 6/12 cases now use one tabular <code>policy_decision_expectation_case</code>; Task 12 retains only explicit-Git reconciliation and contradictory-record deltas. The shared table asserts kind, permissions, update eligibility, apply direction, and reason.</td>
+        </tr>
+        <tr>
+          <td>L-6</td><td class="pass">Resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:4543–4554</code></a></td>
+          <td>The readiness fixture assertions are now made once before the per-state loop; the loop retains only the readiness-dependent permission checks.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Durable guardrails</h2>
+    <section class="callout">
+      <p>Keep the product local: one host, one project/machine identity, the existing container and named-volume lifecycle, and the existing nested Docker runtime. Do not turn reports into a public compatibility protocol, or add distributed coordination, a workflow engine, a general process supervisor, an event store, or an unbounded history model.</p>
+      <p>Keep safety complexity that earns its place: fail-closed policy/mount snapshots, the existing per-project lock, atomic failure records, bounded best-effort update coordination, and the one-replacement nested-daemon readiness rule. The supported runtime matrix must stay finite and risk-based rather than Cartesian. Runtime cleanup must identify exact run-owned resources and refuse broad prefix/label deletion or uncertain ownership.</p>
+      <p>Keep boundary-distinct tests. Public command dispatch and pure projection/report tests are complementary, not duplicates. Likewise, outer-container recovery and inner-daemon-readiness runtime rows exercise different fault boundaries and should remain separate.</p>
+    </section>
+
+    <h2>Historical review disposition</h2>
+    <table>
+      <thead><tr><th>Former artifacts reviewed</th><th>Disposition</th><th>What remains here</th></tr></thead>
+      <tbody>
+        <tr><td>Task reviews 1–14, Tasks 1–7 aggregate, and interim UX/bug-fix review</td><td class="pass">Accepted; all recorded findings resolved</td><td>No task-specific defect is carried forward.</td></tr>
+        <tr><td>Tasks 1–14 scope review and Tasks 8–11 / 12–14 planning reviews</td><td class="pass">Planning findings closed in the completed plan</td><td>Only the local-scope, finite-matrix, no-second-lifecycle, and ownership guardrails above remain relevant.</td></tr>
+        <tr><td>Architecture-weight and test-coverage reviews</td><td>Superseded by this document</td><td>L-1 and L-2 remain active; L-3 through L-9 are resolved by the current reviewed change.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Review history</h2>
+    <table>
+      <thead><tr><th>Round</th><th>Reviewed change</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Tasks 1–14 baseline <code>096f3140</code></td><td>Consolidated historical accepted reviews and retained L-1 through L-6.</td></tr>
+        <tr><td>2</td><td><code>35c88e1a</code> — policy-test consolidation and runtime fixture</td><td>L-5 and L-6 resolved; L-3 and L-4 partially resolved. L-7 opened for untracked, non-identity-checked helper-container cleanup. Changes requested.</td></tr>
+        <tr><td>3</td><td><code>f2b836cf</code> — exact fixture identity and forwarding evidence</td><td>L-4 and L-7 resolved: P13-09 proves a project-container round trip or records a blocked prerequisite, and fixture cleanup is exact-ID checked and ledgered. L-8 opened for missing deterministic negative-path coverage. Changes requested.</td></tr>
+        <tr><td>4</td><td><code>24f1be8b</code> — fixture ownership-guard regressions</td><td>L-8 resolved with four distinct Docker-free mock scenarios. L-9 opened because two named identity assertions are tautological and do not inspect the resource-ledger ID. Changes requested.</td></tr>
+        <tr><td>5</td><td><code>59c571ef</code> — source-snapshot and ledger-assertion cleanup</td><td>L-9 resolved with creation/replacement/removal ledger-ID assertions. L-3 is partially resolved: redundant source-size state is gone and code/design declare reports internal, but README still promises a stable script-facing report. Changes requested.</td></tr>
+        <tr><td>6</td><td><code>56576063</code> — report-boundary documentation alignment</td><td>L-3 resolved: README now explicitly rejects versioned scripting compatibility, matching code and design. L-1 and L-2 remain deferred as separately planned architecture work.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Evidence</h2>
+    <table>
+      <thead><tr><th>Evidence</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>bash tests/run.sh</code></td><td>Pass on the current reviewed change: <code>PASS: all 1846 tests passed</code>.</td></tr>
+        <tr><td><code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh tests/runtime_matrix.sh</code></td><td>Pass.</td></tr>
+        <tr><td><code>shellcheck bin/ab agentbox-entrypoint.sh tests/runtime_matrix.sh</code></td><td>Pass.</td></tr>
+        <tr><td>Round 3 runtime-harness review</td><td>Static inspection confirms P13-09 records a blocked row for unavailable bridge reachability and records exact fixture ownership/removal. The reviewer did not invoke Docker/Sysbox because it is an external supported-runtime environment.</td></tr>
+        <tr><td>Round 4 source-mock review</td><td>Pass: the four ownership guard scenarios are present and exercised by the source suite. The reviewer did not invoke Docker/Sysbox because it is an external supported-runtime environment.</td></tr>
+        <tr><td>Round 5 source-snapshot/report-boundary review</td><td>Pass: redundant policy-source size capture is absent, and ownership tests assert ledger IDs. The reviewer did not invoke Docker/Sysbox because it is an external supported-runtime environment.</td></tr>
+        <tr><td>Round 6 report-boundary review</td><td>Pass: README, implementation comments, and the implementation plan consistently classify structured output as internal diagnostics, not a versioned external API.</td></tr>
+        <tr><td>Supported runtime record</td><td><a href="../RELEASE_CHECKLIST.md"><code>RELEASE_CHECKLIST.md</code></a> records an authorized Task 13 run with P13-01 through P13-08 passing, verified resource inventory, and cleanup.</td></tr>
+        <tr><td>Repository review history</td><td>All former review documents were read during this consolidation. Their resolved findings are intentionally not reproduced as active defects.</td></tr>
+      </tbody>
+    </table>
+
+    <footer>Rufus consolidated review record. This is the sole retained review document after historical artifact cleanup. It records open maintenance recommendations and durable guardrails; implementation changes remain outside reviewer ownership.</footer>
+  </main>
+</body>
+</html>

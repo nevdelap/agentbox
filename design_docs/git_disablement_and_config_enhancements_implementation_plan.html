@@ -514,8 +514,8 @@
       and readiness interfaces. Each task remains one independently reviewable Jujutsu change based
       directly on the then-current <code>main@origin</code>. These specifications add reporting,
       coordination, and recovery behavior; they must not weaken the Task 2–7 policy, mount,
-      decision, locking, volume-preservation, or fail-closed contracts. Rufus reviewed the initial
-      draft in <a href="../review_docs/impl_plan_tasks8-11.html">the Tasks 8–11 review</a>; the
+      decision, locking, volume-preservation, or fail-closed contracts. Rufus's historical review
+      context is retained in the <a href="../review_docs/leftovers_review.html">consolidated review record</a>; the
       guardrails below carry that review into implementation. Any further clarification is recorded
       in this plan rather than silently folded into a later task.
     </section>
@@ -553,7 +553,7 @@
       <code>rebuild</code> may recover a valid failed operation, beginning with fresh inspection
       and preserving named volumes.</p>
 
-      <p><strong>Task 9 result contract:</strong> Reports use the small stable result vocabulary
+      <p><strong>Task 9 internal result contract:</strong> Reports use the small deterministic result vocabulary
       <code>success</code>, <code>report-only</code>, <code>degraded</code>,
       <code>refused</code>, <code>invalid-state</code>, and <code>failed</code>. The exit-status
       mapping is <code>0</code> for success or report-only, <code>1</code> for an operational or
@@ -563,7 +563,9 @@
       <code>result</code>, <code>reason</code>, <code>phase</code>, known container identity,
       operation id/path when present, readiness, network state, retry direction, and cleanup
       permission. Human output may vary in whitespace, but these fields and tokens are tested
-      directly and no result may claim work that the decision forbids.</p>
+      directly and no result may claim work that the decision forbids. This is an internal
+      diagnostic interface, not a versioned external API; external compatibility requires explicit
+      authorization.</p>
 
       <p><strong>Focused review matrix:</strong> Task-local tests must cover policy mismatch with
       preserved project/jj/Docker volumes; failed recovery with a durable terminal record;
@@ -651,11 +653,11 @@
         <div>
           <h4>Scope</h4>
           <ul>
-            <li>Define stable command-facing outcomes for <code>start</code>, <code>start --apply</code>, <code>build</code>, <code>rebuild</code>, <code>claude</code>, <code>codex</code>, <code>bash</code>, <code>exec</code>, <code>status</code>, <code>logs</code>, <code>config</code>, <code>config init</code>, <code>stop</code>, and failure exits. Every outcome must identify the decision/result kind, reason or failed phase, container identity when known, operation id/path when applicable, readiness, network outcome, retry command, and cleanup permission.</li>
+            <li>Define deterministic command-facing outcomes for <code>start</code>, <code>start --apply</code>, <code>build</code>, <code>rebuild</code>, <code>claude</code>, <code>codex</code>, <code>bash</code>, <code>exec</code>, <code>status</code>, <code>logs</code>, <code>config</code>, <code>config init</code>, <code>stop</code>, and failure exits. Every outcome must identify the decision/result kind, reason or failed phase, container identity when known, operation id/path when applicable, readiness, network outcome, retry command, and cleanup permission.</li>
             <li>Make <code>ab config</code> a read-only report of all contributing policy files, effective values and sources, recorded labels, mount/label deltas, operation state, exact diagnostic, and retry command. It must inspect and validate recorded state before the courtesy update request, never mutate Docker or policy files, and never make a network request when inspection or policy validation fails.</li>
             <li>Make <code>ab status</code> report outer lifecycle, nested readiness, operation id, terminal/retry state, and whether ordinary execution or explicit diagnostics are permitted. Make <code>ab logs</code> expose bounded entrypoint/nested-daemon diagnostics and failed phase while preserving record and credential privacy.</li>
             <li>Keep <code>stop</code> available for an outer container in every Task 8/11 failure state. It must not erase a non-complete record or named volumes and must report a failed stop distinctly from a successful stop or absent container.</li>
-            <li>Keep human-readable output deterministic enough for scripts and tests: stable field names, stable decision/reason tokens, exact exit-status categories, no secret/path leakage beyond the approved record and policy-report fields, and no interleaving of update notices with structured operation results.</li>
+            <li>Keep human-readable output deterministic enough for tests and internal consumers: deterministic field names and decision/reason tokens, exact exit-status categories, no secret/path leakage beyond the approved record and policy-report fields, and no interleaving of update notices with structured operation results.</li>
             <li>Preserve <code>config init</code> as an explicit configuration-file operation. Report each copied, existing, invalid, or unknown requested file and its aggregate exit result without treating initialization as permission to start/recreate a container.</li>
           </ul>
         </div>
@@ -810,7 +812,7 @@
           <tr><td><strong>T12-02</strong><br>Retained: <code>Task 3 canonical identity and mount safety</code> and <code>Task 4 mount specification</code>; new: <code>T12-mount-snapshot-race</code></td><td>Protected/custom destinations, changed policy/mount source between snapshot and mutation, Git enabled/disabled.</td><td>Safe destinations are emitted; changed sources refuse before final mount construction.</td><td>No custom protected mount, policy mount, Docker mutation, or volume change after refusal.</td></tr>
           <tr><td><strong>T12-03</strong><br>Retained: <code>Task 6 policy decisions</code>; new: <code>T12-command-state-matrix</code></td><td>Absent, matching, stale, invalid, legacy, and contradictory records across start/build/rebuild/convenience/exec.</td><td>Exact decision kind, exit category, permissions, retry direction, and update eligibility match the accepted matrix.</td><td>Refused or invalid rows make no unauthorized Docker, network, update, or policy-file call.</td></tr>
           <tr><td><strong>T12-04</strong><br>Retained: <code>Task 7 durable operation records and lifecycle handoff</code> and <code>Task 8 operation-state projection</code>; new: <code>T12-recovery-permission-matrix</code></td><td>Every non-complete status, complete-ready, malformed, incomplete, and inconsistent operation record, plus mocked removal/create/required-network/optional-network/readiness/cleanup faults.</td><td>Projection preserves fields and gives explicit execution/mutation/update/diagnostic/retry/cleanup permissions; each injected fault produces its documented terminal record; apply/rebuild begins fresh inspection.</td><td>Read-only inspection never rewrites state; failed/invalid records and named volumes are retained; no injected fault authorizes an unmocked Docker mutation.</td></tr>
-          <tr><td><strong>T12-05</strong><br>Retained: <code>Task 9 command reports</code>; new: <code>T12-readonly-report-matrix</code></td><td>Config/status/logs/stop against running, stopped, readiness-failed, degraded, and invalid states.</td><td>Stable result/reason/phase/identity/retry fields and exact exit categories; stop remains recovery-safe.</td><td>Reports make zero Docker/network/update/policy mutation calls and emit no credentials.</td></tr>
+          <tr><td><strong>T12-05</strong><br>Retained: <code>Task 9 command reports</code>; new: <code>T12-readonly-report-matrix</code></td><td>Config/status/logs/stop against running, stopped, readiness-failed, degraded, and invalid states.</td><td>Deterministic result/reason/phase/identity/retry fields and exact exit categories; stop remains recovery-safe.</td><td>Reports make zero Docker/network/update/policy mutation calls and emit no credentials.</td></tr>
           <tr><td><strong>T12-06</strong><br>Retained: <code>Task 10 update coordination and retry identity</code>, <code>public update and project-lock evidence</code>, <code>public project-lock contention</code>, and <code>public retry recovery</code></td><td>Fresh/stale/malformed/offline/rate-limited cache; two projects; same-project contention; repeated retry.</td><td>One bounded refresh, atomic cache, 30-second lock behavior, fresh operation ids, stable image/volume identity.</td><td>Update failures do not change product results; contention prevents duplicate mutation.</td></tr>
           <tr><td><strong>T12-07</strong><br>Retained: <code>Task 11 readiness handoff and integrated recovery</code>; new: <code>T12-readiness-permission-matrix</code></td><td>Starting, ready, failed-but-running, failed-and-exited, replacement-attempted; generic exec and nested-dependent commands.</td><td>Exact readiness transition, diagnostic-only/blocked permission, one replacement limit, and stored retry state.</td><td>Live daemon is never killed or duplicated; outer container, record, and inner-Docker volume remain available.</td></tr>
           <tr><td><strong>T12-08</strong><br>Retained: <code>cmd_config_init</code> and <code>runtime grant options</code></td><td>Copyable, existing, invalid, unknown config files; GitHub/SSH missing, unreadable, symlinked, empty, and writable <code>known_hosts</code> sources.</td><td>Per-file result and aggregate exit are deterministic; grant source validation and mount mode match policy.</td><td>Initialization and report paths do not start/recreate containers or expose credential contents.</td></tr>
@@ -854,7 +856,7 @@
         </div>
       </div>
       <h4>Finite risk-based runtime matrix</h4>
-      <p>The matrix is eight fixed rows, not a Cartesian product. Each row runs in the isolated
+      <p>The matrix is nine fixed rows, not a Cartesian product. Each row runs in the isolated
       test project and uses the named command sequence; a row is <code>pass</code> only when all
       listed assertions pass.</p>
       <table>
@@ -868,6 +870,7 @@
           <tr><td><strong>P13-06</strong><br>Runtime recovery/report</td><td>After a successful start, stop the exact outer container with <code>docker stop &lt;recorded-id&gt;</code>; run <code>config</code>, <code>status</code>, <code>logs</code>, <code>stop</code>, and explicit <code>ab start</code> recovery.</td><td>Reports remain available and read-only; the outer lifecycle and named volumes recover; no failed state is silently cleaned or used. Removal/creation/network/invalid-record/cleanup fault cases are covered by Task 12 mocks, not this row.</td></tr>
           <tr><td><strong>P13-07</strong><br>Nested readiness</td><td>Inside the isolated outer container, terminate only the recorded inner <code>dockerd</code> PID; run status/logs/config and one outer recovery. Do not attempt synthetic persistent non-ready or Docker API faults.</td><td>Runtime-reproducible readiness transitions and the 30-second bound are recorded; only the previously recorded inner daemon may be terminated, and no host daemon, outer daemon, or unrelated inner daemon may be killed or started. At most one permitted replacement may start; the outer container and inner-Docker volume remain available. The complete state/fault matrix is Task 12 coverage.</td></tr>
           <tr><td><strong>P13-08</strong><br>Retry and cleanup</td><td>Repeat one runtime-reproducible readiness retry and then a successful completion in the same isolated project.</td><td>Operation ids distinguish attempts, image/volume identity remains stable, cleanup occurs only after complete-ready verification, and the final inventory is empty. Mock-only failed/degraded retry variants remain in Task 12.</td></tr>
+          <tr><td><strong>P13-09</strong><br>Customization fixture</td><td>Provision an isolated env file, setup script, writable custom mount, and known host TCP endpoint before starting the project container.</td><td>The env value reaches the container, setup writes its completion marker, the custom mount has the declared writable mode and content, the known endpoint responds in the Docker daemon's host network, and a project-container loopback request completes through the live forwarder. If bridge-to-host reachability is unavailable, record the row as an explicit blocked prerequisite rather than passing without the round-trip assertion.</td></tr>
         </tbody>
       </table>
       <h4>Harness contract</h4>
@@ -878,7 +881,7 @@
         <li>Do not add a production run-label input or rename launcher resources. Before the first mutation, compute the exact expected container/volume names from the isolated project and machine, assert that each is absent, and record every exact name and ID observed from this run. Record any attached or harness-created network by exact name and ID; a harness-created network may carry a harness-only label, but production resources need no new label.</li>
         <li>Cleanup verifies that each resource still has the recorded exact name/ID, was absent during preflight, and is owned by this run before removing it. It removes only those recorded containers, volumes, and networks; it never scans or removes a prefix, label set, or unrelated resource.</li>
         <li>Each row has a 30-second lifecycle/readiness timeout, a 180-second row timeout, and a 15-minute whole-run timeout. Timeout is a failure, not an implicit pass.</li>
-        <li>An exit of <code>0</code> means all eight rows passed, <code>1</code> means a product/assertion failure, and <code>3</code> means prerequisites were unavailable. The result file contains <code>schema=1</code>, overall status, exact versions, invocation, row id/status/diagnostic, resource inventory, cleanup status, and timestamps.</li>
+        <li>An exit of <code>0</code> means all nine rows passed, <code>1</code> means a product/assertion failure, and <code>3</code> means prerequisites were unavailable. The result file contains <code>schema=1</code>, overall status, exact versions, invocation, row id/status/diagnostic, resource inventory, cleanup status, and timestamps.</li>
         <li>An unconditional shell trap records the current row, inventories the exact recorded resources, attempts bounded cleanup, records cleanup failures, and preserves the result file. Fixture credentials and private key contents never enter the result.</li>
       </ul>
       <h4>Tests</h4>

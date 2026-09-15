@@ -27,7 +27,6 @@ docker_readiness_daemon_evidence=none
 docker_readiness_wait_attempts=0
 docker_readiness_diagnostic=""
 docker_readiness_terminal_failure=0
-docker_readiness_transition_log=""
 docker_readiness_launch_observed=0
 docker_readiness_launch_pid=""
 # Per-project named volume mounted here by bin/ab. It contains jj's writable repo/workspace
@@ -78,7 +77,6 @@ docker_readiness_state_set() {
   docker_readiness_state="$state"
   docker_readiness_daemon_evidence="$evidence"
   docker_readiness_diagnostic="$diagnostic"
-  docker_readiness_transition_log="${docker_readiness_transition_log:+$docker_readiness_transition_log }$state"
   case "$state" in
     ready) docker_readiness_retryable=0; docker_readiness_terminal_failure=0 ;;
     failed-but-running|failed-and-exited|replacement-attempted)
@@ -205,7 +203,6 @@ ensure_dockerd() {
   docker_readiness_daemon_evidence=none
   docker_readiness_wait_attempts=0
   docker_readiness_diagnostic=""
-  docker_readiness_transition_log=""
   docker_readiness_launch_observed=0
   docker_readiness_launch_pid=""
   docker_readiness_state_set starting launch-requested
