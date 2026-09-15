@@ -58,11 +58,11 @@
       <div class="eyebrow">IMPLEMENTATION PLAN</div>
       <h1>Agentbox Git Disablement</h1>
       <p class="subtitle">Ordered implementation breakdown for the Git disablement and configuration enhancements.</p>
-      <p class="meta">Planning pass · Tasks 1–13 are merged; task 14 is the active release-cleanup task.</p>
+      <p class="meta">Planning pass · Tasks 1–14 are merged; tasks 15–16 are planned architecture follow-up.</p>
     </header>
 
     <section class="callout">
-      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–13 are complete and their detailed specifications remain below in collapsed sections for traceability. Task 14 is the active release-cleanup task. The full system design remains in the design document.
+      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–14 are complete and their detailed specifications remain below in collapsed sections for traceability. Tasks 15–16 are planned architecture follow-up for the deferred L-1 and L-2 findings. The full system design remains in the design document.
     </section>
 
     <h2>Implementation tasks</h2>
@@ -166,12 +166,28 @@
           <td>Own the supported-runtime checks removed from Task 4: direct <code>git</code>, jj, <code>gh --version</code>, Git-dependent <code>gh</code>, Git-config absence, workspace/.git/jj preservation, plus the full Docker/Sysbox lifecycle matrix for credential mounts, policy transitions, labels, volumes, nested runtime behavior, reports, retries, and cleanup.</td>
           <td>12</td>
         </tr>
+        <tr class="group"><td colspan="5">Completed release cleanup — task 14 is merged and its documentation and evidence are recorded in the repository.</td></tr>
         <tr id="task-14-definition">
           <td>14</td>
-          <td>Release<br><span class="status">In progress</span></td>
+          <td>Release<br><span class="status">Merged</span></td>
           <td><a href="#task-14-spec">Interface documentation and release cleanup</a></td>
           <td>Update user-facing help, README material, design status, implementation notes, and release checks to reflect the completed Git disablement implementation.</td>
           <td>12, 13</td>
+        </tr>
+        <tr class="group"><td colspan="5">Deferred architecture follow-up — tasks 15–16 specify the remaining L-1 and L-2 work without changing accepted behavior.</td></tr>
+        <tr id="task-15-definition">
+          <td>15</td>
+          <td>Architecture<br><span class="status">Planned</span></td>
+          <td><a href="#task-15-spec">Lifecycle state ownership and projection consolidation</a></td>
+          <td>Reduce overlapping mutable lifecycle fields to one authoritative durable operation record and one derived operation-state projection while preserving the accepted status and permission contracts.</td>
+          <td>14</td>
+        </tr>
+        <tr id="task-16-definition">
+          <td>16</td>
+          <td>Architecture<br><span class="status">Planned</span></td>
+          <td><a href="#task-16-spec">Narrow lifecycle interface extraction</a></td>
+          <td>Isolate record codec, decision projection, and report rendering behind narrow internal interfaces without an arbitrary rewrite, second lifecycle, or public report API.</td>
+          <td>15</td>
         </tr>
       </tbody>
     </table>
@@ -767,17 +783,18 @@
       </ul>
     </details>
 
-    <h2>Remaining task specifications</h2>
+    <h2>Completed and remaining task specifications</h2>
     <section class="callout">
-      <strong>Remaining-work boundary:</strong> Tasks 12–14 validate, document, and package the
-      merged implementation. They must not reopen or silently change the accepted behavior of
-      tasks 1–11. A newly discovered product defect belongs in a separately scoped implementation
-      change; a test or documentation correction belongs to the remaining task that owns it.
+      <strong>Task boundary:</strong> Tasks 12–14 validate, document, and package the merged
+      implementation. Tasks 15–16 address only the deferred architecture findings L-1 and L-2;
+      they must not reopen or silently change the accepted behavior of tasks 1–14. A newly
+      discovered product defect belongs in a separately scoped implementation change; a test or
+      documentation correction belongs to the task that owns it.
       Task 13 may require a supported Docker/Sysbox host, but it must never use the developer’s
       real credentials, project data, containers, or named volumes.
     </section>
 
-    <details class="task-spec" open>
+    <details class="task-spec">
       <summary><span class="task-title" id="task-12-spec" role="heading" aria-level="3"><a href="#task-12-definition">Task 12 — Focused tests and mocked lifecycle coverage</a></span></summary>
       <p><strong>Normative references:</strong> the accepted task contracts above, especially the
       Task 6 decision matrix, Task 7 terminal handoff, the Task 8 operation projection, the Task 9
@@ -833,7 +850,7 @@
       </ul>
     </details>
 
-    <details class="task-spec" open>
+    <details class="task-spec">
       <summary><span class="task-title" id="task-13-spec" role="heading" aria-level="3"><a href="#task-13-definition">Task 13 — End-to-end runtime validation</a></span></summary>
       <p><strong>Normative references:</strong> <a href="git_disablement_and_config_enhancements.html">Runtime and mount behavior</a>, <a href="git_disablement_and_config_enhancements.html">Apply atomicity and failure recovery</a>, and the completed Task 7–11 acceptance contracts.</p>
       <div class="spec-grid">
@@ -900,7 +917,7 @@
       </ul>
     </details>
 
-    <details class="task-spec" open>
+    <details class="task-spec">
       <summary><span class="task-title" id="task-14-spec" role="heading" aria-level="3"><a href="#task-14-definition">Task 14 — Interface documentation and release cleanup</a></span></summary>
       <p><strong>Normative references:</strong> the public interface and policy-file sections of
       <a href="git_disablement_and_config_enhancements.html">the design document</a>, the accepted
@@ -910,7 +927,7 @@
           <h4>Scope</h4>
           <ul>
             <li>Update <code>README.md</code> and command help to document jj-first/no-Git behavior, GitHub and SSH grants, policy-file tiers and precedence, boolean inputs, config/report output, refusal and recovery commands, update-check controls, and runtime prerequisites.</li>
-            <li>Update implementation status and notes in <code>design_docs/</code> so they identify tasks 1–13 as complete or verified where evidence exists, and identify any runtime prerequisite or explicitly blocked validation without overstating completion.</li>
+            <li>Update implementation status and notes in <code>design_docs/</code> so they identify tasks 1–14 as complete or verified where evidence exists, and identify any runtime prerequisite or explicitly blocked validation without overstating completion.</li>
             <li>Document the supported safety boundaries: credentials are explicit mounts, policy files contain no secrets, failed operations retain diagnostics and named volumes, and only authorized recovery paths mutate failed state.</li>
             <li>Perform release cleanup for stale examples, contradictory terminology, dead links, temporary test artifacts, and generated files. Explicitly exclude <code>review_docs/</code> and review-named documents under <code>design_docs/</code>; do not edit, remove, or rename them. Report any existing stale reviewer-owned artifact to Rufus.</li>
           </ul>
@@ -939,14 +956,111 @@
       </ul>
     </details>
 
+    <h2>Deferred architecture follow-up specifications</h2>
+    <section class="callout">
+      <strong>Architecture boundary:</strong> Tasks 15 and 16 are a new, separate follow-up
+      group for the deferred L-1 and L-2 findings in the consolidated review. They are not part of
+      the merged Task 14 release change. They must preserve the accepted command, operation,
+      readiness, permission, locking, volume, and internal-diagnostic contracts. Neither task may
+      add a second lifecycle, durable record, lock, supervisor, event history, or public report API.
+    </section>
+
+    <details class="task-spec" open>
+      <summary><span class="task-title" id="task-15-spec" role="heading" aria-level="3"><a href="#task-15-definition">Task 15 — Lifecycle state ownership and projection consolidation</a></span></summary>
+      <p><strong>Normative references:</strong> the Task 7 durable operation-record contract, the
+      Task 8 operation-state projection, the Task 9 internal result contract, and consolidated
+      review finding L-1 in <a href="../review_docs/leftovers_review.html">the review record</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Inventory lifecycle fields in <code>bin/ab</code> and assign each field one authoritative owner: the durable operation record for persisted lifecycle state, the derived <code>operation_state</code> projection for consumer handoff, or a command-local input/output that is not duplicated in either.</li>
+            <li>Deliver the inventory as <code>design_docs/task15_lifecycle_ownership.html</code>. Its required table columns are <code>field</code>, <code>owner</code>, <code>writers</code>, <code>readers</code>, <code>persistence</code>, <code>projection_path</code>, and <code>approved_exception</code>. <code>approved_exception</code> must be <code>none</code> or identify a written review finding and explicit human authorization; a prose justification alone is not approval.</li>
+            <li>The inventory must contain one row for every mutable lifecycle field in the reviewed surface: <code>operation_record_path</code>, <code>operation_record_dir</code>, <code>operation_id</code>, <code>operation_phase</code>, <code>operation_status</code>, <code>operation_started_at</code>, <code>operation_completed_at</code>, <code>operation_old_container_id</code>, <code>operation_new_container_id</code>, <code>operation_record_container_name</code>, <code>operation_record_policy_digest</code>, <code>operation_record_inner_docker_volume</code>, <code>operation_record_jj_volume</code>, <code>operation_image_reference</code>, <code>operation_network_outcomes</code>, <code>operation_diagnostic</code>, <code>operation_readiness_result</code>, <code>operation_readiness_operation_id</code>, <code>operation_readiness_retryable</code>, <code>operation_readiness_replacement_attempted</code>, <code>operation_readiness_daemon_evidence</code>, <code>operation_readiness_wait_attempts</code>, <code>operation_readiness_wait_bound_seconds</code>, <code>operation_readiness_diagnostic</code>, <code>operation_task_status</code>, <code>operation_agent_execution</code>, <code>operation_explicit_exec</code>, <code>operation_retry_command</code>, <code>operation_record_cleanup</code>, <code>operation_failed_phase</code>, <code>operation_connect_network_status</code>, and <code>operation_record_active</code>.</li>
+            <li>The same inventory must explicitly include projection fields <code>operation_state_record_path</code>, <code>operation_state_operation_id</code>, <code>operation_state_phase</code>, <code>operation_state_terminal_status</code>, <code>operation_state_container_name</code>, <code>operation_state_outer_lifecycle</code>, <code>operation_state_container_id</code>, <code>operation_state_old_container_id</code>, <code>operation_state_new_container_id</code>, <code>operation_state_policy_digest</code>, <code>operation_state_image_reference</code>, <code>operation_state_named_volumes</code>, <code>operation_state_network_state</code>, <code>operation_state_readiness_state</code>, <code>operation_state_readiness_operation_id</code>, <code>operation_state_readiness_retryable</code>, <code>operation_state_readiness_replacement_attempted</code>, <code>operation_state_readiness_daemon_evidence</code>, <code>operation_state_readiness_wait_attempts</code>, <code>operation_state_readiness_wait_bound_seconds</code>, <code>operation_state_readiness_diagnostic</code>, <code>operation_state_diagnostic</code>, <code>operation_state_retry_command</code>, <code>operation_state_cleanup_allowed</code>, <code>operation_state_execution_allowed</code>, <code>operation_state_mutation_allowed</code>, <code>operation_state_update_allowed</code>, <code>operation_state_diagnostic_allowed</code>, <code>operation_state_explicit_exec_mode</code>, and <code>operation_state_valid</code>.</li>
+            <li>The decision inventory must explicitly include <code>policy_operation_status</code>, <code>policy_readiness_result</code>, <code>policy_decision_kind</code>, <code>policy_decision_reason_code</code>, <code>policy_decision_mutation_allowed</code>, <code>policy_decision_execution_allowed</code>, <code>policy_decision_explicit_exec_mode</code>, <code>policy_decision_update_allowed</code>, and <code>policy_decision_explicit_apply_required</code>, alongside <code>command_report_result</code>, <code>command_report_reason</code>, <code>command_report_exit_status</code>, and <code>command_report_emitted</code>.</li>
+            <li>Unlisted lifecycle fields, writers, readers, copies, or projection paths are a Task 15 failure. Any exception must be bounded in the artifact, linked to written review evidence, and explicitly authorized by the human; “stated reason” is not an open-ended overlap allowance.</li>
+            <li>Define one explicit projection path from a validated durable record and current read-only inputs to the complete operation-state handoff. The projection must carry the existing status, readiness, retry, cleanup, and permission values without introducing a second vocabulary.</li>
+            <li>Make reports consume the derived projection only. Remove mutable report-side copies when a value can be read from the projection, while retaining command-local exit calculation where the accepted Task 9 contract requires it.</li>
+            <li>Preserve the existing operation-record fields, terminal statuses, readiness results, retry commands, cleanup rules, and permission semantics unless a separately authorized specification changes them.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary and deliverable</h4>
+          <ul>
+            <li>This task owns the lifecycle field-ownership map, record/projection conversion, and the tests proving that consumers use the projection. It does not extract files or modules; that is Task 16.</li>
+            <li>Do not add another durable record, mutable lifecycle state machine, lock, supervisor, transition history, per-process sequence, or public report compatibility layer.</li>
+            <li>The deliverable is the named ownership artifact, one authoritative record-to-projection path, and a single reviewable Jujutsu change with no unrelated behavior or formatting cleanup.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests</h4>
+      <ul>
+        <li>Task 15 owns unit-level ownership-map validation, field-to-projection tracing, and proof that report call sites consume only the projection. It does not repeat Task 16’s interface call-site compatibility tests or the full command-dispatch suite.</li>
+        <li>Test complete, in-progress, failed, degraded, readiness-failed, malformed, incomplete, and absent records, including explicit permission overlays and read-only report commands.</li>
+        <li>Trace mocked record reads and projection calls to prove reports do not read producer fields or rewrite durable state, and that refused paths make no unauthorized Docker, network, update, or policy mutation.</li>
+        <li>Run <code>bash tests/run.sh</code>, <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>, <code>just qformat</code>, <code>just qlint</code>, <code>just qtest</code>, and <code>just qcheck</code>.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>Every lifecycle value has one authoritative durable owner or one explicitly documented command-local owner; no overlapping mutable producer/record/projection/report copy remains unless the ownership artifact lists an approved exception.</li>
+        <li>All report call sites consume the one derived projection, and the projection exposes the exact existing permissions and retry/cleanup decisions.</li>
+        <li>Existing command results, exit categories, operation records, and readiness behavior remain unchanged, with regression evidence for every enumerated state.</li>
+        <li>The ownership artifact is exhaustive: an unlisted field or duplicate writer/reader is a failure.</li>
+        <li>The complete quiet repository gate passes and no second lifecycle vocabulary or state store is introduced.</li>
+      </ul>
+    </details>
+
+    <details class="task-spec" open>
+      <summary><span class="task-title" id="task-16-spec" role="heading" aria-level="3"><a href="#task-16-definition">Task 16 — Narrow lifecycle interface extraction</a></span></summary>
+      <p><strong>Normative references:</strong> the accepted Task 15 ownership map, the Task 7
+      durable record contract, the Task 8 projection contract, the Task 9 internal result contract,
+      and consolidated review finding L-2 in <a href="../review_docs/leftovers_review.html">the
+      review record</a>.</p>
+      <div class="spec-grid">
+        <div>
+          <h4>Scope</h4>
+          <ul>
+            <li>Isolate the record codec, decision/projection adapter, and report renderer behind narrow internal interfaces that make their inputs, outputs, and side effects explicit.</li>
+            <li>Keep the existing launcher entry points and shell execution model. Extraction may use sourced internal modules or equivalent seams, but it must not become a broad rewrite performed merely to distribute lines across files.</li>
+            <li>Route all record reads/writes, projection construction, and report rendering through the interfaces established by Task 15. Preserve the internal diagnostic boundary: no versioned public report API is created.</li>
+            <li>Keep the per-project lock, one durable record, one projection, existing state vocabulary, and existing Docker/readiness lifecycle intact.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Boundary and deliverable</h4>
+          <ul>
+            <li>This task owns narrow interface extraction and its call-site migration. It does not add lifecycle behavior, new policy semantics, event history, retry lineage, a second lock, or a process supervisor.</li>
+            <li>Interface boundaries must remain internal implementation seams. Changes to command output, exit status, record fields, or permissions require a separately authorized specification and review.</li>
+            <li>The deliverable is a small, reviewable set of internal interfaces with ownership and side-effect documentation, plus focused contract tests and unchanged end-to-end behavior.</li>
+          </ul>
+        </div>
+      </div>
+      <h4>Tests</h4>
+      <ul>
+        <li>Task 16 owns interface contract tests, call-site routing tests, and compatibility comparison with the accepted Task 15 baseline. It does not repeat Task 15’s exhaustive field-ownership and projection-tracing matrix.</li>
+        <li>Exercise record encode/decode, projection construction, and report rendering through their interfaces with valid, absent, malformed, and failure-state fixtures.</li>
+        <li>Use call tracing to prove that report call sites route through the report interface, record writes remain atomic and scoped, and interface adapters perform no unauthorized Docker, network, update, or lifecycle mutation.</li>
+        <li>Compare command results, report fields, exit statuses, operation records, and cleanup permissions with the Task 15 baseline through the interface seams, not by duplicating its field matrix.</li>
+        <li>Run <code>bash tests/run.sh</code>, <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>, <code>just qformat</code>, <code>just qlint</code>, <code>just qtest</code>, and <code>just qcheck</code>.</li>
+      </ul>
+      <h4>Acceptance criteria</h4>
+      <ul>
+        <li>Record codec, decision/projection, and report rendering each have a narrow documented interface and no hidden lifecycle ownership.</li>
+        <li>All production call sites use those interfaces; no duplicate record parser, projection, report renderer, lifecycle vocabulary, lock, or supervisor exists.</li>
+        <li>Behavior and internal diagnostic output remain compatible with the accepted Task 15 baseline, and all negative/no-side-effect tests pass.</li>
+        <li>The complete quiet repository gate passes without requiring new undeclared host dependencies.</li>
+      </ul>
+    </details>
+
     <h2>Task review handoff</h2>
     <section class="callout">
       For each remaining task, Igor’s handoff must list the changed files, explicitly identify any requested out-of-scope change, show the task-local test commands and results, and map every acceptance criterion to evidence. The reviewer must verify that no later-task behavior was smuggled into the task, that the mandatory shell checks pass, and that the implementation matches the task’s stated boundaries. A task is accepted only when both the implementation evidence and the reviewer’s criterion-by-criterion result are present.
     </section>
 
-    <p class="note">Tasks 1–13 are merged. Task 14 finalizes the user-facing interface and release record. Reordering the active task requires updating its dependency column and preserving the separation between this plan and the normative design.</p>
+    <p class="note">Tasks 1–14 are merged. Task 15 is the next planned architecture task, followed by Task 16. Reordering the active task requires updating its dependency column and preserving the separation between this plan and the normative design.</p>
 
-    <footer>This is an implementation plan with completed task records and the active task 14 release specification, not the complete system behavioral specification.</footer>
+    <footer>This is an implementation plan with completed task records and the planned architecture follow-up specifications, not the complete system behavioral specification.</footer>
   </main>
 </body>
 </html>
