@@ -1,0 +1,5 @@
+interface|implementation|inputs|outputs|side_effects|forbidden_effects
+lifecycle_record_read|operation_record_load|project identity and operation_record_path globals|decoded record fields and one projection in process state|reads one scoped host record|Docker, network, update, policy, or lifecycle mutation
+lifecycle_record_write|operation_record_write|operation producer fields and operation_record_path globals|return status and one atomically replaced record|creates/chmods one scoped directory and renames one temporary record|Docker, network, update, or policy decision
+lifecycle_projection_build|operation_state_publish|policy decision and operation producer fields|one operation_state_* projection in process state|process-memory assignment only|record, Docker, network, update, or lifecycle mutation
+lifecycle_report_render|command_report_emit|optional result/reason/exit override and current projection|report stdout plus report globals and return status|projection refresh and optional stdout output|record, Docker, network, update, or lifecycle mutation

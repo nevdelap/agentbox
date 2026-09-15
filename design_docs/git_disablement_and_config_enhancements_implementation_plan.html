@@ -58,11 +58,11 @@
       <div class="eyebrow">IMPLEMENTATION PLAN</div>
       <h1>Agentbox Git Disablement</h1>
       <p class="subtitle">Ordered implementation breakdown for the Git disablement and configuration enhancements.</p>
-      <p class="meta">Planning pass · Tasks 1–14 are merged; tasks 15–16 are planned architecture follow-up.</p>
+      <p class="meta">Implementation pass · Tasks 1–15 are merged; task 16 is the active architecture follow-up.</p>
     </header>
 
     <section class="callout">
-      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–14 are complete and their detailed specifications remain below in collapsed sections for traceability. Tasks 15–16 are planned architecture follow-up for the deferred L-1 and L-2 findings. The full system design remains in the design document.
+      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–15 are complete and their detailed specifications remain below in collapsed sections for traceability. Task 16 is the active architecture follow-up for the deferred L-2 finding. The full system design remains in the design document.
     </section>
 
     <h2>Implementation tasks</h2>
@@ -174,17 +174,17 @@
           <td>Update user-facing help, README material, design status, implementation notes, and release checks to reflect the completed Git disablement implementation.</td>
           <td>12, 13</td>
         </tr>
-        <tr class="group"><td colspan="5">Deferred architecture follow-up — tasks 15–16 specify the remaining L-1 and L-2 work without changing accepted behavior.</td></tr>
+        <tr class="group"><td colspan="5">Deferred architecture follow-up — task 15 is merged; task 16 is active for the remaining L-2 work without changing accepted behavior.</td></tr>
         <tr id="task-15-definition">
           <td>15</td>
-          <td>Architecture<br><span class="status">Planned</span></td>
+          <td>Architecture<br><span class="status">Merged</span></td>
           <td><a href="#task-15-spec">Lifecycle state ownership and projection consolidation</a></td>
           <td>Reduce overlapping mutable lifecycle fields to one authoritative durable operation record and one derived operation-state projection while preserving the accepted status and permission contracts.</td>
           <td>14</td>
         </tr>
         <tr id="task-16-definition">
           <td>16</td>
-          <td>Architecture<br><span class="status">Planned</span></td>
+          <td>Architecture<br><span class="status">In progress</span></td>
           <td><a href="#task-16-spec">Narrow lifecycle interface extraction</a></td>
           <td>Isolate record codec, decision projection, and report rendering behind narrow internal interfaces without an arbitrary rewrite, second lifecycle, or public report API.</td>
           <td>15</td>
@@ -965,7 +965,7 @@
       add a second lifecycle, durable record, lock, supervisor, event history, or public report API.
     </section>
 
-    <details class="task-spec" open>
+    <details class="task-spec">
       <summary><span class="task-title" id="task-15-spec" role="heading" aria-level="3"><a href="#task-15-definition">Task 15 — Lifecycle state ownership and projection consolidation</a></span></summary>
       <p><strong>Normative references:</strong> the Task 7 durable operation-record contract, the
       Task 8 operation-state projection, the Task 9 internal result contract, and consolidated
@@ -1058,7 +1058,7 @@
       For each remaining task, Igor’s handoff must list the changed files, explicitly identify any requested out-of-scope change, show the task-local test commands and results, and map every acceptance criterion to evidence. The reviewer must verify that no later-task behavior was smuggled into the task, that the mandatory shell checks pass, and that the implementation matches the task’s stated boundaries. A task is accepted only when both the implementation evidence and the reviewer’s criterion-by-criterion result are present.
     </section>
 
-    <p class="note">Tasks 1–14 are merged. Task 15 is the next planned architecture task, followed by Task 16. Reordering the active task requires updating its dependency column and preserving the separation between this plan and the normative design.</p>
+    <p class="note">Tasks 1–15 are merged. Task 16 is the active architecture task. Reordering the active task requires updating its dependency column and preserving the separation between this plan and the normative design.</p>
 
     <footer>This is an implementation plan with completed task records and the planned architecture follow-up specifications, not the complete system behavioral specification.</footer>
   </main>

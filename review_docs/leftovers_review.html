@@ -34,14 +34,14 @@
   <main>
     <header>
       <div class="eyebrow">RUFUS CONSOLIDATED REVIEW</div>
-      <h1>Tasks 1–14 — remaining review items</h1>
-      <p class="meta">Consolidated 2026-09-16 · reviewed implementation baseline <code>096f3140</code> (Task 14) · Task 15 change <code>40b2b485</code> · through review round 15</p>
+      <h1>Tasks 1–16 — remaining review items</h1>
+      <p class="meta">Consolidated 2026-09-16 · reviewed implementation baseline <code>096f3140</code> (Task 14) · Task 16 change <code>c1ba246c</code> · through review round 18</p>
     </header>
 
     <section class="hero">
       <strong>Disposition: two active findings; historical task reviews closed.</strong>
       <p>This document replaces the task-by-task, planning, interim, architecture, and test-coverage review artifacts formerly held in <code>review_docs/</code>. Every historical task finding was reviewed: the task reviews are accepted and their findings are resolved. The current implementation change resolves the duplicate decision-table, repeated readiness-fixture, runtime-forwarding, helper-container ownership, ownership-guard coverage, and report-boundary findings. It also removes redundant policy-source size state. Task 15 now routes command reports through the projection, adds the required ownership artifact, and uses a machine-readable contract to keep the artifact and tests aligned.</p>
-      <p><strong>Current quality grade: B+</strong> <span>(A+–F scale)</span>. The source suite and static shell checks pass, and the projection boundary is materially clearer. L-1/L-2 remain deferred implementation findings; Task 15’s review findings are resolved.</p>
+      <p><strong>Current quality grade: B+</strong> <span>(A+–F scale)</span>. The source suite and static shell checks pass, the projection boundary is materially clearer, and Task 16 resolves L-2 with narrow internal interfaces. L-1 remains the only deferred architecture finding; Tasks 15–16 review findings are resolved.</p>
     </section>
 
     <h2>Findings and resolution status</h2>
@@ -54,9 +54,9 @@
           <td>The lifecycle has overlapping mutable producer fields, durable-record fields, operation-state fields, decision fields, and report fields. Keep one authoritative durable record and one derived projection; have reports consume that projection. Do not introduce another lifecycle vocabulary, record, lock, or supervisor.</td>
         </tr>
         <tr>
-          <td>L-2</td><td>Medium</td>
-          <td><a href="../bin/ab"><code>bin/ab</code></a></td>
-          <td>The 4,639-line global Bash program makes stateful changes difficult to reason about. Do not rewrite it merely to split files. Before the next material feature, isolate the record codec, decision projection, and report rendering behind narrow interfaces.</td>
+          <td>L-2</td><td class="pass">Resolved</td>
+          <td><a href="../lib/lifecycle_interfaces.sh"><code>lib/lifecycle_interfaces.sh:1–46</code></a>, <a href="../bin/ab"><code>bin/ab:982–1277, 3379–3614, 4334–4659</code></a></td>
+          <td>Task 16 adds narrow internal adapters for record read/write, projection construction, and report rendering, then routes all production call sites through them. The implementation bodies remain in <code>bin/ab</code> under the existing vocabulary and state store, which is consistent with the task boundary; the interface isolation requirement is met.</td>
         </tr>
         <tr>
           <td>L-3</td><td class="pass">Resolved</td>
@@ -141,6 +141,21 @@
       </tbody>
     </table>
 
+    <h2>Task 16 implementation review</h2>
+    <section class="callout">
+      <p>Task 16 provides the intended narrow seams: record read, record write, projection build, and report render. The launcher remains intact, production call sites route through the adapters, and no second lifecycle or public report API was introduced. Contract-row coverage, direct adapter binding, routing, and compact baseline compatibility vectors are present.</p>
+    </section>
+    <table>
+      <thead><tr><th>ID</th><th>Severity</th><th>Location</th><th>Finding and required correction</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>T16-1</td><td class="pass">Resolved</td>
+          <td><a href="../tests/run.sh"><code>tests/run.sh:4894–5008</code></a>, <a href="../tests/contracts/lifecycle_interfaces.contract"><code>lifecycle_interfaces.contract:1–5</code></a>, <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html"><code>implementation_plan.html:1039–1052</code></a></td>
+          <td>The tests parse and semantically validate all four contract rows, assert that each adapter body delegates to its declared implementation, and add compact absent/failed/complete compatibility vectors covering report results, reasons, exit statuses, operation state, and cleanup permission. The interface extraction and its focused acceptance coverage are complete.</td>
+        </tr>
+      </tbody>
+    </table>
+
     <h2>Durable guardrails</h2>
     <section class="callout">
       <p>Keep the product local: one host, one project/machine identity, the existing container and named-volume lifecycle, and the existing nested Docker runtime. Do not turn reports into a public compatibility protocol, or add distributed coordination, a workflow engine, a general process supervisor, an event store, or an unbounded history model.</p>
@@ -154,9 +169,10 @@
       <tbody>
         <tr><td>Task reviews 1–14, Tasks 1–7 aggregate, and interim UX/bug-fix review</td><td class="pass">Accepted; all recorded findings resolved</td><td>No task-specific defect is carried forward.</td></tr>
         <tr><td>Tasks 1–14 scope review and Tasks 8–11 / 12–14 planning reviews</td><td class="pass">Planning findings closed in the completed plan</td><td>Only the local-scope, finite-matrix, no-second-lifecycle, and ownership guardrails above remain relevant.</td></tr>
-        <tr><td>Architecture-weight and test-coverage reviews</td><td>Superseded by this document</td><td>L-1 and L-2 remain active; L-3 through L-9 are resolved by the current reviewed change.</td></tr>
-        <tr><td>Tasks 15–16 deferred architecture plan</td><td class="pass">Accepted for implementation</td><td>The sequencing, ownership artifact, bounded exception rule, baseline gates, and test boundaries are sound. PL-1 and PL-2 are resolved; L-1/L-2 remain the deferred implementation work.</td></tr>
+        <tr><td>Architecture-weight and test-coverage reviews</td><td>Superseded by this document</td><td>L-1 remains active; L-2 and L-3 through L-9 are resolved by the current reviewed changes.</td></tr>
+        <tr><td>Tasks 15–16 deferred architecture plan</td><td class="pass">Accepted for implementation</td><td>The sequencing, ownership artifact, bounded exception rule, baseline gates, and test boundaries are sound. PL-1 and PL-2 are resolved; Task 16 resolves L-2, while L-1 remains deferred.</td></tr>
         <tr><td>Task 15 lifecycle ownership and projection implementation</td><td class="pass">Accepted</td><td>The projection/report boundary is materially improved and the source suite passes. T15-1, T15-2, and T15-3 are resolved.</td></tr>
+        <tr><td>Task 16 narrow lifecycle interface extraction</td><td class="pass">Accepted</td><td>The adapter seams and call-site migration are correct, L-2 is resolved, and T16-1 is resolved through contract semantics, direct adapter binding, routing, and baseline compatibility coverage.</td></tr>
       </tbody>
     </table>
 
@@ -179,6 +195,9 @@
         <tr><td>13</td><td><code>6e4ab873</code> — Task 15 semantic ownership checks</td><td>T15-1 resolved: every ownership row now has expected semantic metadata assertions, and T15-2 remains resolved. T15-3 opened as a low-severity maintainability concern because the expected matrix is duplicated in Bash and HTML and is not tied to the source’s actual writer/reader paths. Changes requested for the follow-up.</td></tr>
         <tr><td>14</td><td><code>c382b3a5</code> — Task 15 machine-readable ownership contract</td><td>T15-3 resolved: the expected ownership matrix moved to <code>task15_lifecycle_ownership.contract</code>, the HTML artifact is checked against it, and the source suite still passes. Task 15 is accepted; only deferred L-1/L-2 architecture findings remain.</td></tr>
         <tr><td>15</td><td><code>40b2b485</code> — relocated lifecycle ownership contract</td><td>Re-review confirms the contract now lives under <code>tests/contracts/</code>, the test points to the relocated path, the HTML artifact documents the source, and all contract/artifact/source cardinality checks pass. No new implementation defect found.</td></tr>
+        <tr><td>16</td><td><code>73af104b</code> — Task 16 narrow lifecycle interface extraction</td><td>L-2 resolved: record read/write, projection build, and report rendering have documented internal adapters and all production call sites route through them. T16-1 opened because contract semantics and explicit Task 15 baseline compatibility are not fully tested. Changes requested.</td></tr>
+        <tr><td>17</td><td><code>b3b9e553</code> — Task 16 contract and compatibility follow-up</td><td>T16-1 partially resolved: contract semantics are now asserted and compact Task 15 compatibility vectors pass. The remaining low-severity gap is direct verification that each adapter body invokes its declared implementation. Changes requested.</td></tr>
+        <tr><td>18</td><td><code>c1ba246c</code> — Task 16 adapter-binding follow-up</td><td>T16-1 resolved: each adapter body is checked against its declared implementation, while contract semantics, routing, and compatibility vectors remain green. Task 16 is accepted; L-1 is the only deferred architecture finding.</td></tr>
       </tbody>
     </table>
 
@@ -186,7 +205,7 @@
     <table>
       <thead><tr><th>Evidence</th><th>Result</th></tr></thead>
       <tbody>
-        <tr><td><code>bash tests/run.sh</code></td><td>Pass on the current reviewed change: <code>PASS: all 2928 tests passed</code>.</td></tr>
+        <tr><td><code>bash tests/run.sh</code></td><td>Pass on the current reviewed change: <code>PASS: all 2970 tests passed</code>.</td></tr>
         <tr><td><code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh tests/runtime_matrix.sh</code></td><td>Pass.</td></tr>
         <tr><td><code>shellcheck bin/ab agentbox-entrypoint.sh tests/runtime_matrix.sh</code></td><td>Pass.</td></tr>
         <tr><td>Round 3 runtime-harness review</td><td>Static inspection confirms P13-09 records a blocked row for unavailable bridge reachability and records exact fixture ownership/removal. The reviewer did not invoke Docker/Sysbox because it is an external supported-runtime environment.</td></tr>
@@ -202,6 +221,9 @@
         <tr><td>Round 13 Task 15 semantic ownership review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2840 tests passed</code>; <code>bash -n</code> and ShellCheck pass. T15-1 is resolved by per-row expected metadata checks. A low-severity maintainability gap remains because the expected matrix is duplicated in the test and artifact and the source scan does not verify actual writer/reader paths.</td></tr>
         <tr><td>Round 14 Task 15 contract follow-up review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2928 tests passed</code>; <code>bash -n</code> and ShellCheck pass. The 86-row machine-readable contract is checked against the HTML artifact and source inventory, resolving T15-3. No new implementation defect found.</td></tr>
         <tr><td>Round 15 Task 15 contract relocation review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2928 tests passed</code>; <code>bash -n</code> and ShellCheck pass. The contract relocation is internally consistent, and no new implementation defect was found.</td></tr>
+        <tr><td>Round 16 Task 16 interface extraction review</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2954 tests passed</code>; <code>bash -n</code> and ShellCheck pass. L-2 is resolved by the adapter seams and call-site migration. T16-1 remains because the interface contract is only structurally checked and the required Task 15 baseline comparison is absent.</td></tr>
+        <tr><td>Round 17 Task 16 contract and compatibility follow-up</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2966 tests passed</code>; <code>bash -n</code> and ShellCheck pass. Contract semantics and compatibility vectors are now covered. One low-severity gap remains because adapter bodies are not directly checked against their declared implementation functions.</td></tr>
+        <tr><td>Round 18 Task 16 adapter-binding follow-up</td><td>Pass: <code>bash tests/run.sh</code> reports <code>PASS: all 2970 tests passed</code>; <code>bash -n</code> and ShellCheck pass. Direct adapter-to-implementation binding is now asserted, resolving T16-1. No new implementation defect found.</td></tr>
         <tr><td>Supported runtime record</td><td><a href="../RELEASE_CHECKLIST.md"><code>RELEASE_CHECKLIST.md</code></a> records an authorized Task 13 run with P13-01 through P13-08 passing, verified resource inventory, and cleanup.</td></tr>
         <tr><td>Repository review history</td><td>All former review documents were read during this consolidation. Their resolved findings are intentionally not reproduced as active defects.</td></tr>
       </tbody>
