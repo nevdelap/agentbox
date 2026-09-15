@@ -129,6 +129,7 @@ ab config                                                     # which per-machin
 ab logs                                                       # tail container / inner-dockerd logs
 ab build   [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # rebuild and recreate
 ab rebuild [--no-git] [--no-cache] [--grant-gh] [--grant-all-of-dot-ssh] # synonym for build
+ab --help                                                     # print the command summary
 ab --version                                                  # print the version
 ```
 
@@ -156,6 +157,47 @@ interrupts active processes and does not preserve container-local filesystem
 changes. For a policy-only `ab start --apply`, Agentbox reuses the image already
 recorded on the existing container; it does not rebuild bundled tools. A normal
 start of a stopped container may still perform its usual image freshness check.
+
+Policy precedence is command-line option, then the corresponding host
+environment variable, then the most-specific existing `agentbox.toml` field,
+then its default. Environment values accept `1/0`, `true/false`, `yes/no`, and
+`on/off`; TOML values are strict TOML booleans. For ordinary `start` and
+auto-starting execution, an omitted value preserves the recorded state on an
+existing container. A policy-free `rebuild` preserves recorded Git state but
+retains its established behavior of revoking omitted GitHub and SSH grants.
+
+### Reports, outcomes, and recovery
+
+`ab --help` documents the same public command names shown above. Structured
+reports are opt-in and start after a blank line, so normal human-readable output
+stays readable. Set `AGENTBOX_REPORT=1` (also `true`, `yes`, or `on`) to append
+the report, or set it to `0`, `false`, `no`, or `off` to suppress it. Unknown
+values suppress the report. The report is written to stdout; ordinary
+diagnostics remain on stderr.
+
+The stable report starts with `result`, `reason`, and `exit_status`, followed by
+the command phase, container identity, operation record, nested-Docker
+readiness, network state, retry command, cleanup permission, and execution or
+mutation permissions. `ab config` additionally prints `effective.*`, `source.*`,
+each policy tier, `recorded_state.*`, and the exact delta between effective and
+recorded policy. Values such as `readiness=failed-and-exited`,
+`operation_status=absent-after-failure`, and `record_cleanup=forbidden` are
+diagnostics, not permission to improvise a recovery.
+
+The exit categories are fixed: `0` is success or report-only, `1` is an
+operational/degraded failure, and `2` is refusal, invalid input, or invalid
+operation state. A failed `start --apply` or `rebuild` retains its durable
+diagnostic and named Docker/jj volumes. Read `ab status`, `ab logs`, or
+`ab config` as appropriate, then run exactly the reported `ab start --apply` or
+`ab rebuild` retry command. Only those explicit recovery paths may mutate failed
+state; `ab exec` is diagnostic-only when the report says so.
+
+Safety boundaries are deliberate: credentials are mounted only by explicit
+GitHub/SSH grants or custom mount entries, policy files contain no credentials
+and are read-only, failed operations retain diagnostics and named volumes, and
+only `ab destroy` removes those volumes. No-Git leaves the workspace, `.git`,
+and jj state available while masking the `git` executable and omitting Git
+configuration mounts.
 
 `ab start` and `rebuild` verify `sysbox-runc` is registered on the host and exit
 with install guidance if it isn't. The image rebuilds automatically when the
@@ -517,7 +559,8 @@ The inner docker socket is handed to the agentbox user by the entrypoint, so
 
 ## Tests
 
-Two zero-dependency bash suites (no `bats` / `shellspec` needed):
+Two source-based zero-dependency bash suites plus an optional runtime matrix (no
+`bats` / `shellspec` needed):
 
 - **`tests/run.sh`** — unit tests for the host-side pure logic: `bin/ab`'s
   `compute_names` (project → container/volume name; determinism +
@@ -546,11 +589,36 @@ Two zero-dependency bash suites (no `bats` / `shellspec` needed):
   ab start && bash tests/smoke.sh
   ```
 
+- **`tests/runtime_matrix.sh`** — the supported Docker/Sysbox end-to-end matrix.
+  It records prerequisite versions, direct Git/jj/`gh` behavior, no-Git and
+  grant transitions, labels/mounts, nested-Docker readiness, reports, retries,
+  named volumes, and ownership-aware cleanup in `result.toml`. Supply a fresh
+  test root; the script never removes that root so the result remains an audit
+  record:
+
+  ```bash
+  repo_root="$PWD"
+  runtime_root="$(mktemp -d /tmp/agentbox-runtime.XXXXXX)"
+  mkdir -p "$runtime_root/home" "$runtime_root/xdg-config" \
+    "$runtime_root/state" "$runtime_root/cache" "$runtime_root/project"
+  touch "$runtime_root/.agentbox-task13-root"
+  HOME="$runtime_root/home" XDG_CONFIG_HOME="$runtime_root/xdg-config" \
+    XDG_STATE_HOME="$runtime_root/state" XDG_CACHE_HOME="$runtime_root/cache" \
+    AGENTBOX_CONTEXT="$repo_root" AGENTBOX_DIR="$runtime_root/project" \
+    AGENTBOX_MACHINE=runtime-test AGENTBOX_RUNTIME_TEST_ROOT="$runtime_root" \
+    bash "$repo_root/tests/runtime_matrix.sh"
+  ```
+
+For the local source gate, run `just qformat`, `just qlint`, `just qtest`, and
+`just qcheck`; inspect `check.log` only when a quiet recipe fails. The complete
+release evidence and unresolved blockers are recorded in
+[`RELEASE_CHECKLIST.md`](./RELEASE_CHECKLIST.md).
+
 ## Notes
 
 - `ab --version` prints agentbox's version (also shown in the `ab config`
-  header). Versioning is patch-only for now — the tool is public but not yet
-  released.
+  header). Versioning is patch-only for now. No release tag or published
+  artifact is created by the repository checks.
 - The container user matches your host uid/gid, so files written to `/workspace`
   are owned by you on the host (no `root`-owned files, no git "dubious
   ownership" errors).

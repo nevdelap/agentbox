@@ -58,11 +58,11 @@
       <div class="eyebrow">IMPLEMENTATION PLAN</div>
       <h1>Agentbox Git Disablement</h1>
       <p class="subtitle">Ordered implementation breakdown for the Git disablement and configuration enhancements.</p>
-      <p class="meta">Planning pass · Tasks 1–11 are merged; tasks 12–14 have executable specifications below.</p>
+      <p class="meta">Planning pass · Tasks 1–13 are merged; task 14 is the active release-cleanup task.</p>
     </header>
 
     <section class="callout">
-      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–11 are complete and their detailed specifications remain below in collapsed sections for traceability. Tasks 12–14 are the remaining executable work. The full system design remains in the design document.
+      <strong>Planning boundary:</strong> The task table orders the work. Tasks 1–13 are complete and their detailed specifications remain below in collapsed sections for traceability. Task 14 is the active release-cleanup task. The full system design remains in the design document.
     </section>
 
     <h2>Implementation tasks</h2>
@@ -151,24 +151,24 @@
           <td>Complete nested Docker readiness and recovery integration, including its interaction with Git-policy application, operation records, command decisions, and lifecycle reporting.</td>
           <td>7, 8, 9, 10</td>
         </tr>
-        <tr class="group"><td colspan="5">Remaining verification and release — prove the merged implementation and finish user-facing integration work.</td></tr>
+        <tr class="group"><td colspan="5">Completed verification — tasks 12–13 are merged and their evidence is recorded in the repository.</td></tr>
         <tr id="task-12-definition">
           <td>12</td>
-          <td>Verification<br><span class="status">Remaining</span></td>
+          <td>Verification<br><span class="status">Merged</span></td>
           <td><a href="#task-12-spec">Focused tests and mocked lifecycle coverage</a></td>
           <td>Add final focused and regression coverage for no-Git behavior, Git/jj/gh interactions, credential grants, policy migration, state transitions, failures, races, retries, reports, and concurrency. Each preceding task also adds its local verification as part of completion.</td>
           <td>1–11</td>
         </tr>
         <tr id="task-13-definition">
           <td>13</td>
-          <td>Verification<br><span class="status">Remaining</span></td>
+          <td>Verification<br><span class="status">Merged</span></td>
           <td><a href="#task-13-spec">End-to-end runtime validation</a></td>
           <td>Own the supported-runtime checks removed from Task 4: direct <code>git</code>, jj, <code>gh --version</code>, Git-dependent <code>gh</code>, Git-config absence, workspace/.git/jj preservation, plus the full Docker/Sysbox lifecycle matrix for credential mounts, policy transitions, labels, volumes, nested runtime behavior, reports, retries, and cleanup.</td>
           <td>12</td>
         </tr>
         <tr id="task-14-definition">
           <td>14</td>
-          <td>Release<br><span class="status">Remaining</span></td>
+          <td>Release<br><span class="status">In progress</span></td>
           <td><a href="#task-14-spec">Interface documentation and release cleanup</a></td>
           <td>Update user-facing help, README material, design status, implementation notes, and release checks to reflect the completed Git disablement implementation.</td>
           <td>12, 13</td>
@@ -176,7 +176,7 @@
       </tbody>
     </table>
 
-    <h2>Completed task specifications (collapsed)</h2>
+    <h2>Task specifications (collapsed)</h2>
     <section class="callout">
       <strong>Execution record:</strong> Igor implemented tasks 1–11 in dependency order, and those changes are merged. Their scope, tests, and acceptance criteria remain available below for traceability. The mandatory baseline command for every code task was <code>bash tests/run.sh</code>, plus <code>bash -n bin/ab agentbox-entrypoint.sh tests/run.sh</code>. The remaining tasks must preserve these completed contracts.
     </section>
@@ -941,9 +941,9 @@
       For each remaining task, Igor’s handoff must list the changed files, explicitly identify any requested out-of-scope change, show the task-local test commands and results, and map every acceptance criterion to evidence. The reviewer must verify that no later-task behavior was smuggled into the task, that the mandatory shell checks pass, and that the implementation matches the task’s stated boundaries. A task is accepted only when both the implementation evidence and the reviewer’s criterion-by-criterion result are present.
     </section>
 
-    <p class="note">Tasks 1–11 are merged. The remaining order is deliberate: consolidate deterministic regressions in task 12, prove the supported runtime in task 13, then finalize the user-facing interface and release record in task 14. Reordering a remaining task requires updating its dependency column and preserving the separation between this plan and the normative design.</p>
+    <p class="note">Tasks 1–13 are merged. Task 14 finalizes the user-facing interface and release record. Reordering the active task requires updating its dependency column and preserving the separation between this plan and the normative design.</p>
 
-    <footer>This is an implementation plan with completed task records and executable specifications for the remaining tasks 12–14, not the complete system behavioral specification.</footer>
+    <footer>This is an implementation plan with completed task records and the active task 14 release specification, not the complete system behavioral specification.</footer>
   </main>
 </body>
 </html>
