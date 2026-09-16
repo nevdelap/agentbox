@@ -1,7 +1,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 DOCKERFILES := "Dockerfile examples/agentbox-config/Dockerfile"
-MARKDOWN_FILES := "README.md RELEASE_CHECKLIST.md design_docs/coding_standards.md design_docs/roles.md"
+MARKDOWN_FILES := "README.md design_docs/coding_standards.md design_docs/roles.md"
 NIX_IMAGE := "nixos/nix:2.28.4"
 SHELL_FILES := "bin/ab lib/lifecycle_interfaces.sh agentbox-entrypoint.sh install-sysbox-ubuntu.sh tests/run.sh tests/runtime_matrix.sh tests/smoke.sh examples/agentbox-config/setup.sh"
 SHELLCHECK_LOCK := "/tmp/agentbox-shellcheck.lock"
