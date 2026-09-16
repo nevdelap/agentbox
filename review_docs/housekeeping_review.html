@@ -32,14 +32,15 @@
     <header>
       <div class="eyebrow">HOUSEKEEPING REVIEW</div>
       <h1>Review-artifact consolidation</h1>
-      <p class="meta">Reviewed 2026-09-16 · latest change <code>49d084f6</code> · Rufus-owned cleanup</p>
+      <p class="meta">Reviewed 2026-09-16 · changes <code>89907d1d</code>, <code>06d8ac1e</code>, and <code>cc5be1c6</code> · Rufus-owned review</p>
     </header>
 
     <section class="callout">
-      <strong>Disposition: accepted.</strong> The latest change correctly retires the completed Task 1
-      implementation baseline and updates the design and implementation-plan status to Tasks 1–16
-      merged. It changes documentation only; no production or test behavior is changed. This is now
-      the sole retained review document.
+      <strong>Disposition: accepted.</strong> The latest change fixes lifecycle-library resolution when
+      the launcher is reached through a symlink and adds a focused regression test. The preceding
+      housekeeping changes retire the completed design/review material and beta checklist after the
+      implementation was merged. No unresolved defect was found, and this is the sole retained review
+      document.
     </section>
 
     <h2>Why Igor did not remove all design documents</h2>
@@ -49,10 +50,10 @@
       roles make the same rule explicit: Rufus alone may create, modify, rename, or remove review
       documents; Igor owns the implementation-task artifacts.</p>
     <p>Igor therefore removed the completed baseline and updated status records, but correctly left the
-      reviewer-owned files untouched. The remaining non-review design documents are not obsolete:
-      the main design is normative, the implementation plan preserves task specifications and
-      traceability, Task 15 is the authoritative lifecycle-ownership artifact, and the coding and role
-      documents are repository governance.</p>
+      reviewer-owned files untouched during Task 14. The later housekeeping change retired those
+      reviewer-owned artifacts after the review history was consolidated here. The completed design
+      and plan documents were also retired, while the permanent coding and role documents and the
+      lifecycle contracts under <code>tests/contracts/</code> remain.</p>
 
     <h2>File disposition</h2>
     <table>
@@ -75,16 +76,16 @@
         </tr>
         <tr>
           <td><code>design_docs/git_disablement_and_config_enhancements_implementation_baseline.html</code></td>
-          <td>Retired by the latest change</td>
+          <td>Retired by the completed-plan housekeeping change</td>
           <td>Completed Task 1 inventory is superseded by the merged implementation record and current source; it is a historical baseline, not a current contract.</td>
         </tr>
         <tr>
-          <td><a href="../design_docs/git_disablement_and_config_enhancements.html"><code>design_docs/git_disablement_and_config_enhancements.html</code></a><br>
-            <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html"><code>design_docs/..._implementation_plan.html</code></a><br>
-            <a href="../design_docs/task15_lifecycle_ownership.html"><code>design_docs/task15_lifecycle_ownership.html</code></a><br>
-            <a href="../design_docs/coding_standards.md"><code>coding_standards.md</code></a> · <a href="../design_docs/roles.md"><code>roles.md</code></a></td>
+          <td><a href="../design_docs/coding_standards.md"><code>design_docs/coding_standards.md</code></a> ·
+            <a href="../design_docs/roles.md"><code>design_docs/roles.md</code></a><br>
+            <a href="../tests/contracts/lifecycle_ownership.contract"><code>tests/contracts/lifecycle_ownership.contract</code></a> ·
+            <a href="../tests/contracts/lifecycle_interfaces.contract"><code>tests/contracts/lifecycle_interfaces.contract</code></a></td>
           <td>Retained</td>
-          <td>Normative requirements, completed-task traceability, authoritative ownership mapping, and repository governance remain needed.</td>
+          <td>Repository governance and permanent lifecycle contracts remain needed; completed narrative design and plan documents are recoverable from Jujutsu history.</td>
         </tr>
       </tbody>
     </table>
@@ -95,16 +96,17 @@
       <tbody>
         <tr><td>L-1 — overlapping lifecycle state ownership</td><td>Deferred design concern remains relevant for future architecture work. Tasks 15–16 narrow ownership and interfaces, but do not claim a broad rewrite or eliminate every underlying state representation.</td></tr>
         <tr><td>L-2 — lifecycle adapter/interface boundary</td><td>Resolved by Task 16’s narrow internal adapters, call-site routing, contract tests, and compatibility checks.</td></tr>
-        <tr><td>L-3–L-9 and PL-1/PL-2</td><td>Resolved in the prior review rounds, with the accepted implementation and regression evidence retained in the current plan/source.</td></tr>
-        <tr><td>Tasks 15–16</td><td>Accepted. The current design status and implementation plan record both as merged and identify no active architecture follow-up.</td></tr>
+        <tr><td>L-3–L-9 and PL-1/PL-2</td><td>Resolved in the prior review rounds, with the accepted implementation and regression evidence retained in the source/tests.</td></tr>
+        <tr><td>Tasks 15–16</td><td>Accepted. Their permanent lifecycle contracts and implementation evidence remain in the source/tests even though the completed narrative task documents were retired.</td></tr>
       </tbody>
     </table>
 
     <h2>Verification</h2>
     <ul>
-      <li>The latest change contains only the baseline deletion and status/documentation updates.</li>
-      <li>Prior Task 16 acceptance recorded <code>bash tests/run.sh</code> passing all 2,970 tests, plus Bash syntax and ShellCheck checks.</li>
-      <li>The implementation plan’s three references to the retired leftovers document now point to this file.</li>
+      <li>Change <code>89907d1d</code> changes only the launcher library path and adds one symlink-resolution regression test.</li>
+      <li>Current <code>bash tests/run.sh</code> passes all 2,453 test assertions; Bash syntax and ShellCheck also pass.</li>
+      <li>The completed-plan change migrated Task 15 validation to the permanent lifecycle contract before retiring its HTML artifact.</li>
+      <li>The beta checklist removal updates its README and Just references, leaving no broken reference to <code>RELEASE_CHECKLIST.md</code>.</li>
       <li>Only this file remains under <code>review_docs/</code>; no review-named document remains under <code>design_docs/</code>.</li>
     </ul>
     <p class="note">The removed review artifacts and the retired baseline remain recoverable from Jujutsu history; they were not purged from repository history.</p>

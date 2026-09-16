@@ -35,6 +35,19 @@ source "$REPO/bin/ab"
 # shellcheck source=../agentbox-entrypoint.sh
 # shellcheck disable=SC1091
 source "$REPO/agentbox-entrypoint.sh"
+
+echo "launcher symlink library resolution"
+_launcher_link_root="$(mktemp -d)"
+_launcher_link="$_launcher_link_root/ab"
+ln -s "$REPO/bin/ab" "$_launcher_link"
+if bash -c 'source "$1"' _ "$_launcher_link" >/dev/null 2>&1; then
+  _launcher_link_rc=0
+else
+  _launcher_link_rc=$?
+fi
+assert_eq "symlinked launcher sources repository library" 0 "$_launcher_link_rc"
+rm -rf "$_launcher_link_root"
+
 # shellcheck source=../tests/smoke.sh
 # shellcheck disable=SC1091
 source "$REPO/tests/smoke.sh"   # source-safe: its ab_parse_env_line() is unit-tested below

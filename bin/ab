@@ -4666,7 +4666,7 @@ main() {
 # seams for record I/O, projection construction, and report rendering.
 # shellcheck source=../lib/lifecycle_interfaces.sh
 # shellcheck disable=SC1091
-source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../lib/lifecycle_interfaces.sh"
+source "$(dirname -- "$_self")/../lib/lifecycle_interfaces.sh"
 
 # Run only when executed directly, not when sourced — so tests/run.sh can source this file
 # and call compute_names() (and friends) without triggering any docker command.
