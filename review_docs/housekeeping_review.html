@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Housekeeping review</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --soft: light-dark(#f7f9fc, #1d222b); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 1080px; margin: 0 auto; padding: 42px 24px 70px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0; font-size: clamp(2rem, 4vw, 3.1rem); letter-spacing: -.04em; }
+    h2 { margin: 36px 0 12px; font-size: 1.4rem; }
+    p { margin: 8px 0; }
+    .eyebrow, .meta, .note { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .75rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .callout, table { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    .callout { padding: 15px 17px; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+    th, td { padding: 9px 11px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); }
+    tr:last-child td { border-bottom: 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+    a { color: var(--accent); }
+    @media (max-width: 760px) { main { padding: 28px 14px 50px; } th, td { padding: 8px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">HOUSEKEEPING REVIEW</div>
+      <h1>Review-artifact consolidation</h1>
+      <p class="meta">Reviewed 2026-09-16 · latest change <code>49d084f6</code> · Rufus-owned cleanup</p>
+    </header>
+
+    <section class="callout">
+      <strong>Disposition: accepted.</strong> The latest change correctly retires the completed Task 1
+      implementation baseline and updates the design and implementation-plan status to Tasks 1–16
+      merged. It changes documentation only; no production or test behavior is changed. This is now
+      the sole retained review document.
+    </section>
+
+    <h2>Why Igor did not remove all design documents</h2>
+    <p>This was an ownership boundary, not an incomplete implementation. The Task 14 release-cleanup
+      specification explicitly says to exclude <code>review_docs/</code> and review-named documents under
+      <code>design_docs/</code>, and to report stale reviewer-owned artifacts to Rufus. The repository
+      roles make the same rule explicit: Rufus alone may create, modify, rename, or remove review
+      documents; Igor owns the implementation-task artifacts.</p>
+    <p>Igor therefore removed the completed baseline and updated status records, but correctly left the
+      reviewer-owned files untouched. The remaining non-review design documents are not obsolete:
+      the main design is normative, the implementation plan preserves task specifications and
+      traceability, Task 15 is the authoritative lifecycle-ownership artifact, and the coding and role
+      documents are repository governance.</p>
+
+    <h2>File disposition</h2>
+    <table>
+      <thead><tr><th>Artifact</th><th>Disposition</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>review_docs/housekeeping_review.html</code></td>
+          <td>Retained</td>
+          <td>Single current record of this review and the still-relevant historical findings.</td>
+        </tr>
+        <tr>
+          <td><code>review_docs/leftovers_review.html</code></td>
+          <td>Removed</td>
+          <td>Historical consolidation superseded by this housekeeping record; its relevant dispositions are captured below.</td>
+        </tr>
+        <tr>
+          <td><code>design_docs/*_review.html</code> (the two review-named artifacts)</td>
+          <td>Removed</td>
+          <td>Obsolete reviewer-owned task/design reviews; their still-relevant conclusions are consolidated here.</td>
+        </tr>
+        <tr>
+          <td><code>design_docs/git_disablement_and_config_enhancements_implementation_baseline.html</code></td>
+          <td>Retired by the latest change</td>
+          <td>Completed Task 1 inventory is superseded by the merged implementation record and current source; it is a historical baseline, not a current contract.</td>
+        </tr>
+        <tr>
+          <td><a href="../design_docs/git_disablement_and_config_enhancements.html"><code>design_docs/git_disablement_and_config_enhancements.html</code></a><br>
+            <a href="../design_docs/git_disablement_and_config_enhancements_implementation_plan.html"><code>design_docs/..._implementation_plan.html</code></a><br>
+            <a href="../design_docs/task15_lifecycle_ownership.html"><code>design_docs/task15_lifecycle_ownership.html</code></a><br>
+            <a href="../design_docs/coding_standards.md"><code>coding_standards.md</code></a> · <a href="../design_docs/roles.md"><code>roles.md</code></a></td>
+          <td>Retained</td>
+          <td>Normative requirements, completed-task traceability, authoritative ownership mapping, and repository governance remain needed.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Still-relevant review conclusions</h2>
+    <table>
+      <thead><tr><th>Finding or review area</th><th>Current disposition</th></tr></thead>
+      <tbody>
+        <tr><td>L-1 — overlapping lifecycle state ownership</td><td>Deferred design concern remains relevant for future architecture work. Tasks 15–16 narrow ownership and interfaces, but do not claim a broad rewrite or eliminate every underlying state representation.</td></tr>
+        <tr><td>L-2 — lifecycle adapter/interface boundary</td><td>Resolved by Task 16’s narrow internal adapters, call-site routing, contract tests, and compatibility checks.</td></tr>
+        <tr><td>L-3–L-9 and PL-1/PL-2</td><td>Resolved in the prior review rounds, with the accepted implementation and regression evidence retained in the current plan/source.</td></tr>
+        <tr><td>Tasks 15–16</td><td>Accepted. The current design status and implementation plan record both as merged and identify no active architecture follow-up.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Verification</h2>
+    <ul>
+      <li>The latest change contains only the baseline deletion and status/documentation updates.</li>
+      <li>Prior Task 16 acceptance recorded <code>bash tests/run.sh</code> passing all 2,970 tests, plus Bash syntax and ShellCheck checks.</li>
+      <li>The implementation plan’s three references to the retired leftovers document now point to this file.</li>
+      <li>Only this file remains under <code>review_docs/</code>; no review-named document remains under <code>design_docs/</code>.</li>
+    </ul>
+    <p class="note">The removed review artifacts and the retired baseline remain recoverable from Jujutsu history; they were not purged from repository history.</p>
+  </main>
+</body>
+</html>

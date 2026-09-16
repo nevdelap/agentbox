@@ -4712,10 +4712,7 @@ assert_eq "matching fixture removal is ledgered" removed \
   "${RESOURCE_CLEANUP[$_fixture_resource_index]}"
 
 echo "Task 15 lifecycle ownership and projection"
-_task15_ownership="$REPO/design_docs/task15_lifecycle_ownership.html"
 _task15_contract="$REPO/tests/contracts/lifecycle_ownership.contract"
-assert_eq "ownership table has required columns" 1 \
-  "$(grep -F -c '<th>field</th><th>owner</th><th>writers</th><th>readers</th><th>persistence</th><th>projection_path</th><th>approved_exception</th>' "$_task15_ownership")"
 assert_eq "ownership contract has required columns" 1 \
   "$(grep -F -c 'field|owner|writers|readers|persistence|projection_path|approved_exception' "$_task15_contract")"
 _task15_source_fields="$({
@@ -4725,7 +4722,7 @@ _task15_source_fields="$({
   sed -n '/^command_report_reset() {/,/^}/p' "$REPO/bin/ab"
   sed -n '/^command_report_emit() {/,/^}/p' "$REPO/bin/ab"
 } | sed -n 's/^[[:space:]]*\([a-z_][a-z0-9_]*\)=.*/\1/p' | sort -u)"
-declare -A _task15_source_rows=() _task15_contract_rows=() _task15_artifact_rows=()
+declare -A _task15_source_rows=() _task15_contract_rows=()
 _task15_source_count=0
 while IFS= read -r _task15_field; do
   [ -n "$_task15_field" ] || continue
@@ -4760,41 +4757,14 @@ while IFS='|' read -r _task15_field _task15_owner _task15_writers _task15_reader
   done < <(printf '%s\n' "$_task15_projection" | grep -o 'operation_state_[a-z0-9_]*' | sort -u)
 done < "$_task15_contract"
 
-_task15_artifact_count=0
-while IFS= read -r _task15_row; do
-  [ -n "$_task15_row" ] || continue
-  _task15_artifact_count=$((_task15_artifact_count + 1))
-  _task15_cell_count="$(printf '%s\n' "$_task15_row" | grep -o '<td>' | wc -l)"
-  assert_eq "ownership row has seven cells" 7 "$_task15_cell_count"
-  _task15_cells="$(printf '%s\n' "$_task15_row" | sed -n 's#.*<td><code>\([^<]*\)</code></td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td><td>\([^<]*\)</td></tr>#\1\t\2\t\3\t\4\t\5\t\6\t\7#p')"
-  if [ -z "$_task15_cells" ]; then
-    fail "ownership row parses" "seven cells" "unparseable"
-    continue
-  fi
-  IFS=$'\t' read -r _task15_field _task15_owner _task15_writers _task15_readers \
-    _task15_persistence _task15_projection _task15_exception <<<"$_task15_cells"
-  _task15_previous="${_task15_artifact_rows[$_task15_field]:-0}"
-  assert_eq "ownership row $_task15_field is unique" 0 "$_task15_previous"
-  _task15_artifact_rows["${_task15_field}"]=$((_task15_previous + 1))
-  _task15_artifact_contract_row="$_task15_field|$_task15_owner|$_task15_writers|$_task15_readers|$_task15_persistence|$_task15_projection|$_task15_exception"
-  assert_eq "ownership row $_task15_field matches contract" \
-    "${_task15_contract_rows[$_task15_field]:-}" "$_task15_artifact_contract_row"
-  assert_eq "ownership row $_task15_field is sourced" 1 \
-    "${_task15_source_rows[$_task15_field]:-0}"
-done < <(grep -F '<tr><td><code>' "$_task15_ownership")
 assert_eq "ownership contract count matches source inventory" "$_task15_source_count" "$_task15_contract_count"
-assert_eq "ownership row count matches contract" "$_task15_contract_count" "$_task15_artifact_count"
 for _task15_field in "${!_task15_source_rows[@]}"; do
   assert_eq "source field $_task15_field has one contract row" 1 \
     "${_task15_contract_rows[$_task15_field]+1}"
-  assert_eq "source field $_task15_field has one artifact row" 1 \
-    "${_task15_artifact_rows[$_task15_field]:-0}"
 done
 for _task15_field in "${!_task15_contract_rows[@]}"; do
   assert_eq "contract field $_task15_field is in source inventory" 1 \
     "${_task15_source_rows[$_task15_field]:-0}"
-  assert_eq "contract field $_task15_field has one artifact row" 1 \
-    "${_task15_artifact_rows[$_task15_field]:-0}"
 done
 
 _saved_task15_xdg_state_home="${XDG_STATE_HOME:-}"

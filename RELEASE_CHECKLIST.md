@@ -55,10 +55,9 @@ neither blocked nor not applicable.
 - [`tests/run.sh`](./tests/run.sh) — source-based regression suite.
 - [`tests/runtime_matrix.sh`](./tests/runtime_matrix.sh) — supported-runtime
   evidence.
-- [`design_docs/git_disablement_and_config_enhancements.html`](./design_docs/git_disablement_and_config_enhancements.html)
-  — normative contract and status.
-- [`design_docs/git_disablement_and_config_enhancements_implementation_plan.html`](./design_docs/git_disablement_and_config_enhancements_implementation_plan.html)
-  — task status and acceptance criteria.
+- `design_docs/` — completed design and implementation-plan documents were
+  retired after Tasks 1–16 were merged; the accepted implementation and tests
+  are the release evidence.
 
 ## Unresolved blockers
 
