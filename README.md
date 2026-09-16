@@ -612,9 +612,7 @@ Two source-based zero-dependency bash suites plus an optional runtime matrix (no
   ```
 
 For the local source gate, run `just qformat`, `just qlint`, `just qtest`, and
-`just qcheck`; inspect `check.log` only when a quiet recipe fails. The complete
-release evidence and unresolved blockers are recorded in
-[`RELEASE_CHECKLIST.md`](./RELEASE_CHECKLIST.md).
+`just qcheck`; inspect `check.log` only when a quiet recipe fails.
 
 ## Notes
 
