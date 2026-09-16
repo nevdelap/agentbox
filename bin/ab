@@ -982,7 +982,7 @@ command_report_derive() {
 
 command_report_emit() {
   local result="${1:-}" reason="${2:-}" exit_status="${3:-}"
-  operation_state_publish
+  lifecycle_projection_build
   if [ -z "$result" ]; then
     command_report_derive
   else
@@ -1045,20 +1045,20 @@ command_report_emit() {
 # overlay for command_report_derive to describe. Keep the report contract total for earlier
 # failures too (for example a short-circuited preflight that did not populate either).
 command_report_preflight_failure() {
-  operation_state_publish
+  lifecycle_projection_build
   command_report_derive
   if [ "$command_report_exit_status" = 0 ]; then
     command_report_result=refused
     command_report_reason="${operation_state_policy_decision_reason_code:-policy-preflight-failed}"
     command_report_exit_status=2
   fi
-  command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
+  lifecycle_report_render "$command_report_result" "$command_report_reason" "$command_report_exit_status"
 }
 
 command_report_lifecycle_exit_trap() {
   local rc="$1"
   if [ "${command_report_emitted:-0}" != 1 ]; then
-    command_report_emit failed command-failed 1
+    lifecycle_report_render failed command-failed 1
   fi
   trap - EXIT
   exit "$rc"
@@ -1169,8 +1169,8 @@ operation_record_begin() {
     operation_retry_command="ab start --apply"
   fi
   operation_record_active=1
-  operation_record_write
-  operation_state_publish
+  lifecycle_record_write
+  lifecycle_projection_build
 }
 
 operation_record_begin_if_needed() {
@@ -1183,8 +1183,8 @@ operation_record_update() {
   operation_phase="$1"
   operation_status="$2"
   operation_diagnostic="${3:-}"
-  operation_record_write
-  operation_state_publish
+  lifecycle_record_write
+  lifecycle_projection_build
 }
 
 operation_record_terminal() {
@@ -1218,15 +1218,15 @@ operation_record_terminal() {
     operation_agent_execution=blocked
     operation_explicit_exec=blocked
     operation_diagnostic="completed operation handoff is inconsistent; run ab start --apply or ab rebuild"
-    operation_record_write || return 1
+    lifecycle_record_write || return 1
     policy_operation_status="invalid-record"
     policy_readiness_result=not-applicable
     operation_status="invalid-record"
-    operation_state_publish
+    lifecycle_projection_build
     return 1
   fi
-  operation_record_write || return 1
-  operation_state_publish
+  lifecycle_record_write || return 1
+  lifecycle_projection_build
   if [ "$status" = complete ]; then
     if ! rm -f -- "$operation_record_path"; then
       operation_record_cleanup=failed
@@ -1234,11 +1234,11 @@ operation_record_terminal() {
       operation_agent_execution=blocked
       operation_explicit_exec=blocked
       operation_diagnostic="operation record cleanup failed at $operation_record_path; run ab start --apply or ab rebuild"
-      operation_record_write || return 1
+      lifecycle_record_write || return 1
       policy_operation_status="invalid-record"
       policy_readiness_result=not-applicable
       operation_status="invalid-record"
-      operation_state_publish
+      lifecycle_projection_build
       return 1
     fi
   fi
@@ -1250,7 +1250,7 @@ operation_record_invalid() {
   policy_readiness_result=not-applicable
   operation_status="invalid-record"
   operation_diagnostic="invalid operation record at $operation_record_path: $reason; run ${operation_retry_command:-ab start --apply}"
-  operation_state_publish
+  lifecycle_projection_build
   return 0
 }
 
@@ -1274,7 +1274,7 @@ operation_record_load() {
   [ -f "$operation_record_path" ] || {
     policy_operation_status=none
     policy_readiness_result=not-applicable
-    operation_state_publish
+    lifecycle_projection_build
     return 0
   }
   [ -r "$operation_record_path" ] || { operation_record_invalid "record is not readable"; return 0; }
@@ -1385,11 +1385,11 @@ operation_record_load() {
       ;;
     *) operation_record_invalid "status, phase, and readiness are inconsistent"; return 0 ;;
   esac
-  operation_state_publish
+  lifecycle_projection_build
 }
 
 operation_result_record() {
-  command_report_emit
+  lifecycle_report_render
 }
 
 # Reset and populate the deterministic Task 5 record. The source tier entries retain every tier,
@@ -3376,7 +3376,7 @@ policy_decide() {
     start|exec|rebuild|config) ;;
     *) return 1 ;;
   esac
-  operation_state_publish
+  lifecycle_projection_build
   policy_decision_overlay_valid || {
     policy_decision_reason_code="invalid-operation-overlay"
     return 0
@@ -3599,19 +3599,19 @@ policy_operation_begin() {
   policy_operation_status=none
   policy_readiness_result=not-applicable
   policy_lock_acquire || return 1
-  operation_record_load || return 1
+  lifecycle_record_read || return 1
   policy_retry_reconcile=0
   # A fresh explicit reconciliation is the only retry path. Ordinary starts and execs must
   # consume a non-complete record rather than assuming the old container is usable.
   if [ "${policy_operation_retry:-0}" = 1 ]; then
     case "$policy_operation_status" in
       none|complete) ;;
-      invalid-record) operation_state_publish; return 0 ;;
+      invalid-record) lifecycle_projection_build; return 0 ;;
       *) policy_retry_reconcile=1 ;;
     esac
     policy_operation_status=none
     policy_readiness_result=not-applicable
-    operation_state_publish
+    lifecycle_projection_build
   fi
 }
 
@@ -4334,7 +4334,7 @@ main() {
     shift
     command_report_lifecycle_guard_begin
     parse_runtime_options start "$@" || {
-      command_report_emit invalid-state invalid-input 2
+      lifecycle_report_render invalid-state invalid-input 2
       exit 2
     }
     policy_operation_mode=start
@@ -4345,7 +4345,7 @@ main() {
       exit "$command_report_exit_status"
     fi
     if ! policy_resolution_recheck start; then
-      command_report_emit failed policy-changed-during-resolution 1
+      lifecycle_report_render failed policy-changed-during-resolution 1
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
@@ -4353,11 +4353,11 @@ main() {
       :
     else
       rc=$?
-      [ "${command_report_emitted:-0}" = 1 ] || command_report_emit failed start-failed 1
+      [ "${command_report_emitted:-0}" = 1 ] || lifecycle_report_render failed start-failed 1
       command_report_lifecycle_guard_end
       exit "$rc"
     fi
-    [ "${command_report_emitted:-0}" = 1 ] || command_report_emit success already-running 0
+    [ "${command_report_emitted:-0}" = 1 ] || lifecycle_report_render success already-running 0
     command_report_lifecycle_guard_end
     ;;
   stop)
@@ -4370,15 +4370,15 @@ main() {
     if exists; then
       if docker stop "$cname" >/dev/null; then
         echo "agentbox: stopped $cname (kept; 'ab destroy' to remove)"
-        command_report_emit success stopped 0
+        lifecycle_report_render success stopped 0
       else
         echo "agentbox: failed to stop $cname (the operation record and named volumes were kept)" >&2
-        command_report_emit failed stop-failed 1
+        lifecycle_report_render failed stop-failed 1
         exit 1
       fi
     else
       echo "agentbox: $cname does not exist"
-      command_report_emit report-only stop-absent 0
+      lifecycle_report_render report-only stop-absent 0
     fi
     command_report_lifecycle_guard_end
     ;;
@@ -4433,7 +4433,7 @@ main() {
     else
       operation_state_outer_lifecycle=absent
     fi
-    command_report_emit
+    lifecycle_report_render
     [ "$command_report_exit_status" = 0 ] || exit "$command_report_exit_status"
     command_report_lifecycle_guard_end
     ;;
@@ -4447,7 +4447,7 @@ main() {
       exit "$command_report_exit_status"
     fi
     if ! policy_resolution_recheck config; then
-      command_report_emit failed policy-changed-during-resolution 1
+      lifecycle_report_render failed policy-changed-during-resolution 1
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
@@ -4455,16 +4455,16 @@ main() {
     if [ "${1:-}" = init ]; then
       shift
       if ! cmd_config_init "$@"; then
-        command_report_emit failed config-init-failed 1
+        lifecycle_report_render failed config-init-failed 1
         exit 1
       fi
-      command_report_emit success config-init 0
+      lifecycle_report_render success config-init 0
     else
       if ! cmd_config; then
-        command_report_emit failed config-report-failed 1
+        lifecycle_report_render failed config-report-failed 1
         exit 1
       fi
-      command_report_emit
+      lifecycle_report_render
     fi
     command_report_lifecycle_guard_end
     ;;
@@ -4477,17 +4477,17 @@ main() {
     operation_state_update_allowed && [ "$policy_updates_check" = 1 ] && check_for_update
     if exists; then
       if log_output="$(docker logs --tail 80 "$cname" 2>&1 | tail -80)"; then
-        command_report_emit report-only logs-complete 0
+        lifecycle_report_render report-only logs-complete 0
         [ -z "$log_output" ] || printf '%s\n' "$log_output"
       else
         log_rc=$?
-        command_report_emit failed logs-failed 1
+        lifecycle_report_render failed logs-failed 1
         [ -z "$log_output" ] || printf '%s\n' "$log_output" >&2
         exit "$log_rc"
       fi
     else
       echo "agentbox: no container $cname; operation state above is the durable diagnostic" >&2
-      command_report_emit failed no-container 1
+      lifecycle_report_render failed no-container 1
       exit 1
     fi
     command_report_lifecycle_guard_end
@@ -4496,7 +4496,7 @@ main() {
     shift
     command_report_lifecycle_guard_begin
     parse_exec_options exec "$@" || {
-      command_report_emit invalid-state invalid-input 2
+      lifecycle_report_render invalid-state invalid-input 2
       exit 2
     }
     policy_operation_mode="exec"
@@ -4507,22 +4507,22 @@ main() {
       exit "$command_report_exit_status"
     fi
     if ! policy_resolution_recheck exec; then
-      command_report_emit failed policy-changed-during-resolution 1
+      lifecycle_report_render failed policy-changed-during-resolution 1
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
-    operation_state_publish
+    lifecycle_projection_build
     command_report_derive
     if [ "$command_report_exit_status" != 0 ]; then
-      command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
+      lifecycle_report_render "$command_report_result" "$command_report_reason" "$command_report_exit_status"
       exit "$command_report_exit_status"
     fi
     if cmd_exec "${policy_command_args[@]}"; then
-      command_report_emit success exec-complete 0
+      lifecycle_report_render success exec-complete 0
       command_report_lifecycle_guard_end
     else
       rc=$?
-      command_report_emit failed exec-failed 1
+      lifecycle_report_render failed exec-failed 1
       command_report_lifecycle_guard_end
       exit "$rc"
     fi
@@ -4531,7 +4531,7 @@ main() {
     shift
     command_report_lifecycle_guard_begin
     parse_runtime_options rebuild "$@" || {
-      command_report_emit invalid-state invalid-input 2
+      lifecycle_report_render invalid-state invalid-input 2
       exit 2
     }
     policy_operation_mode="rebuild"
@@ -4542,7 +4542,7 @@ main() {
       exit "$command_report_exit_status"
     fi
     if ! policy_resolution_recheck rebuild; then
-      command_report_emit failed policy-changed-during-resolution 1
+      lifecycle_report_render failed policy-changed-during-resolution 1
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
@@ -4628,7 +4628,7 @@ main() {
   *)
     command_report_lifecycle_guard_begin
     parse_convenience_options "$@" || {
-      command_report_emit invalid-state invalid-input 2
+      lifecycle_report_render invalid-state invalid-input 2
       exit 2
     }
     policy_operation_mode="exec"
@@ -4639,28 +4639,34 @@ main() {
       exit "$command_report_exit_status"
     fi
     if ! policy_resolution_recheck exec; then
-      command_report_emit failed policy-changed-during-resolution 1
+      lifecycle_report_render failed policy-changed-during-resolution 1
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
-    operation_state_publish
+    lifecycle_projection_build
     command_report_derive
     if [ "$command_report_exit_status" != 0 ]; then
-      command_report_emit "$command_report_result" "$command_report_reason" "$command_report_exit_status"
+      lifecycle_report_render "$command_report_result" "$command_report_reason" "$command_report_exit_status"
       exit "$command_report_exit_status"
     fi
     if cmd_exec "${policy_command_args[@]}"; then
-      command_report_emit success exec-complete 0
+      lifecycle_report_render success exec-complete 0
       command_report_lifecycle_guard_end
     else
       rc=$?
-      command_report_emit failed exec-failed 1
+      lifecycle_report_render failed exec-failed 1
       command_report_lifecycle_guard_end
       exit "$rc"
     fi
     ;;
   esac
 }
+
+# Keep the launcher entry point and shell execution model stable while exposing narrow internal
+# seams for record I/O, projection construction, and report rendering.
+# shellcheck source=../lib/lifecycle_interfaces.sh
+# shellcheck disable=SC1091
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../lib/lifecycle_interfaces.sh"
 
 # Run only when executed directly, not when sourced — so tests/run.sh can source this file
 # and call compute_names() (and friends) without triggering any docker command.

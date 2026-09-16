@@ -4891,6 +4891,254 @@ assert_eq "producer execution remains untouched" poison-agent "$operation_agent_
 assert_eq "producer failed phase remains untouched" poison-phase "$operation_failed_phase"
 eval "$_saved_task15_publish"
 
+echo "Task 16 narrow lifecycle interfaces"
+_task16_contract="$REPO/tests/contracts/lifecycle_interfaces.contract"
+assert_eq "interface contract has required columns" 1 \
+  "$(grep -F -c 'interface|implementation|inputs|outputs|side_effects|forbidden_effects' "$_task16_contract")"
+for _task16_interface in lifecycle_record_read lifecycle_record_write lifecycle_projection_build lifecycle_report_render; do
+  assert_eq "interface $_task16_interface is declared" 1 \
+    "$(grep -F -c "$_task16_interface|" "$_task16_contract")"
+  assert_eq "interface $_task16_interface is implemented" 1 \
+    "$(grep -c "^$_task16_interface()" "$REPO/lib/lifecycle_interfaces.sh" || true)"
+done
+_task16_contract_rows=0
+while IFS='|' read -r _task16_name _task16_impl _task16_inputs _task16_outputs \
+  _task16_effects _task16_forbidden; do
+  [ "$_task16_name" != interface ] || continue
+  _task16_contract_rows=$((_task16_contract_rows + 1))
+  case "$_task16_name" in
+    lifecycle_record_read)
+      _task16_expected='lifecycle_record_read|operation_record_load|project identity and operation_record_path globals|decoded record fields and one projection in process state|reads one scoped host record|Docker, network, update, policy, or lifecycle mutation'
+      ;;
+    lifecycle_record_write)
+      _task16_expected='lifecycle_record_write|operation_record_write|operation producer fields and operation_record_path globals|return status and one atomically replaced record|creates/chmods one scoped directory and renames one temporary record|Docker, network, update, or policy decision'
+      ;;
+    lifecycle_projection_build)
+      _task16_expected='lifecycle_projection_build|operation_state_publish|policy decision and operation producer fields|one operation_state_* projection in process state|process-memory assignment only|record, Docker, network, update, or lifecycle mutation'
+      ;;
+    lifecycle_report_render)
+      _task16_expected='lifecycle_report_render|command_report_emit|optional result/reason/exit override and current projection|report stdout plus report globals and return status|projection refresh and optional stdout output|record, Docker, network, update, or lifecycle mutation'
+      ;;
+    *)
+      _task16_expected=unexpected-interface
+      ;;
+  esac
+  _task16_actual="$_task16_name|$_task16_impl|$_task16_inputs|$_task16_outputs|$_task16_effects|$_task16_forbidden"
+  assert_eq "contract semantics $_task16_name" "$_task16_expected" "$_task16_actual"
+  _task16_expected_call="$_task16_impl \"\$@\""
+  _task16_actual_call="$(declare -f "$_task16_name" | sed -n '3s/^    //p')"
+  assert_eq "adapter body binds $_task16_name" "$_task16_expected_call" "$_task16_actual_call"
+done <"$_task16_contract"
+assert_eq "contract has exactly four interfaces" 4 "$_task16_contract_rows"
+for _task16_implementation in operation_record_load operation_record_write operation_state_publish command_report_emit; do
+  assert_eq "production uses only $_task16_implementation interface" 1 \
+    "$(grep -E -c "$_task16_implementation([[:space:]]|\\()" "$REPO/bin/ab")"
+done
+assert_eq "interfaces have no unauthorized Docker/lifecycle calls" 0 \
+  "$(grep -E -c '^[[:space:]]*(docker|check_for_update|connect_networks|cmd_start|cmd_exec|operation_record_(begin|update|terminal))([[:space:]]|\()' "$REPO/lib/lifecycle_interfaces.sh" || true)"
+
+_saved_task16_xdg_state_home="${XDG_STATE_HOME:-}"
+_saved_task16_lock_identity="$lock_identity"
+_saved_task16_cname="$cname"
+_saved_task16_dvol="$dvol"
+_saved_task16_jvol="$jvol"
+_saved_task16_operation_requested="$policy_operation_requested"
+_task16_state="$(mktemp -d)"
+XDG_STATE_HOME="$_task16_state"
+lock_identity=task16-lifecycle
+cname=agentbox-task16-lifecycle
+dvol=agentbox-task16-docker
+jvol=agentbox-task16-jj
+policy_operation_requested=1
+operation_record_reset_result
+operation_record_prepare_path
+_task16_record="$operation_record_path"
+lifecycle_record_read
+assert_eq "record interface absent fixture" none "$policy_operation_status"
+
+operation_id=task16-operation
+operation_started_at=2026-09-16T00:00:00Z
+operation_phase=preflight
+operation_status=in-progress
+operation_record_container_name="$cname"
+operation_record_policy_digest=sha256:task16
+operation_image_reference=task16-image
+operation_record_inner_docker_volume="$dvol"
+operation_record_jj_volume="$jvol"
+operation_network_outcomes=none
+operation_diagnostic=""
+operation_readiness_result=not-applicable
+operation_task_status=fail
+operation_agent_execution=blocked
+operation_explicit_exec=blocked
+operation_retry_command="ab start --apply"
+operation_record_cleanup=forbidden
+lifecycle_record_write
+_task16_record_exists=1
+[ -f "$_task16_record" ] && _task16_record_exists=0
+assert_eq "record interface writes scoped record" 0 "$_task16_record_exists"
+assert_eq "record interface writes private record" 600 "$(stat -c '%a' "$_task16_record")"
+assert_eq "record interface leaves no temporary record" 0 \
+  "$(find "$(dirname "$_task16_record")" -maxdepth 1 -name '.operation.*' -print -quit | wc -l)"
+
+operation_record_reset_result
+operation_record_prepare_path
+lifecycle_record_read
+assert_eq "record interface valid fixture" in-progress "$policy_operation_status"
+assert_eq "record interface projects valid fixture" 1 "$operation_state_valid"
+
+printf 'not a record\n' >"$operation_record_path"
+lifecycle_record_read
+assert_eq "record interface malformed fixture" invalid-record "$policy_operation_status"
+
+operation_id=task16-failed
+operation_started_at=2026-09-16T00:00:00Z
+operation_completed_at=2026-09-16T00:01:00Z
+operation_phase=removal
+operation_status=removal-failed
+operation_record_container_name="$cname"
+operation_record_policy_digest=sha256:task16
+operation_image_reference=task16-image
+operation_record_inner_docker_volume="$dvol"
+operation_record_jj_volume="$jvol"
+operation_network_outcomes=none
+operation_diagnostic=removal-failed
+operation_readiness_result=not-applicable
+operation_task_status=fail
+operation_agent_execution=blocked
+operation_explicit_exec=blocked
+operation_retry_command="ab start --apply"
+operation_record_cleanup=forbidden
+: "$operation_started_at" "$operation_record_policy_digest"
+lifecycle_record_write
+operation_record_reset_result
+operation_record_prepare_path
+lifecycle_record_read
+assert_eq "record interface failure fixture" removal-failed "$policy_operation_status"
+assert_eq "record interface failure remains blocked" 0 "$operation_state_execution_allowed"
+
+_task16_trace="$(mktemp)"
+_saved_task16_record_write="$(declare -f lifecycle_record_write)"
+_saved_task16_projection_build="$(declare -f lifecycle_projection_build)"
+_saved_task16_report_render="$(declare -f lifecycle_report_render)"
+lifecycle_record_write() { printf 'record-write\n' >>"$_task16_trace"; }
+lifecycle_projection_build() { printf 'projection-build\n' >>"$_task16_trace"; }
+lifecycle_report_render() { printf 'report-render\n' >>"$_task16_trace"; }
+operation_record_active=1
+operation_phase=task16
+operation_status=in-progress
+operation_record_update task16 in-progress ""
+operation_result_record
+assert_eq "record lifecycle routes through interface" 1 \
+  "$(grep -c '^record-write$' "$_task16_trace")"
+assert_eq "projection lifecycle routes through interface" 1 \
+  "$(grep -c '^projection-build$' "$_task16_trace")"
+assert_eq "report lifecycle routes through interface" 1 \
+  "$(grep -c '^report-render$' "$_task16_trace")"
+eval "$_saved_task16_record_write"
+eval "$_saved_task16_projection_build"
+eval "$_saved_task16_report_render"
+
+# Compact Task 15 compatibility baseline. These vectors intentionally cover the interface
+# handoff, not Task 15's exhaustive field inventory: absent state remains report-only, a retained
+# failed record remains refused, and a complete record remains executable and cleanable.
+task16_report_value() {
+  local _task16_field="$1" _task16_report="$2"
+  printf '%s\n' "$_task16_report" | sed -n "s/^${_task16_field}=//p"
+}
+rm -f -- "$operation_record_path"
+operation_record_reset_result
+operation_record_prepare_path
+lifecycle_record_read
+policy_operation_mode=status
+policy_decision_kind=allow
+_task16_report="$(lifecycle_report_render)"
+_task16_actual="absent|$(task16_report_value result "$_task16_report")|$(task16_report_value reason "$_task16_report")|$(task16_report_value exit_status "$_task16_report")|$(task16_report_value operation_status "$_task16_report")|$(task16_report_value phase "$_task16_report")|$(task16_report_value record_cleanup "$_task16_report")|$(task16_report_value cleanup_allowed "$_task16_report")"
+assert_eq "baseline absent compatibility" \
+  "absent|report-only|report-none|0|none|none|forbidden|0" "$_task16_actual"
+
+operation_record_reset_result
+operation_record_prepare_path
+operation_id=task16-failed
+operation_started_at=2026-09-16T00:00:00Z
+operation_completed_at=2026-09-16T00:01:00Z
+operation_phase=removal
+operation_status=removal-failed
+operation_record_container_name="$cname"
+operation_record_policy_digest=sha256:task16
+operation_image_reference=task16-image
+operation_record_inner_docker_volume="$dvol"
+operation_record_jj_volume="$jvol"
+operation_network_outcomes=none
+operation_diagnostic=removal-failed
+operation_readiness_result=not-applicable
+operation_task_status=fail
+operation_agent_execution=blocked
+operation_explicit_exec=blocked
+operation_retry_command="ab start --apply"
+operation_record_cleanup=forbidden
+lifecycle_record_write
+operation_record_reset_result
+operation_record_prepare_path
+lifecycle_record_read
+policy_operation_mode="exec"
+policy_decision_kind=allow
+_task16_report="$(lifecycle_report_render)"
+_task16_actual="failed|$(task16_report_value result "$_task16_report")|$(task16_report_value reason "$_task16_report")|$(task16_report_value exit_status "$_task16_report")|$(task16_report_value operation_status "$_task16_report")|$(task16_report_value phase "$_task16_report")|$(task16_report_value record_cleanup "$_task16_report")|$(task16_report_value cleanup_allowed "$_task16_report")"
+assert_eq "baseline failed compatibility" \
+  "failed|refused|operation-removal-failed|2|removal-failed|removal|forbidden|0" "$_task16_actual"
+assert_eq "baseline failed record status" removal-failed \
+  "$(sed -n 's/^status = "\([^"]*\)"/\1/p' "$operation_record_path")"
+
+operation_record_reset_result
+operation_record_prepare_path
+operation_id=task16-complete
+operation_started_at=2026-09-16T00:00:00Z
+operation_completed_at=2026-09-16T00:01:00Z
+operation_phase=completion
+operation_status=complete
+operation_record_container_name="$cname"
+operation_record_policy_digest=sha256:task16
+operation_image_reference=task16-image
+operation_record_inner_docker_volume="$dvol"
+operation_record_jj_volume="$jvol"
+operation_network_outcomes=none
+operation_diagnostic=""
+operation_readiness_result=ready
+operation_task_status=pass
+operation_agent_execution=allowed
+operation_explicit_exec=allowed
+operation_retry_command="ab start --apply"
+operation_record_cleanup=permitted
+lifecycle_record_write
+assert_eq "baseline complete record status" complete \
+  "$(sed -n 's/^status = "\([^"]*\)"/\1/p' "$operation_record_path")"
+assert_eq "baseline complete record cleanup" permitted \
+  "$(sed -n 's/^record_cleanup = "\([^"]*\)"/\1/p' "$operation_record_path")"
+operation_record_reset_result
+operation_record_prepare_path
+lifecycle_record_read
+policy_operation_mode="exec"
+policy_decision_kind=allow
+_task16_report="$(lifecycle_report_render)"
+_task16_actual="complete|$(task16_report_value result "$_task16_report")|$(task16_report_value reason "$_task16_report")|$(task16_report_value exit_status "$_task16_report")|$(task16_report_value operation_status "$_task16_report")|$(task16_report_value phase "$_task16_report")|$(task16_report_value record_cleanup "$_task16_report")|$(task16_report_value cleanup_allowed "$_task16_report")"
+assert_eq "baseline complete compatibility" \
+  "complete|success|operation-complete|0|complete|completion|permitted|1" "$_task16_actual"
+assert_eq "baseline complete report operation" task16-complete \
+  "$(task16_report_value operation_id "$_task16_report")"
+rm -f -- "$_task16_trace"
+rm -rf -- "$_task16_state"
+if [ -n "$_saved_task16_xdg_state_home" ]; then
+  XDG_STATE_HOME="$_saved_task16_xdg_state_home"
+else
+  unset XDG_STATE_HOME
+fi
+lock_identity="$_saved_task16_lock_identity"
+cname="$_saved_task16_cname"
+dvol="$_saved_task16_dvol"
+jvol="$_saved_task16_jvol"
+policy_operation_requested="$_saved_task16_operation_requested"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   printf 'PASS: all %d tests passed\n' "$PASS"
