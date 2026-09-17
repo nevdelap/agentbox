@@ -32,15 +32,53 @@
     <header>
       <div class="eyebrow">HOUSEKEEPING REVIEW</div>
       <h1>Review-artifact consolidation</h1>
-      <p class="meta">Reviewed 2026-09-16 · changes <code>89907d1d</code>, <code>06d8ac1e</code>, and <code>cc5be1c6</code> · Rufus-owned review</p>
+      <p class="meta">Reviewed 2026-09-17 · changes <code>89907d1d</code>, <code>06d8ac1e</code>, <code>cc5be1c6</code>, and proposed Task 17 · Rufus-owned review</p>
     </header>
 
     <section class="callout">
-      <strong>Disposition: accepted.</strong> The latest change fixes lifecycle-library resolution when
-      the launcher is reached through a symlink and adds a focused regression test. The preceding
-      housekeeping changes retire the completed design/review material and beta checklist after the
-      implementation was merged. No unresolved defect was found, and this is the sole retained review
-      document.
+      <strong>Disposition: Task 17 specification accepted for implementation; release remains blocked by C-1.</strong> The
+      latest change fixes lifecycle-library resolution when the launcher is reached through a symlink
+      and adds a focused regression test. The preceding housekeeping changes retire the completed
+      design/review material and beta checklist after the implementation was merged. The separate major
+      concurrency regression remains open below until its implementation and regressions pass, and this
+      is the sole retained review document.
+    </section>
+
+    <h2>Task 17 specification review</h2>
+    <section class="callout">
+      <strong>Disposition: ready for implementation.</strong> The updated
+      <code>design_docs/task17_concurrent_interactive_sessions.md</code> correctly scopes the fix to
+      releasing the lifecycle lock before long-lived execution, preserves mutation serialization, and
+      asks for deterministic concurrent, failure, and handoff coverage. T17-1 is resolved by the
+      explicit post-acquisition reinspection and duplicate-mutation criterion. T17-2 is resolved by
+      naming plain <code>config</code> as read-only and placing <code>config init</code> inside the
+      exclusive configuration-mutation boundary. No further specification blocker was found.
+    </section>
+
+    <h2>Open release regression</h2>
+    <section class="callout">
+      <strong>C-1 — Major — lifecycle lock spans interactive execution.</strong>
+      <p><strong>Status:</strong> Confirmed open; Task 17 is specified but implementation is still pending.</p>
+      <p><strong>Evidence:</strong> <code>bin/ab</code> states that the project-lock descriptor is
+      inherited by <code>docker exec</code> and intentionally remains open through the final report
+      (<code>bin/ab:655–658</code>). <code>policy_operation_begin</code> acquires that lock
+      (<code>bin/ab:3596–3602</code>), while the public <code>bash</code>, <code>claude</code>,
+      <code>codex</code>, and explicit <code>exec</code> paths call <code>cmd_exec</code> and only
+      end the report guard after Docker returns (<code>bin/ab:4497–4526</code> and
+      <code>bin/ab:4629–4660</code>). There is no lock release before the long-lived child session.</p>
+      <p><strong>Impact:</strong> A second command for the same project cannot acquire the lock while
+      the first interactive session is alive, waits the 30-second timeout, and reports a false
+      <code>project busy</code> failure. This regresses the previous ability for multiple agents to
+      enter the same project concurrently.</p>
+      <p><strong>Required task boundary:</strong> serialize policy/lifecycle inspection and mutation,
+      release the project lock before long-lived interactive execution, and preserve the mutation
+      guards and state revalidation needed around the handoff. Add a real multi-process/concurrent
+      session test; the current Task 10 tests only assert single-process/reentrant acquisition and
+      mock <code>cmd_exec</code> (<code>tests/run.sh:4180–4214</code>).</p>
+      <p><strong>Current reproduction:</strong> The reported rebuild-then-two-entry attempt is
+      consistent with the current source. The working-copy diff contains only the Task 17 Markdown
+      specification and this review document; <code>bin/ab</code>, the lifecycle library, and the
+      executable test implementation are unchanged. Therefore no lock release has been delivered yet.</p>
     </section>
 
     <h2>Why Igor did not remove all design documents</h2>
@@ -104,7 +142,9 @@
     <h2>Verification</h2>
     <ul>
       <li>Change <code>89907d1d</code> changes only the launcher library path and adds one symlink-resolution regression test.</li>
-      <li>Current <code>bash tests/run.sh</code> passes all 2,453 test assertions; Bash syntax and ShellCheck also pass.</li>
+      <li>Current <code>bash tests/run.sh</code> passes all 2,453 test assertions; Bash syntax and ShellCheck also pass, but the suite does not cover C-1.</li>
+      <li>Task 17 working copy <code>dd69bf16</code> resolves T17-1 and T17-2 and is ready for implementation; no production fix has been implemented yet.</li>
+      <li>User reproduction confirms C-1 remains observable after rebuild when two interactive entries contend for the same project.</li>
       <li>The completed-plan change migrated Task 15 validation to the permanent lifecycle contract before retiring its HTML artifact.</li>
       <li>The beta checklist removal updates its README and Just references, leaving no broken reference to <code>RELEASE_CHECKLIST.md</code>.</li>
       <li>Only this file remains under <code>review_docs/</code>; no review-named document remains under <code>design_docs/</code>.</li>
