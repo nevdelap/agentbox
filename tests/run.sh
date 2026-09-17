@@ -2994,12 +2994,13 @@ assert_eq "readiness failure preserves failed state" failed-and-exited "$operati
 unset -f is_running; eval "$_saved_task8_running_fn"
 
 rm -f "$operation_record_path"
+lock_identity="$(policy_lock_identity)"
 operation_record_begin
 operation_phase=removal; operation_old_container_id=recovery-old
 operation_record_failure removal-failed "docker rm failed" >/dev/null 2>&1
 _task8_recovery_old_id="$operation_id"
 _saved_task8_lock_fn="$(declare -f policy_lock_acquire)"
-policy_lock_acquire() { :; }
+policy_lock_acquire() { lock_identity="$(policy_lock_identity)"; :; }
 policy_operation_retry=1
 policy_operation_begin
 assert_eq "policy retry remains requested" 1 "$policy_operation_retry"
@@ -3187,6 +3188,8 @@ _saved_task9_main_begin_fn="$(declare -f policy_operation_begin)"
 _saved_task9_main_load_fn="$(declare -f policy_load_host)"
 _saved_task9_main_preflight_fn="$(declare -f policy_preflight)"
 _saved_task9_main_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task9_main_interactive_fn="$(declare -f policy_interactive_prepare)"
+_saved_task9_main_config_prepare_fn="$(declare -f policy_config_init_prepare)"
 _saved_task9_main_update_fn="$(declare -f check_for_update)"
 _saved_task9_main_start_fn="$(declare -f cmd_start)"
 _saved_task9_main_exec_fn="$(declare -f cmd_exec)"
@@ -3218,6 +3221,8 @@ policy_load_host() {
 }
 policy_preflight() { policy_decision_update_allowed=0; return 0; }
 policy_resolution_recheck() { return 0; }
+policy_interactive_prepare() { return 0; }
+policy_config_init_prepare() { return 0; }
 check_for_update() { echo update >>"$_task9_main_trace"; }
 task9_main_start_mode=no-op
 cmd_start() {
@@ -3450,6 +3455,7 @@ unset -f exists is_running docker
 eval "$_saved_task9_main_parse_runtime_fn"
 eval "$_saved_task9_main_begin_fn"; eval "$_saved_task9_main_load_fn"
 eval "$_saved_task9_main_preflight_fn"; eval "$_saved_task9_main_recheck_fn"
+eval "$_saved_task9_main_interactive_fn"; eval "$_saved_task9_main_config_prepare_fn"
 eval "$_saved_task9_main_update_fn"; eval "$_saved_task9_main_start_fn"
 eval "$_saved_task9_main_exec_fn"
 eval "$_saved_task9_main_config_fn"; eval "$_saved_task9_main_init_fn"
@@ -4162,7 +4168,7 @@ done
 lock_timeout_seconds=0; agentbox_lock_fd=""
 docker() { printf 'docker\n' >>"$_task10_lock2_trace"; return 1; }
 operation_record_load() { printf 'record-load\n' >>"$_task10_lock2_trace"; return 0; }
-for _task10_lock2_command in start config rebuild exec; do
+for _task10_lock2_command in start rebuild; do
   case "$_task10_lock2_command" in
     exec) _task10_lock2_output="$( ( main exec -- true ) 2>&1 )"; _task10_lock2_rc=$? ;;
     *) _task10_lock2_output="$( ( main "$_task10_lock2_command" ) 2>&1 )"; _task10_lock2_rc=$? ;;
@@ -4172,8 +4178,8 @@ for _task10_lock2_command in start config rebuild exec; do
     "$(printf '%s\n' "$_task10_lock2_output" | grep -c 'project busy')"
 done
 wait "$_task10_lock2_pid"
-assert_eq "busy public commands avoid unlocked record load" 0 "$(grep -c '^record-load$' "$_task10_lock2_trace" || true)"
-assert_eq "busy public commands avoid Docker" 0 "$(grep -c '^docker$' "$_task10_lock2_trace" || true)"
+assert_eq "busy lifecycle commands avoid unlocked record load" 0 "$(grep -c '^record-load$' "$_task10_lock2_trace" || true)"
+assert_eq "busy lifecycle commands avoid Docker" 0 "$(grep -c '^docker$' "$_task10_lock2_trace" || true)"
 unset -f docker operation_record_load
 eval "$_saved_task10_lock2_docker_fn"; eval "$_saved_task10_lock2_load_fn"
 
@@ -4584,6 +4590,8 @@ echo "Task 13 fixture ownership guard"
 # Keep the destructive fixture boundary covered without requiring Docker/Sysbox. These mocks
 # exercise the same runtime-matrix functions used by P13-09 and verify that ambiguous ownership
 # is retained, replaced IDs are never removed, and matching IDs leave ledger evidence.
+# runtime_matrix.sh replaces main; keep the launcher dispatch for the public Task 17 tests.
+_saved_task17_launcher_main_fn="$(declare -f main)"
 # shellcheck source=runtime_matrix.sh
 # shellcheck disable=SC1091
 source "$REPO/tests/runtime_matrix.sh"
@@ -5121,6 +5129,435 @@ cname="$_saved_task16_cname"
 dvol="$_saved_task16_dvol"
 jvol="$_saved_task16_jvol"
 policy_operation_requested="$_saved_task16_operation_requested"
+
+echo "Task 17 concurrent interactive sessions"
+_saved_task17_matrix_main_fn="$(declare -f main)"
+_saved_task17_projection_fn="$(declare -f lifecycle_projection_build)"
+_saved_task17_report_derive_fn="$(declare -f command_report_derive)"
+_saved_task17_report_render_fn="$(declare -f lifecycle_report_render)"
+_saved_task17_report_guard_begin_fn="$(declare -f command_report_lifecycle_guard_begin)"
+_saved_task17_report_guard_end_fn="$(declare -f command_report_lifecycle_guard_end)"
+_saved_task17_lock_fn="$(declare -f policy_lock_acquire)"
+_saved_task17_record_read_fn="$(declare -f lifecycle_record_read)"
+_saved_task17_begin_fn="$(declare -f policy_operation_begin)"
+_saved_task17_preflight_fn="$(declare -f policy_preflight)"
+_saved_task17_recheck_fn="$(declare -f policy_resolution_recheck)"
+_saved_task17_config_fn="$(declare -f cmd_config)"
+_saved_task17_config_init_fn="$(declare -f cmd_config_init)"
+_saved_task17_grants_validate_fn="$(declare -f grant_sources_validate_snapshot)"
+_saved_task17_grants_recheck_fn="$(declare -f grant_sources_recheck)"
+_saved_task17_require_jj_fn="$(declare -f require_jj_state_mount)"
+_saved_task17_wait_jj_fn="$(declare -f wait_jj_state)"
+_saved_task17_running_fn="$(declare -f is_running)"
+_saved_task17_docker_fn="$(declare -f docker)"
+_saved_task17_start_fn="$(declare -f cmd_start)"
+_saved_task17_home="$HOME"
+_saved_task17_runtime="${XDG_RUNTIME_DIR-}"
+_saved_task17_project="$PROJECT_DIR"
+_saved_task17_machine="$MACHINE"
+_saved_task17_cname="$cname"
+_saved_task17_fd="$agentbox_lock_fd"
+_saved_task17_timeout="$lock_timeout_seconds"
+_task17_root="$(mktemp -d)"
+HOME="$_task17_root/home"; XDG_RUNTIME_DIR="$_task17_root/runtime"
+PROJECT_DIR="$_task17_root/project"; MACHINE=task17
+cname=agentbox-task17; mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$PROJECT_DIR"
+assert_eq "launcher main saved separately" 1 \
+  "$([ -n "$_saved_task17_launcher_main_fn" ] && echo 1 || echo 0)"
+assert_eq "matrix main saved separately" 1 \
+  "$([ -n "$_saved_task17_matrix_main_fn" ] && echo 1 || echo 0)"
+
+# Read-only and interactive operation starts do not acquire the lifecycle lock. Explicit
+# lifecycle mutations still do, so a mutator cannot overlap another mutator.
+_task17_lock_modes=()
+policy_lock_acquire() { _task17_lock_modes+=("$policy_operation_mode"); return 0; }
+lifecycle_record_read() { return 0; }
+for _task17_mode in status logs config exec start rebuild stop destroy; do
+  policy_operation_mode="$_task17_mode"; policy_operation_retry=0
+  policy_operation_begin
+done
+assert_eq "read-only and exec begin without lock" "start rebuild stop destroy" \
+  "${_task17_lock_modes[*]}"
+
+# The configuration report remains read-only, while config init takes the explicit mutation
+# boundary. Keep this test at the public dispatch so the distinction cannot drift at the caller.
+policy_operation_begin() {
+  policy_operation_requested=1; operation_state_reset
+  policy_operation_status=none; policy_readiness_result=not-applicable
+  operation_state_publish; return 0
+}
+_task17_config_preflight=0
+policy_preflight() {
+  _task17_config_preflight=$((_task17_config_preflight + 1))
+  policy_decision_update_allowed=0
+  return 0
+}
+policy_resolution_recheck() { return 0; }
+policy_lock_acquire() { _task17_config_lock=$((_task17_config_lock + 1)); return 0; }
+cmd_config() { return 0; }
+cmd_config_init() { return 0; }
+_task17_config_lock=0
+eval "$_saved_task17_launcher_main_fn"
+main config init
+assert_eq "config init acquires mutation lock" 1 "$_task17_config_lock"
+assert_eq "config init re-inspects under lock" 2 "$_task17_config_preflight"
+main config
+assert_eq "plain config remains unlocked" 1 "$_task17_config_lock"
+
+# A mutation-required interactive handoff re-inspects under the real project lock, then releases
+# that descriptor before the mocked long-lived Docker child is entered.
+unset -f policy_lock_acquire lifecycle_record_read policy_operation_begin policy_preflight
+eval "$_saved_task17_lock_fn"; eval "$_saved_task17_record_read_fn"
+eval "$_saved_task17_begin_fn"; eval "$_saved_task17_preflight_fn"
+unset -f policy_resolution_recheck grant_sources_validate_snapshot grant_sources_recheck
+unset -f require_jj_state_mount wait_jj_state is_running docker
+eval "$_saved_task17_recheck_fn"; eval "$_saved_task17_grants_validate_fn"
+eval "$_saved_task17_grants_recheck_fn"; eval "$_saved_task17_require_jj_fn"
+eval "$_saved_task17_wait_jj_fn"; eval "$_saved_task17_running_fn"
+eval "$_saved_task17_docker_fn"
+
+_task17_prepare_calls=0; _task17_handoff_trace="$_task17_root/handoff.trace"
+: >"$_task17_handoff_trace"
+lifecycle_record_read() { return 0; }
+policy_preflight() {
+  _task17_prepare_calls=$((_task17_prepare_calls + 1))
+  policy_decision_kind=start-in-place; policy_decision_reason_code=policy-matches-recorded
+  policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_decision_update_allowed=0
+  return 0
+}
+policy_resolution_recheck() { return 0; }
+grant_sources_validate_snapshot() { return 0; }
+grant_sources_recheck() { return 0; }
+require_jj_state_mount() { return 0; }
+wait_jj_state() { return 0; }
+is_running() { return 0; }
+docker() {
+  if [ -n "${agentbox_lock_fd:-}" ]; then
+    printf 'lock-held\n' >>"$_task17_handoff_trace"
+  else
+    printf 'lock-released\n' >>"$_task17_handoff_trace"
+  fi
+  return 0
+}
+policy_operation_requested=1; policy_decision_kind=start-in-place
+policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1
+policy_decision_explicit_exec_mode=allowed; policy_explicit_exec_command=1
+policy_interactive_prepare exec
+assert_eq "interactive handoff re-inspects under lock" 1 "$_task17_prepare_calls"
+assert_eq "interactive handoff owns lock before child" 0 "$([ -z "$agentbox_lock_fd" ] && echo 1 || echo 0)"
+cmd_exec true
+assert_eq "interactive child starts after lock release" 1 \
+  "$(grep -c '^lock-released$' "$_task17_handoff_trace" || true)"
+assert_eq "interactive child never inherits lock" 0 \
+  "$(grep -c '^lock-held$' "$_task17_handoff_trace" || true)"
+assert_eq "interactive handoff releases descriptor" "" "$agentbox_lock_fd"
+
+# Exercise the public launcher dispatch, rather than only calling cmd_exec directly. Two ready
+# sessions must reach Docker together through both `ab bash` and `ab exec`, with no lifecycle lock
+# held across the long-lived child.
+_task17_public_ready_root="$_task17_root/public-ready"
+_task17_public_ready_trace="$_task17_public_ready_root/trace"
+_task17_public_ready_release="$_task17_public_ready_root/release"
+_task17_public_ready_out_a="$_task17_public_ready_root/bash.out"
+_task17_public_ready_out_b="$_task17_public_ready_root/exec.out"
+mkdir -p "$_task17_public_ready_root"
+: >"$_task17_public_ready_trace"
+rm -f "$_task17_public_ready_release" "$_task17_public_ready_out_a" "$_task17_public_ready_out_b"
+lifecycle_projection_build() { :; }
+command_report_derive() { command_report_exit_status=0; }
+lifecycle_report_render() { :; }
+command_report_lifecycle_guard_begin() { :; }
+command_report_lifecycle_guard_end() { policy_lock_release; }
+policy_preflight() {
+  policy_decision_kind=start-in-place; policy_decision_reason_code=policy-matches-recorded
+  policy_decision_mutation_allowed=0; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_decision_update_allowed=0
+  return 0
+}
+policy_resolution_recheck() { return 0; }
+grant_sources_validate_snapshot() { return 0; }
+grant_sources_recheck() { return 0; }
+require_jj_state_mount() { return 0; }
+wait_jj_state() { return 0; }
+is_running() { return 0; }
+docker() {
+  printf 'started\n' >>"$_task17_public_ready_trace"
+  while [ ! -e "$_task17_public_ready_release" ]; do sleep 0.01; done
+  printf 'finished\n' >>"$_task17_public_ready_trace"
+  return 0
+}
+policy_operation_requested=0
+( main bash >"$_task17_public_ready_out_a" 2>&1 ) & _task17_public_ready_pid_a=$!
+( main exec -- true >"$_task17_public_ready_out_b" 2>&1 ) & _task17_public_ready_pid_b=$!
+_task17_wait=0
+while [ "$(grep -c '^started$' "$_task17_public_ready_trace" || true)" -lt 2 ] && [ "$_task17_wait" -lt 200 ]; do
+  sleep 0.01; _task17_wait=$((_task17_wait + 1))
+done
+touch "$_task17_public_ready_release"
+wait "$_task17_public_ready_pid_a"; _task17_public_ready_rc_a=$?
+wait "$_task17_public_ready_pid_b"; _task17_public_ready_rc_b=$?
+assert_eq "public ready bash succeeds" 0 "$_task17_public_ready_rc_a"
+assert_eq "public ready exec succeeds" 0 "$_task17_public_ready_rc_b"
+assert_eq "public ready sessions overlap" 2 \
+  "$(grep -c '^started$' "$_task17_public_ready_trace" || true)"
+assert_eq "public bash avoids busy" 0 "$(grep -c 'project busy' "$_task17_public_ready_out_a" || true)"
+assert_eq "public exec avoids busy" 0 "$(grep -c 'project busy' "$_task17_public_ready_out_b" || true)"
+
+# Two ready-container sessions use the execution seam concurrently and stay overlapped behind a
+# deterministic barrier. No lifecycle lock is held during either child.
+_task17_session_trace="$_task17_root/sessions.trace"
+_task17_session_release="$_task17_root/sessions.release"
+_task17_session_out_a="$_task17_root/session-a.out"
+_task17_session_out_b="$_task17_root/session-b.out"
+: >"$_task17_session_trace"
+rm -f "$_task17_session_release" "$_task17_session_out_a" "$_task17_session_out_b"
+docker() {
+  printf 'started\n' >>"$_task17_session_trace"
+  while [ ! -e "$_task17_session_release" ]; do sleep 0.01; done
+  printf 'finished\n' >>"$_task17_session_trace"
+  return 0
+}
+policy_decision_kind=start-in-place; policy_decision_mutation_allowed=0
+policy_decision_execution_allowed=1; policy_decision_explicit_exec_mode=allowed
+policy_operation_requested=1; agentbox_lock_fd=""
+( cmd_exec true >"$_task17_session_out_a" 2>&1 ) & _task17_session_pid_a=$!
+( cmd_exec true >"$_task17_session_out_b" 2>&1 ) & _task17_session_pid_b=$!
+_task17_wait=0
+while [ "$(grep -c '^started$' "$_task17_session_trace" || true)" -lt 2 ] && [ "$_task17_wait" -lt 100 ]; do
+  sleep 0.01; _task17_wait=$((_task17_wait + 1))
+done
+touch "$_task17_session_release"
+wait "$_task17_session_pid_a"; _task17_session_rc_a=$?
+wait "$_task17_session_pid_b"; _task17_session_rc_b=$?
+assert_eq "concurrent ready session A succeeds" 0 "$_task17_session_rc_a"
+assert_eq "concurrent ready session B succeeds" 0 "$_task17_session_rc_b"
+assert_eq "concurrent ready sessions overlap" 2 \
+  "$(grep -c '^started$' "$_task17_session_trace" || true)"
+assert_eq "concurrent session A avoids busy" 0 "$(grep -c 'project busy' "$_task17_session_out_a" || true)"
+assert_eq "concurrent session B avoids busy" 0 "$(grep -c 'project busy' "$_task17_session_out_b" || true)"
+
+# Two auto-starting commands serialize only the mutation. The first worker is held at a barrier
+# while the second waits for the lock; after handoff, the second re-inspection skips cmd_start.
+_task17_auto_root="$_task17_root/auto"
+mkdir -p "$_task17_auto_root"
+_task17_auto_ready="$_task17_auto_root/ready"
+_task17_auto_release="$_task17_auto_root/release"
+_task17_auto_done="$_task17_auto_root/done"
+_task17_auto_mutations="$_task17_auto_root/mutations"
+rm -f "$_task17_auto_ready" "$_task17_auto_release" "$_task17_auto_done" "$_task17_auto_mutations"
+policy_preflight() {
+  if [ -e "$_task17_auto_done" ]; then
+    policy_decision_mutation_allowed=0
+  else
+    policy_decision_mutation_allowed=1
+    if [ ! -e "$_task17_auto_ready" ]; then
+      touch "$_task17_auto_ready"
+      while [ ! -e "$_task17_auto_release" ]; do sleep 0.01; done
+    fi
+  fi
+  policy_decision_kind=start-in-place; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; return 0
+}
+is_running() { [ -e "$_task17_auto_done" ]; }
+cmd_start() { printf 'mutation\n' >>"$_task17_auto_mutations"; touch "$_task17_auto_done"; }
+policy_operation_requested=1
+(
+  policy_decision_mutation_allowed=1
+  policy_interactive_prepare exec || exit 1
+  is_running || cmd_start
+  policy_lock_release
+) & _task17_auto_pid_a=$!
+while [ ! -e "$_task17_auto_ready" ]; do sleep 0.01; done
+touch "$_task17_auto_release"
+(
+  policy_decision_mutation_allowed=1
+  policy_interactive_prepare exec || exit 1
+  is_running || cmd_start
+  policy_lock_release
+) & _task17_auto_pid_b=$!
+wait "$_task17_auto_pid_a"; _task17_auto_rc_a=$?
+wait "$_task17_auto_pid_b"; _task17_auto_rc_b=$?
+assert_eq "concurrent auto-start A succeeds" 0 "$_task17_auto_rc_a"
+assert_eq "concurrent auto-start B succeeds" 0 "$_task17_auto_rc_b"
+assert_eq "concurrent auto-start mutates once" 1 \
+  "$(grep -c '^mutation$' "$_task17_auto_mutations" || true)"
+
+# Two public lifecycle writers serialize on the same project lock. Hold the first `main start`
+# inside its mocked writer so the second must wait, then let both finish and verify that neither
+# reports the ordinary interactive-session busy error.
+_task17_public_mutator_root="$_task17_root/public-mutator"
+_task17_public_mutator_ready="$_task17_public_mutator_root/ready"
+_task17_public_mutator_release="$_task17_public_mutator_root/release"
+_task17_public_mutator_trace="$_task17_public_mutator_root/trace"
+mkdir -p "$_task17_public_mutator_root"
+rm -f "$_task17_public_mutator_ready" "$_task17_public_mutator_release" \
+  "$_task17_public_mutator_trace"
+policy_preflight() {
+  policy_decision_kind=create; policy_decision_reason_code=container-absent
+  policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_decision_update_allowed=0
+  return 0
+}
+cmd_start() {
+  printf 'started\n' >>"$_task17_public_mutator_trace"
+  if [ ! -e "$_task17_public_mutator_ready" ]; then
+    touch "$_task17_public_mutator_ready"
+    while [ ! -e "$_task17_public_mutator_release" ]; do sleep 0.01; done
+  fi
+  printf 'finished\n' >>"$_task17_public_mutator_trace"
+  return 0
+}
+( main start >"$_task17_public_mutator_root/start-a.out" 2>&1 ) & _task17_public_mutator_pid_a=$!
+( main start >"$_task17_public_mutator_root/start-b.out" 2>&1 ) & _task17_public_mutator_pid_b=$!
+_task17_wait=0
+while [ ! -e "$_task17_public_mutator_ready" ] && [ "$_task17_wait" -lt 200 ]; do
+  sleep 0.01; _task17_wait=$((_task17_wait + 1))
+done
+assert_eq "public mutator holds one writer" 1 \
+  "$(grep -c '^started$' "$_task17_public_mutator_trace" || true)"
+touch "$_task17_public_mutator_release"
+wait "$_task17_public_mutator_pid_a"; _task17_public_mutator_rc_a=$?
+wait "$_task17_public_mutator_pid_b"; _task17_public_mutator_rc_b=$?
+assert_eq "public mutator A succeeds" 0 "$_task17_public_mutator_rc_a"
+assert_eq "public mutator B succeeds" 0 "$_task17_public_mutator_rc_b"
+assert_eq "public mutators both write" 2 \
+  "$(grep -c '^started$' "$_task17_public_mutator_trace" || true)"
+assert_eq "public mutator A avoids busy" 0 \
+  "$(grep -c 'project busy' "$_task17_public_mutator_root/start-a.out" || true)"
+assert_eq "public mutator B avoids busy" 0 \
+  "$(grep -c 'project busy' "$_task17_public_mutator_root/start-b.out" || true)"
+
+# A public writer that is refused during preflight, or fails in cmd_start, must still close its
+# descriptor when its launcher process exits. The following acquire checks both paths immediately.
+policy_preflight() { return 1; }
+( main start >"$_task17_public_mutator_root/refused.out" 2>&1 ) & _task17_refused_pid=$!
+wait "$_task17_refused_pid" || true
+policy_lock_acquire
+assert_eq "public refused writer releases lock" 1 "$([ "$lock_result" = acquired ] && echo 1 || echo 0)"
+policy_lock_release
+policy_preflight() {
+  policy_decision_kind=create; policy_decision_reason_code=container-absent
+  policy_decision_mutation_allowed=1; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_decision_update_allowed=0
+  return 0
+}
+cmd_start() { return 1; }
+( main start >"$_task17_public_mutator_root/failed.out" 2>&1 ) & _task17_failed_public_pid=$!
+wait "$_task17_failed_public_pid" || true
+policy_lock_acquire
+assert_eq "public failed writer releases lock" 1 "$([ "$lock_result" = acquired ] && echo 1 || echo 0)"
+policy_lock_release
+
+# Repeat the auto-start race through the public convenience launchers. The two commands may both
+# observe a stopped container, but the mutation lock and under-lock reinspection permit exactly
+# one cmd_start before the Codex and Claude sessions overlap.
+_task17_public_auto_root="$_task17_root/public-auto"
+_task17_public_auto_ready="$_task17_public_auto_root/ready"
+_task17_public_auto_release="$_task17_public_auto_root/release"
+_task17_public_auto_done="$_task17_public_auto_root/done"
+_task17_public_auto_mutations="$_task17_public_auto_root/mutations"
+_task17_public_auto_trace="$_task17_public_auto_root/trace"
+_task17_public_auto_exec_release="$_task17_public_auto_root/exec-release"
+mkdir -p "$_task17_public_auto_root"
+rm -f "$_task17_public_auto_ready" "$_task17_public_auto_release" \
+  "$_task17_public_auto_done" "$_task17_public_auto_mutations" \
+  "$_task17_public_auto_trace" "$_task17_public_auto_exec_release"
+: >"$_task17_public_auto_trace"
+policy_preflight() {
+  if [ -n "${agentbox_lock_fd:-}" ] && [ ! -e "$_task17_public_auto_ready" ]; then
+    touch "$_task17_public_auto_ready"
+    while [ ! -e "$_task17_public_auto_release" ]; do sleep 0.01; done
+  fi
+  if [ -e "$_task17_public_auto_done" ]; then
+    policy_decision_mutation_allowed=0
+  else
+    policy_decision_mutation_allowed=1
+  fi
+  policy_decision_kind=start-in-place; policy_decision_execution_allowed=1
+  policy_decision_explicit_exec_mode=allowed; policy_decision_update_allowed=0
+  return 0
+}
+is_running() { [ -e "$_task17_public_auto_done" ]; }
+cmd_start() {
+  printf 'mutation\n' >>"$_task17_public_auto_mutations"
+  touch "$_task17_public_auto_done"
+  return 0
+}
+docker() {
+  printf 'started\n' >>"$_task17_public_auto_trace"
+  while [ ! -e "$_task17_public_auto_exec_release" ]; do sleep 0.01; done
+  printf 'finished\n' >>"$_task17_public_auto_trace"
+  return 0
+}
+( main codex -- true >"$_task17_public_auto_root/codex.out" 2>&1 ) & _task17_public_auto_pid_a=$!
+( main claude -- true >"$_task17_public_auto_root/claude.out" 2>&1 ) & _task17_public_auto_pid_b=$!
+_task17_wait=0
+while [ ! -e "$_task17_public_auto_ready" ] && [ "$_task17_wait" -lt 200 ]; do
+  sleep 0.01; _task17_wait=$((_task17_wait + 1))
+done
+assert_eq "public auto-start acquires mutation barrier" 1 \
+  "$([ -e "$_task17_public_auto_ready" ] && echo 1 || echo 0)"
+touch "$_task17_public_auto_release"
+_task17_wait=0
+while [ "$(grep -c '^started$' "$_task17_public_auto_trace" || true)" -lt 2 ] && [ "$_task17_wait" -lt 200 ]; do
+  sleep 0.01; _task17_wait=$((_task17_wait + 1))
+done
+assert_eq "public auto-start reaches execution barrier" 2 \
+  "$(grep -c '^started$' "$_task17_public_auto_trace" || true)"
+touch "$_task17_public_auto_exec_release"
+wait "$_task17_public_auto_pid_a"; _task17_public_auto_rc_a=$?
+wait "$_task17_public_auto_pid_b"; _task17_public_auto_rc_b=$?
+assert_eq "public auto-start Codex succeeds" 0 "$_task17_public_auto_rc_a"
+assert_eq "public auto-start Claude succeeds" 0 "$_task17_public_auto_rc_b"
+assert_eq "public auto-start mutates once" 1 \
+  "$(grep -c '^mutation$' "$_task17_public_auto_mutations" || true)"
+assert_eq "public auto-start sessions overlap" 2 \
+  "$(grep -c '^started$' "$_task17_public_auto_trace" || true)"
+assert_eq "public Codex avoids busy" 0 "$(grep -c 'project busy' "$_task17_public_auto_root/codex.out" || true)"
+assert_eq "public Claude avoids busy" 0 "$(grep -c 'project busy' "$_task17_public_auto_root/claude.out" || true)"
+
+# Closing a failed or signalled mutator must release the kernel lock through descriptor close.
+# The next public mutation can therefore acquire the same project lock without a stale busy
+# result, covering refused/failing and interrupted child lifetimes.
+_task17_cleanup_root="$_task17_root/cleanup"
+mkdir -p "$_task17_cleanup_root"
+lock_timeout_seconds=1
+( policy_lock_acquire && touch "$_task17_cleanup_root/failed" && exit 1 ) \
+  >"$_task17_cleanup_root/failed.out" 2>&1 & _task17_failed_pid=$!
+wait "$_task17_failed_pid" || true
+policy_lock_acquire
+assert_eq "failed mutator releases lock" 1 "$(test -e "$_task17_cleanup_root/failed" && echo 1 || echo 0)"
+policy_lock_release
+( policy_lock_acquire && touch "$_task17_cleanup_root/signalled" && kill -TERM "$BASHPID" ) \
+  >"$_task17_cleanup_root/signalled.out" 2>&1 & _task17_signalled_pid=$!
+wait "$_task17_signalled_pid" || true
+policy_lock_acquire
+assert_eq "signalled mutator releases lock" 1 "$(test -e "$_task17_cleanup_root/signalled" && echo 1 || echo 0)"
+policy_lock_release
+
+rm -rf -- "$_task17_root"
+unset -f policy_lock_acquire lifecycle_record_read policy_operation_begin policy_preflight
+unset -f policy_resolution_recheck grant_sources_validate_snapshot grant_sources_recheck
+unset -f require_jj_state_mount wait_jj_state is_running docker cmd_start cmd_config cmd_config_init
+unset -f lifecycle_projection_build command_report_derive lifecycle_report_render
+unset -f command_report_lifecycle_guard_begin command_report_lifecycle_guard_end
+eval "$_saved_task17_lock_fn"; eval "$_saved_task17_record_read_fn"
+eval "$_saved_task17_begin_fn"; eval "$_saved_task17_preflight_fn"
+eval "$_saved_task17_recheck_fn"; eval "$_saved_task17_grants_validate_fn"
+eval "$_saved_task17_grants_recheck_fn"; eval "$_saved_task17_require_jj_fn"
+eval "$_saved_task17_wait_jj_fn"; eval "$_saved_task17_running_fn"
+eval "$_saved_task17_docker_fn"; eval "$_saved_task17_start_fn"
+eval "$_saved_task17_config_fn"; eval "$_saved_task17_config_init_fn"
+eval "$_saved_task17_projection_fn"; eval "$_saved_task17_report_derive_fn"
+eval "$_saved_task17_report_render_fn"; eval "$_saved_task17_report_guard_begin_fn"
+eval "$_saved_task17_report_guard_end_fn"
+HOME="$_saved_task17_home"
+if [ -n "$_saved_task17_runtime" ]; then XDG_RUNTIME_DIR="$_saved_task17_runtime"; else unset XDG_RUNTIME_DIR; fi
+PROJECT_DIR="$_saved_task17_project"; MACHINE="$_saved_task17_machine"
+cname="$_saved_task17_cname"; agentbox_lock_fd="$_saved_task17_fd"
+lock_timeout_seconds="$_saved_task17_timeout"
+eval "$_saved_task17_matrix_main_fn"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
