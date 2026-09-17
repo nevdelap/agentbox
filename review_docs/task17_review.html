@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Task 17 review</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#f4f6f8, #101318); --panel: light-dark(#fff, #181c23); --text: light-dark(#20252d, #edf1f7); --muted: light-dark(#5e6877, #aeb8c7); --line: light-dark(#dce2e9, #303844); --accent: light-dark(#315fba, #9bb9ff); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 1080px; margin: 0 auto; padding: 42px 24px 70px; }
+    h1, h2 { line-height: 1.2; }
+    h1 { margin: 8px 0; font-size: clamp(2rem, 4vw, 3.1rem); letter-spacing: -.04em; }
+    h2 { margin: 36px 0 12px; font-size: 1.4rem; }
+    p { margin: 8px 0; }
+    .eyebrow, .meta, .note { color: var(--muted); }
+    .eyebrow { color: var(--accent); font-size: .75rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .meta { font-size: .9rem; }
+    .callout { margin-top: 18px; padding: 15px 17px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+    a { color: var(--accent); }
+    @media (max-width: 760px) { main { padding: 28px 14px 50px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">TASK 17 REVIEW</div>
+      <h1>Concurrent interactive sessions</h1>
+      <p class="meta">Reviewed 2026-09-18 · implementation <code>2832348f</code> · Rufus-owned review</p>
+    </header>
+
+    <section class="callout">
+      <strong>Disposition: accepted.</strong> The lifecycle lock is
+      released before long-lived interactive execution, the required public concurrency cases are
+      covered, and the complete source-based test gate passes. The previous test restoration-reference
+      cleanup is also resolved.
+    </section>
+
+    <h2>Specification review</h2>
+    <section class="callout">
+      <strong>Disposition: specification accepted.</strong> The Task 17 specification correctly
+      separates lifecycle mutation from interactive execution, retains mutation serialization, marks
+      plain <code>config</code> read-only, keeps <code>config init</code> exclusive, and requires
+      deterministic concurrent, failure, and handoff coverage.
+    </section>
+
+    <h2>Findings</h2>
+    <section class="callout">
+      <strong>I-1 — Resolved — the repository test gate is green.</strong>
+      <p><strong>Evidence:</strong> <code>bash tests/run.sh</code> now reports
+      <code>PASS: all 2489 tests passed</code>. The previously failing public command-report fixtures
+      were updated for the new preparation seams, and the auto-start barrier now produces a numeric,
+      verified execution count.</p>
+    </section>
+
+    <section class="callout">
+      <strong>I-2 — Resolved — the public auto-start barrier is deterministic.</strong>
+      <p><code>tests/run.sh:5451–5503</code> now creates the trace before polling, asserts that the
+      mutation barrier was reached, and asserts that both convenience sessions reached the execution
+      barrier before releasing them. The full suite passes without the prior missing-file or integer
+      diagnostic.</p>
+    </section>
+
+    <section class="callout">
+      <strong>I-3 — Resolved — <code>config init</code> now re-inspects under the lock.</strong>
+      <p>The new <code>policy_config_init_prepare</code> helper acquires the lock, reloads lifecycle
+      state, reruns policy preflight, and reruns the resolution check before writing. The focused test
+      now expects two preflight passes.</p>
+    </section>
+
+    <section class="callout">
+      <strong>I-4 — Resolved — public writer and cleanup scenarios were added.</strong>
+      <p>The tests cover two concurrent public lifecycle writers, refused and failed writers,
+      and signalled cleanup. Public ready <code>bash</code>/<code>exec</code> and Codex/Claude auto-start
+      paths are also now exercised.</p>
+    </section>
+
+    <section class="callout">
+      <strong>I-5 — Resolved — Task 17 test restoration references are valid.</strong>
+      <p>The test setup now defines and restores the launcher and matrix <code>main</code> functions
+      through named variables, and the full suite passes with those boundaries exercised.</p>
+    </section>
+
+    <h2>Verification</h2>
+    <ul>
+      <li><code>bash tests/run.sh</code>: <code>PASS: all 2491 tests passed</code>.</li>
+      <li><code>bash -n bin/ab lib/lifecycle_interfaces.sh agentbox-entrypoint.sh tests/run.sh tests/runtime_matrix.sh</code>: passed.</li>
+      <li><code>shellcheck bin/ab lib/lifecycle_interfaces.sh agentbox-entrypoint.sh tests/runtime_matrix.sh</code>: passed.</li>
+      <li>The normal <code>cmd_exec</code> path calls <code>policy_lock_release</code> before Docker execution, and all recorded Task 17 findings are resolved.</li>
+    </ul>
+    <p class="note">No implementation changes were made during this review.</p>
+  </main>
+</body>
+</html>

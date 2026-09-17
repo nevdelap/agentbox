@@ -652,10 +652,10 @@ custom_mounts_snapshot_recheck() {
   fi
 }
 
-# One advisory lock per canonical project/machine identity. The descriptor remains open in this
-# launcher process (and is inherited by docker exec), so the lock spans inspection, mutation, and
-# the final command report. A lock cannot be silently bypassed when the preferred directory is
-# unavailable: the documented cache fallbacks are tried in order instead.
+# One advisory lock per canonical project/machine identity. The descriptor is held only across
+# lifecycle/configuration mutation and is released before a long-lived docker exec. A lock cannot
+# be silently bypassed when the preferred directory is unavailable: the documented cache
+# fallbacks are tried in order instead.
 lock_timeout_seconds=30
 lock_identity=""
 lock_path=""
@@ -714,6 +714,13 @@ policy_lock_acquire() {
     policy_fail "lock failed for $PROJECT_DIR: unable to create or open a lock path"
     return 1
   }
+}
+
+policy_lock_release() {
+  [ -n "${agentbox_lock_fd:-}" ] || return 0
+  flock -u "$agentbox_lock_fd" 2>/dev/null || true
+  exec {agentbox_lock_fd}>&-
+  agentbox_lock_fd=""
 }
 
 operation_record_reset_result() {
@@ -1060,6 +1067,7 @@ command_report_lifecycle_exit_trap() {
   if [ "${command_report_emitted:-0}" != 1 ]; then
     lifecycle_report_render failed command-failed 1
   fi
+  policy_lock_release
   trap - EXIT
   exit "$rc"
 }
@@ -1070,6 +1078,7 @@ command_report_lifecycle_guard_begin() {
 }
 
 command_report_lifecycle_guard_end() {
+  policy_lock_release
   trap - EXIT
 }
 
@@ -3501,9 +3510,6 @@ policy_decision_require() {
 
 policy_preflight() {
   local mode="$1"
-  if [ "${policy_operation_requested:-0}" = 1 ] && [ -z "$agentbox_lock_fd" ]; then
-    policy_lock_acquire || return 1
-  fi
   policy_load_host || return 1
   # Capture grant source type/identity before any Docker inspection. Recorded grant state may
   # refine the effective value below, so the snapshot includes all three top-level sources.
@@ -3598,7 +3604,12 @@ policy_operation_begin() {
   policy_snapshot_retry_count=0
   policy_operation_status=none
   policy_readiness_result=not-applicable
-  policy_lock_acquire || return 1
+  case "${policy_operation_mode:-}" in
+    start|rebuild|stop|destroy) policy_lock_acquire || return 1 ;;
+  esac
+  # Read-only and interactive commands do not acquire the lock, but their operation-record path
+  # must still follow the current project identity rather than a descriptor left by a prior call.
+  lock_identity="$(policy_lock_identity)"
   lifecycle_record_read || return 1
   policy_retry_reconcile=0
   # A fresh explicit reconciliation is the only retry path. Ordinary starts and execs must
@@ -3613,6 +3624,36 @@ policy_operation_begin() {
     policy_readiness_result=not-applicable
     lifecycle_projection_build
   fi
+}
+
+# Interactive commands inspect without holding the lifecycle lock. If that inspection says an
+# auto-start or reconciliation is needed, acquire the lock and repeat the complete inspection
+# while holding it. The caller keeps the lock through cmd_start, then releases it before Docker
+# enters the long-lived session. When the caller already owns the lock, the state was rechecked
+# by an earlier invocation and the existing descriptor remains authoritative.
+policy_interactive_prepare() {
+  local acquired=0
+  if [ -z "${agentbox_lock_fd:-}" ]; then
+    policy_lock_acquire || return 1
+    acquired=1
+  fi
+  if [ "$acquired" = 1 ]; then
+    lifecycle_record_read || return 1
+    policy_retry_reconcile=0
+    policy_preflight "$1" || return 1
+    policy_resolution_recheck "$1" || return 1
+  fi
+}
+
+# Configuration reports are read-only, but config init writes the resolved configuration tier.
+# Acquire the mutation lock only for that writer and repeat the state/policy inspection while it
+# is held, matching the lifecycle handoff rules without serializing ordinary config reports.
+policy_config_init_prepare() {
+  policy_lock_acquire || return 1
+  lifecycle_record_read || return 1
+  policy_retry_reconcile=0
+  policy_preflight config || return 1
+  policy_resolution_recheck config || return 1
 }
 
 policy_resolution_recheck() {
@@ -4281,10 +4322,18 @@ cmd_exec() {
     # work while a prior Task 7 operation is degraded or not ready.
     is_running || { policy_fail "diagnostic-only exec requires a running outer container"; exit 1; }
   else
-    is_running || cmd_start
+    if ! is_running; then
+      # A container can stop after the initial read-only inspection. Reacquire and re-inspect
+      # before allowing the fallback start, so no lifecycle mutation occurs without the lock.
+      policy_interactive_prepare exec || exit 1
+      is_running || cmd_start
+    fi
     # Covers a concurrent `ab start`, or a container started directly with `docker start`, where
     # cmd_start was not the process that waited for the entrypoint's jj ownership repair.
     wait_jj_state
+    # Do not inherit the lifecycle lock into the long-lived docker exec. The EXIT trap still
+    # releases it on every failure path before this handoff.
+    policy_lock_release
   fi
   # No command (or a bare `bash`) → an interactive shell. Interactive non-login bash
   # sources ~/.bashrc on startup, which is where claude()/codex() are defined.
@@ -4383,6 +4432,7 @@ main() {
     command_report_lifecycle_guard_end
     ;;
   destroy)
+    command_report_lifecycle_guard_begin
     policy_operation_mode=destroy
     policy_operation_retry=0
     policy_operation_begin || exit 1
@@ -4418,8 +4468,10 @@ main() {
           rc=1
         fi
       fi
+      command_report_lifecycle_guard_end
       exit "$rc"
     fi
+    command_report_lifecycle_guard_end
     ;;
   status)
     command_report_lifecycle_guard_begin
@@ -4454,6 +4506,11 @@ main() {
     shift
     if [ "${1:-}" = init ]; then
       shift
+      # Plain config is read-only; config init is the explicit configuration mutation boundary.
+      if ! policy_config_init_prepare; then
+        command_report_preflight_failure
+        exit "$command_report_exit_status"
+      fi
       if ! cmd_config_init "$@"; then
         lifecycle_report_render failed config-init-failed 1
         exit 1
@@ -4511,6 +4568,12 @@ main() {
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
+    if [ "$policy_decision_mutation_allowed" = 1 ]; then
+      if ! policy_interactive_prepare exec; then
+        command_report_preflight_failure
+        exit "$command_report_exit_status"
+      fi
+    fi
     lifecycle_projection_build
     command_report_derive
     if [ "$command_report_exit_status" != 0 ]; then
@@ -4643,6 +4706,12 @@ main() {
       exit 1
     fi
     [ "$policy_updates_check" = 1 ] && [ "$policy_decision_update_allowed" = 1 ] && check_for_update
+    if [ "$policy_decision_mutation_allowed" = 1 ]; then
+      if ! policy_interactive_prepare exec; then
+        command_report_preflight_failure
+        exit "$command_report_exit_status"
+      fi
+    fi
     lifecycle_projection_build
     command_report_derive
     if [ "$command_report_exit_status" != 0 ]; then
