@@ -46,6 +46,7 @@ RUN sed -i 's/Components: main restricted/Components: main restricted universe/'
           git="$(apt_version git)" \
           jq="$(apt_version jq)" \
           just="$(apt_version just)" \
+          less="$(apt_version less)" \
           moreutils="$(apt_version moreutils)" \
           openssh-client="$(apt_version openssh-client)" \
           ripgrep="$(apt_version ripgrep)" \
