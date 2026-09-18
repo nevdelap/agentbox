@@ -1790,7 +1790,9 @@ jj_config_arg="$(jj_config_env_arg)"
 
 # Fail fast with guidance if the host hasn't got Sysbox registered.
 require_sysbox() {
-  if ! docker info 2>/dev/null | grep -q 'sysbox-runc'; then
+  # Do not use grep -q here: with pipefail, grep can close the pipe after finding the
+  # runtime and make docker info fail with SIGPIPE, producing a false negative.
+  if ! docker info 2>/dev/null | grep -F 'sysbox-runc' >/dev/null; then
     cat >&2 <<EOF
 agentbox: host Docker has no 'sysbox-runc' runtime registered.
 agentbox needs Sysbox installed on the host (a prerequisite, like Docker itself):

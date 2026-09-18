@@ -14,6 +14,9 @@
 # `[[ ${BASH_SOURCE[0]} == ${0} ]]` check, so sourcing them defines the functions WITHOUT
 # running docker / dockerd / chown. This file sources them and pokes the pure functions.
 set -uo pipefail
+# Policy fixtures must satisfy the same private-file contract as real host policy files, even
+# when the caller's umask is permissive (some CI/agent environments use 000).
+umask 077
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -68,6 +71,25 @@ declare -A policy_tier_updates_check policy_resolved_source policy_resolved_labe
 declare -A mount_spec_state mount_spec_source mount_spec_destination policy_input
 # The report tests opt in explicitly; normal launcher use keeps reports disabled by default.
 AGENTBOX_REPORT=1
+
+echo "sysbox runtime detection"
+_saved_sysbox_docker_fn="$(declare -f docker 2>/dev/null || true)"
+docker() {
+  [ "${1:-}" = info ] || return 1
+  printf 'Runtimes: runc sysbox-runc\n'
+  for ((_sysbox_padding = 0; _sysbox_padding < 10000; _sysbox_padding++)); do
+    printf 'padding-%s\n' "$_sysbox_padding"
+  done
+}
+if (require_sysbox) >/dev/null 2>&1; then
+  _sysbox_require_rc=0
+else
+  _sysbox_require_rc=$?
+fi
+assert_eq "require_sysbox drains docker info before matching" 0 "$_sysbox_require_rc"
+unset -f docker
+[ -n "$_saved_sysbox_docker_fn" ] && eval "$_saved_sysbox_docker_fn"
+unset _sysbox_require_rc _saved_sysbox_docker_fn _sysbox_padding
 
 # Expected hash for a project dir, computed the same way compute_names does (sha256[:16]).
 hex16() { printf '%s' "$1" | sha256sum | cut -c1-16; }
