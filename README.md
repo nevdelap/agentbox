@@ -2,7 +2,7 @@
 
 A **confined** Ubuntu container for running **Claude Code**, **Codex**, and
 **GitHub CLI** (`gh`), with the tooling an agent needs: `git`, `jj`, `ssh`,
-`uv`, `just`, `ripgrep`, `jq`, `tmux`, `rustup` (stable toolchain) +
+`uv`, `just`, `ripgrep`, `jq`, `less`, `tmux`, `rustup` (stable toolchain) +
 `cargo-sweep`, and **nested Docker** for running CI tooling. There is
 deliberately **no system python** — use `uv run python`.
 
