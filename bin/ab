@@ -1788,6 +1788,22 @@ fi
 jj_config_arg="$(jj_config_env_arg)"
 [ -n "$jj_config_arg" ] && run_args+=(--env "$jj_config_arg")
 
+# Some runtimes (including Node.js) consult TZ rather than deriving the zone from
+# /etc/localtime. Pass the host's configured zone explicitly so Claude sees local time.
+# Prefer the launching shell's TZ, then the distro's timezone name, then a zoneinfo path
+# encoded in /etc/localtime (common on NixOS).
+host_timezone="${TZ:-}"
+if [ -z "$host_timezone" ] && [ -r /etc/timezone ]; then
+  IFS= read -r host_timezone </etc/timezone || true
+fi
+if [ -z "$host_timezone" ] && [ -e /etc/localtime ]; then
+  host_localtime="$(readlink -f /etc/localtime 2>/dev/null || true)"
+  case "$host_localtime" in
+    */zoneinfo/*) host_timezone="${host_localtime#*/zoneinfo/}" ;;
+  esac
+fi
+[ -n "$host_timezone" ] && run_args+=(--env "TZ=$host_timezone")
+
 # Fail fast with guidance if the host hasn't got Sysbox registered.
 require_sysbox() {
   # Do not use grep -q here: with pipefail, grep can close the pipe after finding the

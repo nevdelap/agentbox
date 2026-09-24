@@ -264,8 +264,8 @@ individual entries in `~/.config/agentbox/mounts` for finer-grained access.
   real image package remains masked at this path)
 - `/nix/store` → `/nix/store` (ro; NixOS only — so workspace `/nix/store` paths
   resolve)
-- `/etc/localtime` → `/etc/localtime` (ro, if present on the host — so
-  in-container time matches the host timezone)
+- `/etc/localtime` → `/etc/localtime` (ro, if present on the host); the host
+  timezone is also passed as `TZ` so runtimes such as Node.js report local time
 - `~/.ssh` → `/home/agentbox/.ssh` (ro; only with `--grant-all-of-dot-ssh`)
 - anything listed in `~/.config/agentbox/mounts` (ro unless the line ends `rw`;
   see
