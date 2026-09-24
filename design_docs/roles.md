@@ -4,6 +4,10 @@ Both Igor and Rufus follow the repository’s
 [coding standards](coding_standards.md), including the 60-column commit-comment
 limits.
 
+When an agent contributes to a change, it must identify itself as a contributor
+in the Jujutsu change description using the repository’s `Co-Authored-By`
+trailer convention. Keep the trailer within the 60-column commit-comment limit.
+
 ## Quiet local verification
 
 - Agents must use `just qformat`, `just qlint`, `just qtest`, and `just qcheck`
