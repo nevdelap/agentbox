@@ -13,7 +13,7 @@
 #
 # Copy to /etc/nixos/sysbox.nix and import from configuration.nix. Apply with:
 # `sudo nixos-rebuild switch`.
-# Source: sysbox-ce_0.7.0-0.linux_amd64.deb (downloads.nestybox.com).
+# Source: sysbox-ce_0.7.1.linux_amd64.deb (GitHub release asset).
 
 {
   lib,
@@ -28,11 +28,11 @@ let
   # re-declared below so ExecStart points at store paths, not /usr/bin.)
   sysboxPkg = pkgs.stdenvNoCC.mkDerivation rec {
     pname = "sysbox-ce";
-    version = "0.7.0";
+    version = "0.7.1";
 
     src = pkgs.fetchurl {
-      url = "https://downloads.nestybox.com/sysbox/releases/v${version}/sysbox-ce_${version}-0.linux_amd64.deb";
-      hash = "sha256-7v8nNnFGe4+jUas9QHCXWUYtwD2fe1ChsgezeYLOQKk=";
+      url = "https://github.com/nestybox/sysbox/releases/download/v${version}/sysbox-ce_${version}.linux_amd64.deb";
+      hash = "sha256-nW1UhPmA0KF/hsSSwSYgFcKvtmKAvblyFbef3moCYcU=";
     };
 
     nativeBuildInputs = [ pkgs.dpkg ];
