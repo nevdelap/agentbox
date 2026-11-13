@@ -6,6 +6,10 @@ A **confined** Ubuntu container for running **Claude Code**, **Codex**, and
 `cargo-sweep`, and **nested Docker** for running CI tooling. There is
 deliberately **no system python** — use `uv run python`.
 
+`just` and `uv` are installed from their latest upstream GitHub releases at
+each `ab rebuild`, matching the release streams checked by production repos'
+`check_just_version.sh` and `check_uv_version.sh` scripts.
+
 This README is mounted read-only at `~/README.md` inside containers started by
 `ab`. Software running in the outer container can identify it by checking the
 root-owned `/etc/agentbox/identity` file, whose contents include `agentbox=1`

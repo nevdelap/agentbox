@@ -45,7 +45,6 @@ RUN sed -i 's/Components: main restricted/Components: main restricted universe/'
           gh="$(apt_version gh)" \
           git="$(apt_version git)" \
           jq="$(apt_version jq)" \
-          just="$(apt_version just)" \
           less="$(apt_version less)" \
           moreutils="$(apt_version moreutils)" \
           openssh-client="$(apt_version openssh-client)" \
@@ -95,9 +94,32 @@ RUN install -m 0755 -d /etc/apt/keyrings \
          docker-compose-plugin="$(apt_version docker-compose-plugin)" \
     && rm -rf /var/lib/apt/lists/*
 
-# --- uv (python is provided by uv on demand — no system python) ------------
-RUN curl -LsSf https://astral.sh/uv/install.sh \
-      | env UV_INSTALL_DIR=/usr/local/bin sh
+# --- just and uv (latest upstream releases; no system python) --------------
+# Keep these on the same upstream release streams as production repos' update
+# scripts. Resolve `releases/latest` at build time so an AgentBox rebuild picks
+# up new releases, and use static musl binaries that run on Ubuntu.
+ARG AGENTBOX_TOOLS_REFRESH=manual-build
+RUN set -eu; \
+    : "$AGENTBOX_TOOLS_REFRESH"; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) target=x86_64-unknown-linux-musl ;; \
+      arm64) target=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported architecture for just/uv: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    just_version="$(curl -fsSI https://github.com/casey/just/releases/latest \
+      | sed -n 's|^[Ll]ocation: .*/tag/||p' | tr -d '\r' | tail -n1)"; \
+    uv_version="$(curl -fsSI https://github.com/astral-sh/uv/releases/latest \
+      | sed -n 's|^[Ll]ocation: .*/tag/||p' | tr -d '\r' | tail -n1)"; \
+    [ -n "$just_version" ] || { echo "could not resolve latest just release" >&2; exit 1; }; \
+    [ -n "$uv_version" ] || { echo "could not resolve latest uv release" >&2; exit 1; }; \
+    tools_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$tools_tmp"' EXIT; \
+    curl -fsSL "https://github.com/casey/just/releases/download/${just_version}/just-${just_version}-${target}.tar.gz" \
+      | tar -xz -C "$tools_tmp" just; \
+    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${uv_version}/uv-${target}.tar.gz" \
+      | tar -xz -C "$tools_tmp" "uv-${target}/uv"; \
+    install -m 0755 "$tools_tmp/just" /usr/local/bin/just; \
+    install -m 0755 "$tools_tmp/uv-${target}/uv" /usr/local/bin/uv
 
 # --- agentbox user matching host uid/gid ------------------------------------
 # The ubuntu:26.04 base ships a built-in `ubuntu` user at uid 1000; remove any

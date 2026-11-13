@@ -1962,7 +1962,7 @@ prune_images() {
 }
 
 build_image() {
-  local force="${1:-}" nocache="${2:-}" mode="${3:-rebuild}" files=() f digest tag log child build_flags
+  local force="${1:-}" nocache="${2:-}" mode="${3:-rebuild}" files=() f digest tag log child build_flags tools_refresh
   [ -f "$CONTEXT/Dockerfile" ] || {
     echo "agentbox: Dockerfile not found at $CONTEXT/Dockerfile" >&2
     exit 1
@@ -1985,16 +1985,16 @@ build_image() {
     # image ID out of the tag this function returns — the cause of the earlier
     # --quiet "invalid reference format" bug.
     build_flags=(--progress=plain)
-    # This digest only tracks OUR OWN file contents + build args — it has no way to know that
-    # `curl .. | bash -s stable` (or --release latest) resolves to a NEWER claude/codex release
-    # than last time. Without --no-cache, Docker's own layer cache reuses that RUN step verbatim
-    # forever (same instruction text = cache hit), so CLAUDE_CHANNEL=stable/CODEX_RELEASE=latest
-    # silently freeze at whatever they resolved to on the very first build on this machine.
+    # This digest only tracks OUR OWN file contents + build args — it has no way to know when an
+    # upstream `latest` release changes. Pass a fresh value for the just/uv layer's cache key on
+    # each image build, while retaining Docker's cache for the earlier system dependency layers.
+    tools_refresh="$(date +%s%N)"
     [ "$nocache" = --no-cache ] && build_flags+=(--no-cache)
     policy_final_mutation_guard "$mode" || return 1
     if ! log="$(docker build "${build_flags[@]}" \
         --build-arg "HOST_UID=$uid" --build-arg "HOST_GID=$(id -g)" \
         --build-arg "AGENTBOX_VERSION=$AB_VERSION" \
+        --build-arg "AGENTBOX_TOOLS_REFRESH=$tools_refresh" \
         -t "$tag" -t "$IMAGE_NAME:latest" "$CONTEXT" 2>&1)"; then
       printf '%s\n' "$log" >&2
       echo "agentbox: image build failed (see above)" >&2
